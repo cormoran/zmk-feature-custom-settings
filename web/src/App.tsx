@@ -219,11 +219,11 @@ export function RPCTestSection() {
           customNotification.payload
         );
         if (
-          notification.kind ===
+          notification.setting?.kind ===
             SettingNotificationKind.SETTING_NOTIFICATION_KIND_LIST_ITEM &&
-          notification.setting
+          notification.setting.setting
         ) {
-          collected.push(notification.setting);
+          collected.push(notification.setting.setting);
           scheduleResolve();
         }
       },

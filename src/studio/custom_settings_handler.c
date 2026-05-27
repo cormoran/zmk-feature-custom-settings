@@ -465,9 +465,11 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
                                       zmk_custom_settings_SettingNotificationKind kind,
                                       bool include_value, uint32_t source) {
     zmk_custom_settings_Notification notification = zmk_custom_settings_Notification_init_zero;
-    notification.kind = kind;
-    notification.has_setting = true;
-    int ret = setting_to_proto(setting, &notification.setting, include_value, source);
+    notification.which_notification_type = zmk_custom_settings_Notification_setting_tag;
+    notification.notification_type.setting.kind = kind;
+    notification.notification_type.setting.has_setting = true;
+    int ret = setting_to_proto(setting, &notification.notification_type.setting.setting,
+                               include_value, source);
     if (ret < 0) {
         return ret;
     }
