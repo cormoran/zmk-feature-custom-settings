@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package zmk.custom_settings;
+
+enum SettingValueType {
+    SETTING_VALUE_TYPE_UNKNOWN = 0;
+    SETTING_VALUE_TYPE_BYTES = 1;
+    SETTING_VALUE_TYPE_INT32 = 2;
+    SETTING_VALUE_TYPE_BOOL = 3;
+    SETTING_VALUE_TYPE_STRING = 4;
+}
+
+enum SettingWriteMode {
+    SETTING_WRITE_MODE_MEMORY = 0;
+    SETTING_WRITE_MODE_PERSIST = 1;
+}
+
+enum SettingConfidentiality {
+    SETTING_CONFIDENTIALITY_DEVICE_PRIVATE = 0;
+    SETTING_CONFIDENTIALITY_RPC_PERSONAL = 1;
+    SETTING_CONFIDENTIALITY_RPC_PUBLIC = 2;
+}
+
+enum SettingPermission {
+    SETTING_PERMISSION_UNSECURE = 0;
+    SETTING_PERMISSION_SECURE = 1;
+}
+
+enum SettingNotificationKind {
+    SETTING_NOTIFICATION_KIND_LIST_ITEM = 0;
+    SETTING_NOTIFICATION_KIND_VALUE_UPDATED = 1;
+    SETTING_NOTIFICATION_KIND_SAVED = 2;
+    SETTING_NOTIFICATION_KIND_DISCARDED = 3;
+    SETTING_NOTIFICATION_KIND_RESET = 4;
+}
+
+message SettingValue {
+    oneof value_type {
+        bytes bytes_value = 1;
+        int32 int32_value = 2;
+        bool bool_value = 3;
+        string string_value = 4;
+    }
+}
+
+message SettingConstraintRange {
+    SettingValue min = 1;
+    SettingValue max = 2;
+}
+
+message SettingConstraintOptions {
+    repeated SettingValue values = 1;
+    repeated string labels = 2;
+}
+
+message SettingConstraintHidUsage {
+    uint32 usage_page = 1;
+    uint32 usage_min = 2;
+    uint32 usage_max = 3;
+}
+
+message SettingConstraintLayerId {}
+
+message SettingConstraintBehaviorId {}
+
+message SettingConstraint {
+    oneof constraint_type {
+        SettingConstraintRange range = 1;
+        SettingConstraintOptions options = 2;
+        SettingConstraintHidUsage hid_usage = 3;
+        SettingConstraintLayerId layer_id = 4;
+        SettingConstraintBehaviorId behavior_id = 5;
+    }
+}
+
+message SettingRef {
+    string subsystem_id = 1;
+    string key = 2;
+    uint32 source = 3;
+}
+
+message SettingScope {
+    string subsystem_id = 1;
+    string key = 2;
+    string key_prefix = 3;
+    uint32 source = 4;
+}
+
+message Setting {
+    string subsystem_id = 1;
+    string key = 2;
+    SettingValueType value_type = 3;
+    SettingConfidentiality confidentiality = 4;
+    SettingPermission read_permission = 5;
+    SettingPermission write_permission = 6;
+    SettingConstraint constraint = 7;
+    bool has_unsaved_value = 8;
+    SettingValue value = 9;
+    uint32 source = 10;
+}
+
+message ListSettingsRequest { SettingScope scope = 1; }
+
+message GetSettingRequest { SettingRef setting = 1; }
+
+message WriteSettingRequest {
+    SettingRef setting = 1;
+    SettingValue value = 2;
+    SettingWriteMode mode = 3;
+}
+
+message SaveSettingsRequest { SettingScope scope = 1; }
+
+message DiscardSettingsRequest { SettingScope scope = 1; }
+
+message ResetSettingsRequest { SettingScope scope = 1; }
+
+message Request {
+    oneof request_type {
+        ListSettingsRequest list_settings = 1;
+        GetSettingRequest get_setting = 2;
+        WriteSettingRequest write_setting = 3;
+        SaveSettingsRequest save_settings = 4;
+        DiscardSettingsRequest discard_settings = 5;
+        ResetSettingsRequest reset_settings = 6;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+message StatusResponse {
+    uint32 affected_count = 1;
+    string message = 2;
+}
+
+message GetSettingResponse { Setting setting = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        StatusResponse status = 2;
+        GetSettingResponse get_setting = 3;
+    }
+}
+
+message Notification {
+    SettingNotificationKind kind = 1;
+    Setting setting = 2;
+}

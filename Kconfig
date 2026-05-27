@@ -1,10 +1,26 @@
-config ZMK_TEMPLATE_FEATURE
-    bool "Enable template feature"
+config ZMK_CUSTOM_SETTINGS
+    bool "Enable custom settings"
+    select SETTINGS
 
-if ZMK_TEMPLATE_FEATURE
+if ZMK_CUSTOM_SETTINGS
 
-config ZMK_TEMPLATE_FEATURE_STUDIO_RPC
-    bool "Enable template feature custom Studio RPC"
+config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
+    int "Maximum custom setting value size"
+    default 64
+
+config ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN
+    int "Maximum custom setting subsystem id length"
+    default 32
+
+config ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN
+    int "Maximum custom setting key length"
+    default 48
+
+config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    bool "Enable custom settings Studio RPC"
     depends on ZMK_STUDIO
+
+config ZMK_CUSTOM_SETTINGS_TEST
+    bool "Enable custom settings self-test"
 
 endif

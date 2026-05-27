@@ -6,26 +6,33 @@ import {
   ZMKCustomSubsystem,
   ZMKAppContext,
 } from "@cormoran/zmk-studio-react-hook";
-import { Request, Response } from "./proto/zmk/template/template";
+import {
+  Request,
+  Response,
+  Setting,
+  SettingValue,
+  SettingValueType,
+  SettingWriteMode,
+} from "./proto/zmk/custom_settings/custom_settings";
 
-export const SUBSYSTEM_IDENTIFIER = "zmk__template";
+export const SUBSYSTEM_IDENTIFIER = "zmk__custom_settings";
 
 function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>🔧 ZMK Module Template</h1>
-        <p>Custom Studio RPC Demo</p>
+        <h1>ZMK Custom Settings</h1>
+        <p>Device settings console</p>
       </header>
 
       <ZMKConnection
         renderDisconnected={({ connect, isLoading, error }) => (
           <section className="card">
             <h2>Device Connection</h2>
-            {isLoading && <p>⏳ Connecting...</p>}
+            {isLoading && <p>Connecting...</p>}
             {error && (
               <div className="error-message">
-                <p>🚨 {error}</p>
+                <p>{error}</p>
               </div>
             )}
             {!isLoading && (
@@ -33,7 +40,7 @@ function App() {
                 className="btn btn-primary"
                 onClick={() => connect(serial_connect)}
               >
-                🔌 Connect Serial
+                Connect Serial
               </button>
             )}
           </section>
@@ -43,7 +50,7 @@ function App() {
             <section className="card">
               <h2>Device Connection</h2>
               <div className="device-info">
-                <h3>✅ Connected to: {deviceName}</h3>
+                <h3>Connected to: {deviceName}</h3>
               </div>
               <button className="btn btn-secondary" onClick={disconnect}>
                 Disconnect
@@ -57,7 +64,7 @@ function App() {
 
       <footer className="app-footer">
         <p>
-          <strong>Template Module</strong> - Customize this for your ZMK module
+          <strong>Settings module</strong>
         </p>
       </footer>
     </div>
@@ -66,7 +73,17 @@ function App() {
 
 export function RPCTestSection() {
   const zmkApp = useContext(ZMKAppContext);
-  const [inputValue, setInputValue] = useState<number>(42);
+  const [subsystemId, setSubsystemId] = useState("test");
+  const [settingKey, setSettingKey] = useState("int_value");
+  const [keyPrefix, setKeyPrefix] = useState("");
+  const [valueType, setValueType] = useState<SettingValueType>(
+    SettingValueType.SETTING_VALUE_TYPE_INT32
+  );
+  const [value, setValue] = useState("10");
+  const [writeMode, setWriteMode] = useState<SettingWriteMode>(
+    SettingWriteMode.SETTING_WRITE_MODE_MEMORY
+  );
+  const [setting, setSetting] = useState<Setting | null>(null);
   const [response, setResponse] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -74,7 +91,34 @@ export function RPCTestSection() {
 
   const subsystem = zmkApp.findSubsystem(SUBSYSTEM_IDENTIFIER);
 
-  const sendSampleRequest = async () => {
+  const settingRef = {
+    subsystemId,
+    key: settingKey,
+    source: 0,
+  };
+
+  const settingScope = {
+    subsystemId,
+    key: settingKey,
+    keyPrefix,
+    source: 0,
+  };
+
+  const parseValue = (): SettingValue => {
+    switch (valueType) {
+      case SettingValueType.SETTING_VALUE_TYPE_BYTES:
+        return { bytesValue: new TextEncoder().encode(value) };
+      case SettingValueType.SETTING_VALUE_TYPE_BOOL:
+        return { boolValue: value === "true" || value === "1" };
+      case SettingValueType.SETTING_VALUE_TYPE_STRING:
+        return { stringValue: value };
+      case SettingValueType.SETTING_VALUE_TYPE_INT32:
+      default:
+        return { int32Value: Number.parseInt(value, 10) || 0 };
+    }
+  };
+
+  const sendRequest = async (request: Request) => {
     if (!zmkApp.state.connection || !subsystem) return;
 
     setIsLoading(true);
@@ -85,22 +129,18 @@ export function RPCTestSection() {
         zmkApp.state.connection,
         subsystem.index
       );
-
-      const request = Request.create({
-        sample: {
-          value: inputValue,
-        },
-      });
-
       const payload = Request.encode(request).finish();
       const responsePayload = await service.callRPC(payload);
 
       if (responsePayload) {
         const resp = Response.decode(responsePayload);
-        console.log("Decoded response:", resp);
-
-        if (resp.sample) {
-          setResponse(resp.sample.value);
+        if (resp.getSetting?.setting) {
+          setSetting(resp.getSetting.setting);
+          setResponse(formatSetting(resp.getSetting.setting));
+        } else if (resp.status) {
+          setResponse(
+            `${resp.status.message || "OK"} (${resp.status.affectedCount})`
+          );
         } else if (resp.error) {
           setResponse(`Error: ${resp.error.message}`);
         }
@@ -115,13 +155,39 @@ export function RPCTestSection() {
     }
   };
 
+  const getSetting = () =>
+    sendRequest(Request.create({ getSetting: { setting: settingRef } }));
+
+  const listSettings = () =>
+    sendRequest(Request.create({ listSettings: { scope: settingScope } }));
+
+  const writeSetting = () =>
+    sendRequest(
+      Request.create({
+        writeSetting: {
+          setting: settingRef,
+          value: parseValue(),
+          mode: writeMode,
+        },
+      })
+    );
+
+  const saveSettings = () =>
+    sendRequest(Request.create({ saveSettings: { scope: settingScope } }));
+
+  const discardSettings = () =>
+    sendRequest(Request.create({ discardSettings: { scope: settingScope } }));
+
+  const resetSettings = () =>
+    sendRequest(Request.create({ resetSettings: { scope: settingScope } }));
+
   if (!subsystem) {
     return (
       <section className="card">
         <div className="warning-message">
           <p>
-            ⚠️ Subsystem "{SUBSYSTEM_IDENTIFIER}" not found. Make sure your
-            firmware includes the template module.
+            Subsystem "{SUBSYSTEM_IDENTIFIER}" not found. Make sure your
+            firmware includes the custom settings module.
           </p>
         </div>
       </section>
@@ -130,35 +196,138 @@ export function RPCTestSection() {
 
   return (
     <section className="card">
-      <h2>RPC Test</h2>
-      <p>Send a sample request to the firmware:</p>
+      <h2>Settings</h2>
 
-      <div className="input-group">
-        <label htmlFor="value-input">Value:</label>
+      <div className="form-grid">
+        <label htmlFor="subsystem-input">Subsystem</label>
+        <input
+          id="subsystem-input"
+          value={subsystemId}
+          onChange={(e) => setSubsystemId(e.target.value)}
+        />
+
+        <label htmlFor="key-input">Key</label>
+        <input
+          id="key-input"
+          value={settingKey}
+          onChange={(e) => setSettingKey(e.target.value)}
+        />
+
+        <label htmlFor="prefix-input">Key Prefix</label>
+        <input
+          id="prefix-input"
+          value={keyPrefix}
+          onChange={(e) => setKeyPrefix(e.target.value)}
+        />
+
+        <label htmlFor="type-input">Type</label>
+        <select
+          id="type-input"
+          value={valueType}
+          onChange={(e) => setValueType(Number(e.target.value))}
+        >
+          <option value={SettingValueType.SETTING_VALUE_TYPE_INT32}>
+            int32
+          </option>
+          <option value={SettingValueType.SETTING_VALUE_TYPE_BOOL}>bool</option>
+          <option value={SettingValueType.SETTING_VALUE_TYPE_STRING}>
+            string
+          </option>
+          <option value={SettingValueType.SETTING_VALUE_TYPE_BYTES}>
+            bytes
+          </option>
+        </select>
+
+        <label htmlFor="value-input">Value</label>
         <input
           id="value-input"
-          type="number"
-          value={inputValue}
-          onChange={(e) => setInputValue(parseInt(e.target.value) || 0)}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
         />
+
+        <label htmlFor="mode-input">Write Mode</label>
+        <select
+          id="mode-input"
+          value={writeMode}
+          onChange={(e) => setWriteMode(Number(e.target.value))}
+        >
+          <option value={SettingWriteMode.SETTING_WRITE_MODE_MEMORY}>
+            memory
+          </option>
+          <option value={SettingWriteMode.SETTING_WRITE_MODE_PERSIST}>
+            persist
+          </option>
+        </select>
       </div>
 
-      <button
-        className="btn btn-primary"
-        disabled={isLoading}
-        onClick={sendSampleRequest}
-      >
-        {isLoading ? "⏳ Sending..." : "📤 Send Request"}
-      </button>
+      <div className="toolbar">
+        <button className="btn" disabled={isLoading} onClick={listSettings}>
+          List
+        </button>
+        <button className="btn" disabled={isLoading} onClick={getSetting}>
+          Read
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={isLoading}
+          onClick={writeSetting}
+        >
+          Write
+        </button>
+        <button className="btn" disabled={isLoading} onClick={saveSettings}>
+          Save
+        </button>
+        <button className="btn" disabled={isLoading} onClick={discardSettings}>
+          Discard
+        </button>
+        <button
+          className="btn btn-danger"
+          disabled={isLoading}
+          onClick={resetSettings}
+        >
+          Reset
+        </button>
+      </div>
+
+      {setting && (
+        <dl className="setting-summary">
+          <div>
+            <dt>Setting</dt>
+            <dd>
+              {setting.subsystemId}/{setting.key}
+            </dd>
+          </div>
+          <div>
+            <dt>Unsaved</dt>
+            <dd>{setting.hasUnsavedValue ? "yes" : "no"}</dd>
+          </div>
+        </dl>
+      )}
 
       {response && (
         <div className="response-box">
-          <h3>Response from Firmware:</h3>
           <pre>{response}</pre>
         </div>
       )}
     </section>
   );
+}
+
+function formatSetting(setting: Setting): string {
+  const value = setting.value ? formatValue(setting.value) : "(hidden)";
+  return `${setting.subsystemId}/${setting.key} = ${value}`;
+}
+
+function formatValue(value: SettingValue): string {
+  if (value.int32Value !== undefined) return `${value.int32Value}`;
+  if (value.boolValue !== undefined) return value.boolValue ? "true" : "false";
+  if (value.stringValue !== undefined) return value.stringValue;
+  if (value.bytesValue !== undefined) {
+    return Array.from(value.bytesValue)
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join(" ");
+  }
+  return "";
 }
 
 export default App;

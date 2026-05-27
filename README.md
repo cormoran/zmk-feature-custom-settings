@@ -1,153 +1,112 @@
-# cormoran's ZMK Module Template for ZMK (with Custom Studio RPC)
+# ZMK Custom Settings
 
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
-[![Test](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml)
 
-This repository contains a template for a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
+This module provides a typed custom settings registry for ZMK modules and an
+unofficial custom ZMK Studio RPC interface for editing those settings from the
+web UI.
 
-It's extended from ZMK official template with [zmk-west-commands](https://github.com/cormoran/zmk-west-commands), test code template, coding agent support, and custom Studio RPC protocol support.
+## Features
 
-## Summary
-
-This template includes:
-
-- **Firmware**: Sample custom Studio RPC handler (`src/studio/template_handler.c`)
-- **Protocol**: Protobuf definition (`proto/zmk/template/template.proto`)
-- **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
-- **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
-
-Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-creation) page for details on how to configure this template.
-
-## More Info
-
-For more info on modules, you can read through through the [Zephyr modules page](https://docs.zephyrproject.org/3.5.0/develop/modules.html) and [ZMK's page on using modules](https://zmk.dev/docs/features/modules). [Zephyr's west manifest page](https://docs.zephyrproject.org/3.5.0/develop/west/manifest.html#west-manifests) may also be of use.
+- Register settings from any module with a subsystem namespace and key.
+- Store typed values: bytes, int32, bool, and string.
+- Validate writes with optional range, option-list, HID usage, layer ID, or
+  behavior ID constraints.
+- Write values in memory, persist them to flash, discard memory changes, or
+  reset persisted values back to defaults.
+- Mark values as device-private, RPC-personal, or RPC-public.
+- Require Studio unlock independently for reads and writes.
+- Notify Studio clients when values change.
 
 ## Module User Guide
 
-1. Add dependency to your `config/west.yml`. Note: this module requires a patched ZMK with custom Studio RPC support.
+Add the module to `config/west.yml`. This module uses the custom Studio RPC
+support from cormoran's ZMK branch.
 
-   ```yml
-   manifest:
-       remotes:
-           ...
-           - name: cormoran
-           url-base: https://github.com/cormoran
-       projects:
-           ...
-           - name: zmk-module-template
-           remote: cormoran
-           revision: main+custom-studio-protocol # or latest commit hash
-           # import: true # if this module has other dependencies
-           ...
-           # Required: patched ZMK with custom Studio RPC support
-           - name: zmk
-           remote: cormoran
-           revision: main+custom-studio-protocol
-           import:
-               file: app/west.yml
-   ```
+```yml
+manifest:
+  remotes:
+    - name: cormoran
+      url-base: https://github.com/cormoran
+  projects:
+    - name: zmk-feature-custom-settings
+      remote: cormoran
+      revision: main
+    - name: zmk
+      remote: cormoran
+      revision: main+custom-studio-protocol
+      import:
+        file: app/west.yml
+```
 
-2. Enable flags in your `config/<shield>.conf`
+Enable the module in your keyboard config:
 
-   ```conf
-   CONFIG_ZMK_TEMPLATE_FEATURE=y
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS=y
 
-   # Optionally enable custom Studio RPC
-   CONFIG_ZMK_STUDIO=y
-   CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
-   ```
+# Optional: expose settings through the custom Studio RPC subsystem.
+CONFIG_ZMK_STUDIO=y
+CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
+```
 
-3. Implement your custom protocol by editing:
-   - `proto/zmk/template/template.proto` — message types
-   - `src/studio/template_handler.c` — firmware RPC handler
-   - `web/src/App.tsx` — web UI
+Register a setting from another module:
 
-### Web UI
+```c
+#include <zmk/custom_settings.h>
 
-See [web/README.md](./web/README.md) for web UI development instructions.
+ZMK_CUSTOM_SETTING_DEFINE(my_speed_setting, "my_module", "speed",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                          ZMK_CUSTOM_SETTING_VALUE_INT32(10),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                          ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+```
 
-### Publishing Web UI
+Read or update it from firmware:
 
-**GitHub Pages**: Visit `Actions > Test and Build Web UI > Run workflow` to deploy to `https://<account>.github.io/<repo>/`.
+```c
+struct zmk_custom_setting_value value;
+const struct zmk_custom_setting *setting =
+    zmk_custom_setting_find("my_module", "speed");
 
-**Cloudflare Workers (PR previews)**: Configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
+zmk_custom_setting_read(setting, &value);
+zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(20),
+                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+zmk_custom_setting_save(setting);
+```
 
-## Module Development Guide
+The custom Studio subsystem identifier is `zmk__custom_settings`.
 
-### Setup for running test
+## Web UI
 
-#### Option0: Dev container (recommended)
-
-Open this repository in VS Code with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers). The container automatically initializes the west workspace using the isolated layout.
-
-#### Option1: west workspace directory layout
-
-Set west topdir as parent of repository root and download dependencies under `../`.
-This layout is useful to reduce disk usage by sharing dependencies with other zephyr modules.
-The build result is located in `../build`.
+The web UI in `web/` connects to a keyboard over serial, finds the
+`zmk__custom_settings` subsystem, and sends typed read/write/save/discard/reset
+requests.
 
 ```bash
-mkdir west-workspace
-cd west-workspace # this directory becomes west workspace root (topdir)
-git clone <this repository>
-# rm -r .west # if exists to reset workspace
-west init -l . --mf west/west-test-workspace.yml
-west update --narrow
-west zephyr-export
+cd web
+npm install
+npm run dev
 ```
 
-#### Option2: isolated directory layout
+See [web/README.md](./web/README.md) for web development commands.
 
-Set west topdir as repository root and download dependencies under `./dependencies`.
-This layout is useful if you don't want to share dependencies to other zephyr modules.
-Dev container and github actions uses this layout.
-The build result is located in `./build`.
-
-```bash
-git clone <this repository>
-cd <cloned directory>
-west init -l west --mf west-test-isolated.yml
-west update --narrow
-west zephyr-export
-```
-
-### Pre-commit
-
-Every commit need to pass pre-commit verification. The verification contains formatting code and running tests.
-
-```
-pip install pre-commit
-pre-commit install
-
-# Run pre-commit manually
-pre-commit run --all-files
-# Run for git staged files
-pre-commit run
-```
-
-### Running Test
+## Development
 
 ```bash
 # Run unit test + build test and verify the results
 python3 -m unittest
+
 # Run build test directly
 west zmk-build tests/zmk-config
+
 # Run unit test directly
 west zmk-test tests -m .
+
 # Run web tests
 cd web && npm test
+
+# Run lint/test hooks before commit
+pre-commit run --all-files
 ```
-
-### Sync changes from template
-
-Run `Actions > Sync Changes in Template > Run workflow` to get the latest template changes as a pull request.
-
-If the template contains changes in `.github/workflows/*`, register a GitHub personal access token as `GH_TOKEN` repository secret (`repo` + `workflow` scopes).
-
-### Coding agent on actions
-
-Actions for github copilot and claude are available.
-
-- Mention `@copilot`
-- Setup `ANTHROPIC_API_KEY` secret and mention `@claude`
-  - Or fix [claude.yml](./github/workflows/claude.yml) to use `CLAUDE_CODE_OAUTH_TOKEN`

@@ -1,0 +1,578 @@
+/*
+ * Copyright (c) 2026 The ZMK Contributors
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <zephyr/init.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
+
+#include <zmk/custom_settings.h>
+
+LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+
+ZMK_EVENT_IMPL(zmk_custom_setting_changed);
+
+#define SETTINGS_SUBTREE "custom_settings"
+
+static K_MUTEX_DEFINE(settings_lock);
+
+static size_t bounded_strlen(const char *str, size_t max_len) {
+    size_t len = 0;
+    while (len < max_len && str[len] != '\0') {
+        len++;
+    }
+
+    return len;
+}
+
+static bool value_equals(const struct zmk_custom_setting_value *a,
+                         const struct zmk_custom_setting_value *b) {
+    if (a->type != b->type) {
+        return false;
+    }
+
+    switch (a->type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+        return a->size == b->size && memcmp(a->bytes_value, b->bytes_value, a->size) == 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        return a->int32_value == b->int32_value;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        return a->bool_value == b->bool_value;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        return strncmp(a->string_value, b->string_value,
+                       CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) == 0;
+    default:
+        return false;
+    }
+}
+
+static void copy_value(struct zmk_custom_setting_value *dest,
+                       const struct zmk_custom_setting_value *src) {
+    *dest = *src;
+    if (dest->type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+        dest->string_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE] = '\0';
+        dest->size = bounded_strlen(dest->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+    }
+}
+
+static const struct zmk_custom_setting_value *
+effective_value(const struct zmk_custom_setting *setting) {
+    if (setting->temporary_active) {
+        return &setting->temporary_value;
+    }
+
+    return &setting->memory_value;
+}
+
+static void raise_setting_changed(const struct zmk_custom_setting *setting,
+                                  enum zmk_custom_setting_changed_kind kind) {
+    raise_zmk_custom_setting_changed((struct zmk_custom_setting_changed){
+        .setting = setting,
+        .kind = kind,
+        .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+    });
+}
+
+bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting, const char *subsystem_id,
+                                const char *key, const char *key_prefix) {
+    if (subsystem_id && subsystem_id[0] != '\0' &&
+        strncmp(setting->subsystem_id, subsystem_id,
+                CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
+        return false;
+    }
+
+    if (key && key[0] != '\0' &&
+        strncmp(setting->key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) != 0) {
+        return false;
+    }
+
+    if (key_prefix && key_prefix[0] != '\0' &&
+        strncmp(setting->key, key_prefix, strlen(key_prefix)) != 0) {
+        return false;
+    }
+
+    return true;
+}
+
+const struct zmk_custom_setting *zmk_custom_setting_find(const char *subsystem_id,
+                                                         const char *key) {
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (zmk_custom_setting_matches(setting, subsystem_id, key, NULL)) {
+            return setting;
+        }
+    }
+
+    return NULL;
+}
+
+static int value_type_validate(const struct zmk_custom_setting *setting,
+                               const struct zmk_custom_setting_value *value) {
+    if (setting->value_type != value->type) {
+        return -EINVAL;
+    }
+
+    switch (value->type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+        return value->size <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? 0 : -EMSGSIZE;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        return value->size <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? 0 : -EMSGSIZE;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int compare_values(const struct zmk_custom_setting_value *a,
+                          const struct zmk_custom_setting_value *b) {
+    if (a->type != b->type) {
+        return 0;
+    }
+
+    switch (a->type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        return (a->int32_value > b->int32_value) - (a->int32_value < b->int32_value);
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        return (a->bool_value > b->bool_value) - (a->bool_value < b->bool_value);
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        return strncmp(a->string_value, b->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES: {
+        size_t len = MIN(a->size, b->size);
+        int cmp = memcmp(a->bytes_value, b->bytes_value, len);
+        if (cmp != 0) {
+            return cmp;
+        }
+        return (a->size > b->size) - (a->size < b->size);
+    }
+    default:
+        return 0;
+    }
+}
+
+int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
+                                const struct zmk_custom_setting_value *value) {
+    if (!setting || !value) {
+        return -EINVAL;
+    }
+
+    int ret = value_type_validate(setting, value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    switch (setting->constraint.type) {
+    case ZMK_CUSTOM_SETTING_CONSTRAINT_NONE:
+    case ZMK_CUSTOM_SETTING_CONSTRAINT_HID_USAGE:
+    case ZMK_CUSTOM_SETTING_CONSTRAINT_LAYER_ID:
+    case ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID:
+        return 0;
+    case ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE:
+        if (compare_values(value, &setting->constraint.range.min) < 0 ||
+            compare_values(value, &setting->constraint.range.max) > 0) {
+            return -ERANGE;
+        }
+        return 0;
+    case ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS:
+        for (size_t i = 0; i < setting->constraint.options.count; i++) {
+            if (value_equals(value, &setting->constraint.options.values[i])) {
+                return 0;
+            }
+        }
+        return -EINVAL;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int setting_storage_name(const struct zmk_custom_setting *setting, char *name,
+                                size_t name_size) {
+    int ret =
+        snprintf(name, name_size, SETTINGS_SUBTREE "/%s/%s", setting->subsystem_id, setting->key);
+    if (ret < 0 || ret >= name_size) {
+        return -ENAMETOOLONG;
+    }
+
+    return 0;
+}
+
+static int value_to_storage(const struct zmk_custom_setting_value *value, const void **data,
+                            size_t *len) {
+    switch (value->type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+        *data = value->bytes_value;
+        *len = value->size;
+        return 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        *data = &value->int32_value;
+        *len = sizeof(value->int32_value);
+        return 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        *data = &value->bool_value;
+        *len = sizeof(value->bool_value);
+        return 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        *data = value->string_value;
+        *len = bounded_strlen(value->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int save_setting_locked(struct zmk_custom_setting *setting) {
+    char name[SETTINGS_MAX_NAME_LEN];
+    int ret = setting_storage_name(setting, name, sizeof(name));
+    if (ret < 0) {
+        return ret;
+    }
+
+    const void *data;
+    size_t len;
+    ret = value_to_storage(&setting->memory_value, &data, &len);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = settings_save_one(name, data, len);
+    if (ret < 0) {
+        return ret;
+    }
+
+    copy_value(&setting->persistent_value, &setting->memory_value);
+    setting->has_persistent_value = true;
+    return 0;
+}
+
+int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
+                            struct zmk_custom_setting_value *value) {
+    if (!setting || !value) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    copy_value(value, effective_value(setting));
+    k_mutex_unlock(&settings_lock);
+
+    return 0;
+}
+
+int zmk_custom_setting_read_by_key(const char *subsystem_id, const char *key,
+                                   struct zmk_custom_setting_value *value) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find(subsystem_id, key);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    return zmk_custom_setting_read(setting, value);
+}
+
+int zmk_custom_setting_write(const struct zmk_custom_setting *const_setting,
+                             const struct zmk_custom_setting_value *value,
+                             enum zmk_custom_setting_write_mode mode) {
+    if (!const_setting || !value) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+    int ret = zmk_custom_setting_validate(setting, value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+
+    switch (mode) {
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY:
+        copy_value(&setting->temporary_value, value);
+        setting->temporary_active = true;
+        break;
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY:
+        copy_value(&setting->memory_value, value);
+        setting->temporary_active = false;
+        break;
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST:
+        copy_value(&setting->memory_value, value);
+        setting->temporary_active = false;
+        ret = save_setting_locked(setting);
+        break;
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+    k_mutex_unlock(&settings_lock);
+
+    if (ret == 0) {
+        raise_setting_changed(setting, mode == ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+                                           ? ZMK_CUSTOM_SETTING_CHANGED_SAVED
+                                           : ZMK_CUSTOM_SETTING_CHANGED_VALUE_UPDATED);
+    }
+
+    return ret;
+}
+
+int zmk_custom_setting_write_by_key(const char *subsystem_id, const char *key,
+                                    const struct zmk_custom_setting_value *value,
+                                    enum zmk_custom_setting_write_mode mode) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find(subsystem_id, key);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    return zmk_custom_setting_write(setting, value, mode);
+}
+
+int zmk_custom_setting_save(const struct zmk_custom_setting *const_setting) {
+    if (!const_setting) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    setting->temporary_active = false;
+    int ret = save_setting_locked(setting);
+    k_mutex_unlock(&settings_lock);
+
+    if (ret == 0) {
+        raise_setting_changed(setting, ZMK_CUSTOM_SETTING_CHANGED_SAVED);
+    }
+
+    return ret;
+}
+
+int zmk_custom_setting_discard(const struct zmk_custom_setting *const_setting) {
+    if (!const_setting) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    copy_value(&setting->memory_value, setting->has_persistent_value ? &setting->persistent_value
+                                                                     : &setting->default_value);
+    setting->temporary_active = false;
+    k_mutex_unlock(&settings_lock);
+
+    raise_setting_changed(setting, ZMK_CUSTOM_SETTING_CHANGED_DISCARDED);
+    return 0;
+}
+
+int zmk_custom_setting_reset(const struct zmk_custom_setting *const_setting) {
+    if (!const_setting) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+    char name[SETTINGS_MAX_NAME_LEN];
+    int ret = setting_storage_name(setting, name, sizeof(name));
+    if (ret < 0) {
+        return ret;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    ret = settings_delete(name);
+    if (ret == -ENOENT) {
+        ret = 0;
+    }
+
+    if (ret == 0) {
+        copy_value(&setting->persistent_value, &setting->default_value);
+        copy_value(&setting->memory_value, &setting->default_value);
+        setting->has_persistent_value = false;
+        setting->temporary_active = false;
+    }
+    k_mutex_unlock(&settings_lock);
+
+    if (ret == 0) {
+        raise_setting_changed(setting, ZMK_CUSTOM_SETTING_CHANGED_RESET);
+    }
+
+    return ret;
+}
+
+int zmk_custom_setting_rollback_temporary(const struct zmk_custom_setting *const_setting) {
+    if (!const_setting) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    setting->temporary_active = false;
+    k_mutex_unlock(&settings_lock);
+
+    raise_setting_changed(setting, ZMK_CUSTOM_SETTING_CHANGED_VALUE_UPDATED);
+    return 0;
+}
+
+static int apply_scope(const char *subsystem_id, const char *key, const char *key_prefix,
+                       uint32_t *affected_count,
+                       int (*callback)(const struct zmk_custom_setting *)) {
+    uint32_t count = 0;
+    int first_error = 0;
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (!zmk_custom_setting_matches(setting, subsystem_id, key, key_prefix)) {
+            continue;
+        }
+
+        int ret = callback(setting);
+        if (ret < 0 && first_error == 0) {
+            first_error = ret;
+            continue;
+        }
+
+        if (ret == 0) {
+            count++;
+        }
+    }
+
+    if (affected_count) {
+        *affected_count = count;
+    }
+
+    return first_error;
+}
+
+int zmk_custom_settings_save_scope(const char *subsystem_id, const char *key,
+                                   const char *key_prefix, uint32_t *affected_count) {
+    return apply_scope(subsystem_id, key, key_prefix, affected_count, zmk_custom_setting_save);
+}
+
+int zmk_custom_settings_discard_scope(const char *subsystem_id, const char *key,
+                                      const char *key_prefix, uint32_t *affected_count) {
+    return apply_scope(subsystem_id, key, key_prefix, affected_count, zmk_custom_setting_discard);
+}
+
+int zmk_custom_settings_reset_scope(const char *subsystem_id, const char *key,
+                                    const char *key_prefix, uint32_t *affected_count) {
+    return apply_scope(subsystem_id, key, key_prefix, affected_count, zmk_custom_setting_reset);
+}
+
+bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setting) {
+    if (!setting) {
+        return false;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    bool has_unsaved = setting->temporary_active ||
+                       !value_equals(&setting->memory_value, setting->has_persistent_value
+                                                                 ? &setting->persistent_value
+                                                                 : &setting->default_value);
+    k_mutex_unlock(&settings_lock);
+
+    return has_unsaved;
+}
+
+static int value_from_storage(struct zmk_custom_setting *setting, const void *data, size_t len) {
+    struct zmk_custom_setting_value value = {.type = setting->value_type};
+
+    switch (setting->value_type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+        if (len > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+            return -EMSGSIZE;
+        }
+        value.size = len;
+        memcpy(value.bytes_value, data, len);
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        if (len != sizeof(value.int32_value)) {
+            return -EINVAL;
+        }
+        memcpy(&value.int32_value, data, sizeof(value.int32_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        if (len != sizeof(value.bool_value)) {
+            return -EINVAL;
+        }
+        memcpy(&value.bool_value, data, sizeof(value.bool_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        if (len > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+            return -EMSGSIZE;
+        }
+        value.size = len;
+        memcpy(value.string_value, data, len);
+        value.string_value[len] = '\0';
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    int ret = zmk_custom_setting_validate(setting, &value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    copy_value(&setting->persistent_value, &value);
+    copy_value(&setting->memory_value, &value);
+    setting->has_persistent_value = true;
+    setting->temporary_active = false;
+    return 0;
+}
+
+static int custom_settings_handle_set(const char *name, size_t len, settings_read_cb read_cb,
+                                      void *cb_arg) {
+    const char *next;
+    char subsystem_id[CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN];
+
+    int match_len = settings_name_next(name, &next);
+    if (match_len <= 0 || match_len >= sizeof(subsystem_id) || !next) {
+        return -ENOENT;
+    }
+
+    memcpy(subsystem_id, name, match_len);
+    subsystem_id[match_len] = '\0';
+
+    struct zmk_custom_setting *setting =
+        (struct zmk_custom_setting *)zmk_custom_setting_find(subsystem_id, next);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    uint8_t data[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
+    if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32) {
+        len = sizeof(int32_t);
+    } else if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL) {
+        len = sizeof(bool);
+    }
+
+    if (len > sizeof(data)) {
+        return -EMSGSIZE;
+    }
+
+    ssize_t read = read_cb(cb_arg, data, len);
+    if (read < 0) {
+        return read;
+    }
+
+    return value_from_storage(setting, data, read);
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(custom_settings, SETTINGS_SUBTREE, NULL, custom_settings_handle_set,
+                               NULL, NULL);
+
+static int custom_settings_init(void) {
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        copy_value(&setting->persistent_value, &setting->default_value);
+        copy_value(&setting->memory_value, &setting->default_value);
+        setting->has_persistent_value = false;
+        setting->temporary_active = false;
+        setting->initialized = true;
+    }
+
+    return 0;
+}
+
+SYS_INIT(custom_settings_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

@@ -19,10 +19,12 @@ describe("RPCTestSection Component", () => {
         </ZMKAppProvider>
       );
 
-      expect(screen.getByText(/RPC Test/i)).toBeInTheDocument();
-      expect(screen.getByText(/Send a sample request/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/Value:/i)).toBeInTheDocument();
-      expect(screen.getByText(/Send Request/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Settings" })
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText(/Subsystem/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Key$/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Write" })).toBeInTheDocument();
     });
 
     it("should show default input value", () => {
@@ -36,8 +38,8 @@ describe("RPCTestSection Component", () => {
         </ZMKAppProvider>
       );
 
-      const input = screen.getByLabelText(/Value:/i) as HTMLInputElement;
-      expect(input.value).toBe("42");
+      const input = screen.getByLabelText(/Value/i) as HTMLInputElement;
+      expect(input.value).toBe("10");
     });
   });
 
@@ -55,11 +57,11 @@ describe("RPCTestSection Component", () => {
       );
 
       expect(
-        screen.getByText(/Subsystem "zmk__template" not found/i)
+        screen.getByText(/Subsystem "zmk__custom_settings" not found/i)
       ).toBeInTheDocument();
       expect(
         screen.getByText(
-          /Make sure your firmware includes the template module/i
+          /Make sure your firmware includes the custom settings module/i
         )
       ).toBeInTheDocument();
     });
