@@ -20,6 +20,21 @@ config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     bool "Enable custom settings Studio RPC"
     depends on ZMK_STUDIO
 
+config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
+    bool "Relay custom settings RPC across split halves"
+    depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    depends on ZMK_SPLIT_RELAY_EVENT
+    help
+      Relays encoded custom settings RPC requests to split peripherals and
+      relays encoded setting notifications back to the central side. Increase
+      CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN if your request or notification
+      payloads exceed the default split relay event payload size.
+
+config ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
+    int "Maximum encoded custom settings relay payload size"
+    default 192
+    depends on ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 

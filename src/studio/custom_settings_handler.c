@@ -18,6 +18,10 @@
 #include <zmk/custom_settings/custom_settings.pb.h>
 #include <zmk/studio/core.h>
 #include <zmk/studio/custom.h>
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+#include <zmk/split/central.h>
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -33,6 +37,39 @@ ZMK_RPC_CUSTOM_SUBSYSTEM(zmk__custom_settings, &custom_settings_meta,
                          custom_settings_rpc_handle_request);
 
 ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(zmk__custom_settings, zmk_custom_settings_Response);
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+struct zmk_custom_settings_relay_request {
+    uint8_t source;
+    uint8_t payload_size;
+    uint8_t payload[CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
+};
+
+struct zmk_custom_settings_relay_notification {
+    uint8_t source;
+    uint8_t payload_size;
+    uint8_t payload[CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
+};
+
+BUILD_ASSERT(sizeof(struct zmk_custom_settings_relay_request) <=
+                 CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for custom settings relay "
+             "requests");
+BUILD_ASSERT(sizeof(struct zmk_custom_settings_relay_notification) <=
+                 CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for custom settings relay "
+             "notifications");
+
+ZMK_EVENT_DECLARE(zmk_custom_settings_relay_request);
+ZMK_EVENT_DECLARE(zmk_custom_settings_relay_notification);
+ZMK_EVENT_IMPL(zmk_custom_settings_relay_request);
+ZMK_EVENT_IMPL(zmk_custom_settings_relay_notification);
+
+ZMK_RELAY_EVENT_HANDLE(zmk_custom_settings_relay_request, csr, source);
+ZMK_RELAY_EVENT_HANDLE(zmk_custom_settings_relay_notification, csn, source);
+ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(zmk_custom_settings_relay_request, csr, source);
+ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(zmk_custom_settings_relay_notification, csn, source);
+#endif
 
 static bool is_unlocked(void) {
     return zmk_studio_core_get_lock_state() == ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED;
@@ -292,20 +329,64 @@ static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *
         stream, field, zmk_custom_settings_Notification_fields, notification);
 }
 
-static int raise_setting_notification(const struct zmk_custom_setting *setting,
-                                      zmk_custom_settings_SettingNotificationKind kind,
-                                      bool include_value, uint32_t source) {
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+static bool encode_raw_payload(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    const struct zmk_custom_settings_relay_notification *notification =
+        (const struct zmk_custom_settings_relay_notification *)*arg;
+    if (!pb_encode_tag_for_field(stream, field)) {
+        return false;
+    }
+
+    return pb_encode_string(stream, notification->payload, notification->payload_size);
+}
+
+static int raise_encoded_studio_notification(
+    const struct zmk_custom_settings_relay_notification *notification) {
     int index = custom_subsystem_index();
     if (index < 0) {
         return index;
     }
 
+    pb_callback_t payload = {
+        .funcs.encode = encode_raw_payload,
+        .arg = (void *)notification,
+    };
+
+    return raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
+        .subsystem_index = (uint8_t)index,
+        .encode_payload = payload,
+    });
+}
+#endif
+
+static int raise_setting_notification(const struct zmk_custom_setting *setting,
+                                      zmk_custom_settings_SettingNotificationKind kind,
+                                      bool include_value, uint32_t source) {
     zmk_custom_settings_Notification notification = zmk_custom_settings_Notification_init_zero;
     notification.kind = kind;
     notification.has_setting = true;
     int ret = setting_to_proto(setting, &notification.setting, include_value, source);
     if (ret < 0) {
         return ret;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    struct zmk_custom_settings_relay_notification relay_notification = {
+        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
+    };
+    pb_ostream_t stream =
+        pb_ostream_from_buffer(relay_notification.payload, sizeof(relay_notification.payload));
+    if (!pb_encode(&stream, zmk_custom_settings_Notification_fields, &notification)) {
+        LOG_WRN("Failed to encode custom settings relay notification: %s", PB_GET_ERROR(&stream));
+        return -EIO;
+    }
+    relay_notification.payload_size = stream.bytes_written;
+    return raise_zmk_custom_settings_relay_notification(relay_notification);
+#else
+    int index = custom_subsystem_index();
+    if (index < 0) {
+        return index;
     }
 
     pb_callback_t payload = {
@@ -317,6 +398,7 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
         .subsystem_index = (uint8_t)index,
         .encode_payload = payload,
     });
+#endif
 }
 
 static bool can_include_value(const struct zmk_custom_setting *setting) {
@@ -457,6 +539,69 @@ static int handle_scope_mutation(const zmk_custom_settings_SettingScope *scope,
     return 0;
 }
 
+static bool should_relay_to_peripherals(const zmk_custom_settings_Request *req) {
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    switch (req->which_request_type) {
+    case zmk_custom_settings_Request_list_settings_tag:
+        return req->request_type.list_settings.scope.source == ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    case zmk_custom_settings_Request_save_settings_tag:
+        return req->request_type.save_settings.scope.source == ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    case zmk_custom_settings_Request_discard_settings_tag:
+        return req->request_type.discard_settings.scope.source == ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    case zmk_custom_settings_Request_reset_settings_tag:
+        return req->request_type.reset_settings.scope.source == ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    case zmk_custom_settings_Request_write_setting_tag:
+        return req->request_type.write_setting.setting.source == ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    default:
+        return false;
+    }
+#else
+    return false;
+#endif
+}
+
+static int relay_request_to_peripherals(const zmk_custom_CallRequest *raw_request) {
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    if (raw_request->payload.size > CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE) {
+        return -EMSGSIZE;
+    }
+
+    struct zmk_custom_settings_relay_request relay_request = {
+        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
+    };
+    relay_request.payload_size = raw_request->payload.size;
+    memcpy(relay_request.payload, raw_request->payload.bytes, raw_request->payload.size);
+    return raise_zmk_custom_settings_relay_request(relay_request);
+#else
+    return 0;
+#endif
+}
+
+static int process_request(const zmk_custom_settings_Request *req,
+                           zmk_custom_settings_Response *resp) {
+    switch (req->which_request_type) {
+    case zmk_custom_settings_Request_list_settings_tag:
+        return handle_list_settings(&req->request_type.list_settings, resp);
+    case zmk_custom_settings_Request_get_setting_tag:
+        return handle_get_setting(&req->request_type.get_setting, resp);
+    case zmk_custom_settings_Request_write_setting_tag:
+        return handle_write_setting(&req->request_type.write_setting, resp);
+    case zmk_custom_settings_Request_save_settings_tag:
+        return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
+                                     zmk_custom_settings_save_scope);
+    case zmk_custom_settings_Request_discard_settings_tag:
+        return handle_scope_mutation(&req->request_type.discard_settings.scope, resp,
+                                     "Settings discarded", zmk_custom_settings_discard_scope);
+    case zmk_custom_settings_Request_reset_settings_tag:
+        return handle_scope_mutation(&req->request_type.reset_settings.scope, resp,
+                                     "Settings reset", zmk_custom_settings_reset_scope);
+    default:
+        return -ENOTSUP;
+    }
+}
+
 static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
                                                pb_callback_t *encode_response) {
     zmk_custom_settings_Response *resp =
@@ -471,32 +616,9 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
         return true;
     }
 
-    int ret = 0;
-    switch (req.which_request_type) {
-    case zmk_custom_settings_Request_list_settings_tag:
-        ret = handle_list_settings(&req.request_type.list_settings, resp);
-        break;
-    case zmk_custom_settings_Request_get_setting_tag:
-        ret = handle_get_setting(&req.request_type.get_setting, resp);
-        break;
-    case zmk_custom_settings_Request_write_setting_tag:
-        ret = handle_write_setting(&req.request_type.write_setting, resp);
-        break;
-    case zmk_custom_settings_Request_save_settings_tag:
-        ret = handle_scope_mutation(&req.request_type.save_settings.scope, resp, "Settings saved",
-                                    zmk_custom_settings_save_scope);
-        break;
-    case zmk_custom_settings_Request_discard_settings_tag:
-        ret = handle_scope_mutation(&req.request_type.discard_settings.scope, resp,
-                                    "Settings discarded", zmk_custom_settings_discard_scope);
-        break;
-    case zmk_custom_settings_Request_reset_settings_tag:
-        ret = handle_scope_mutation(&req.request_type.reset_settings.scope, resp, "Settings reset",
-                                    zmk_custom_settings_reset_scope);
-        break;
-    default:
-        ret = -ENOTSUP;
-        break;
+    int ret = process_request(&req, resp);
+    if (ret == 0 && should_relay_to_peripherals(&req)) {
+        ret = relay_request_to_peripherals(raw_request);
     }
 
     if (ret < 0) {
@@ -534,3 +656,49 @@ static int setting_changed_listener(const zmk_event_t *eh) {
 
 ZMK_LISTENER(custom_settings_studio, setting_changed_listener);
 ZMK_SUBSCRIPTION(custom_settings_studio, zmk_custom_setting_changed);
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+static int relay_request_listener(const zmk_event_t *eh) {
+    const struct zmk_custom_settings_relay_request *ev = as_zmk_custom_settings_relay_request(eh);
+    if (!ev) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    if (ev->source == ZMK_RELAY_EVENT_SOURCE_SELF) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    zmk_custom_settings_Request req = zmk_custom_settings_Request_init_zero;
+    pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
+    if (!pb_decode(&stream, zmk_custom_settings_Request_fields, &req)) {
+        LOG_WRN("Failed to decode relayed custom settings request: %s", PB_GET_ERROR(&stream));
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    zmk_custom_settings_Response resp = zmk_custom_settings_Response_init_zero;
+    int ret = process_request(&req, &resp);
+    if (ret < 0) {
+        LOG_WRN("Relayed custom settings request failed: %d", ret);
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+static int relay_notification_listener(const zmk_event_t *eh) {
+    const struct zmk_custom_settings_relay_notification *ev =
+        as_zmk_custom_settings_relay_notification(eh);
+    if (!ev) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    if (ev->source == ZMK_RELAY_EVENT_SOURCE_SELF) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    raise_encoded_studio_notification(ev);
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(custom_settings_relay_request, relay_request_listener);
+ZMK_SUBSCRIPTION(custom_settings_relay_request, zmk_custom_settings_relay_request);
+ZMK_LISTENER(custom_settings_relay_notification, relay_notification_listener);
+ZMK_SUBSCRIPTION(custom_settings_relay_notification, zmk_custom_settings_relay_notification);
+#endif

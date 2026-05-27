@@ -49,6 +49,16 @@ CONFIG_ZMK_STUDIO=y
 CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
 ```
 
+For split keyboards, enable ZMK's relay-event transport on both halves and size
+the relay payload for the encoded protobuf messages you expect to relay:
+
+```conf
+CONFIG_ZMK_SPLIT_RELAY_EVENT=y
+CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN=4
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=224
+CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
+```
+
 Register a setting from another module:
 
 ```c
