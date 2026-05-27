@@ -9,12 +9,12 @@ zmk.custom_settings.SettingConstraintOptions.values max_count:8
 zmk.custom_settings.SettingConstraintOptions.labels max_count:8
 zmk.custom_settings.SettingConstraintOptions.labels max_size:32
 
-zmk.custom_settings.SettingRef.subsystem_id max_size:32
+zmk.custom_settings.SettingRef.custom_subsystem_id max_size:32
 zmk.custom_settings.SettingRef.key max_size:48
-zmk.custom_settings.SettingScope.subsystem_id max_size:32
+zmk.custom_settings.SettingScope.custom_subsystem_id max_size:32
 zmk.custom_settings.SettingScope.key max_size:48
 zmk.custom_settings.SettingScope.key_prefix max_size:48
-zmk.custom_settings.Setting.subsystem_id max_size:32
+zmk.custom_settings.Setting.custom_subsystem_id max_size:32
 zmk.custom_settings.Setting.key max_size:48
 
 zmk.custom_settings.ErrorResponse.message max_size:96

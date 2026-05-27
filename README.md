@@ -8,7 +8,7 @@ web UI.
 
 ## Features
 
-- Register settings from any module with a subsystem namespace and key.
+- Register settings from any module with a custom subsystem namespace and key.
 - Store typed values: bytes, int32, bool, string, and fixed-size arrays of
   those scalar types.
 - Validate writes with optional range, option-list, HID usage, layer ID, or

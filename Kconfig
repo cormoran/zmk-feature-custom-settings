@@ -8,8 +8,8 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum custom setting value size"
     default 64
 
-config ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN
-    int "Maximum custom setting subsystem id length"
+config ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN
+    int "Maximum custom subsystem id length"
     default 32
 
 config ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN

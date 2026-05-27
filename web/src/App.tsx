@@ -83,7 +83,7 @@ function App() {
 
 export function RPCTestSection() {
   const zmkApp = useContext(ZMKAppContext);
-  const [subsystemId, setSubsystemId] = useState("test");
+  const [customSubsystemId, setCustomSubsystemId] = useState("test");
   const [settingKey, setSettingKey] = useState("int_value");
   const [keyPrefix, setKeyPrefix] = useState("");
   const [valueType, setValueType] = useState<SettingValueType>(
@@ -106,7 +106,7 @@ export function RPCTestSection() {
   const subsystem = zmkApp.findSubsystem(SUBSYSTEM_IDENTIFIER);
 
   const settingRef = {
-    subsystemId,
+    customSubsystemId,
     key: settingKey,
     source: 0,
     arrayIndex,
@@ -114,7 +114,7 @@ export function RPCTestSection() {
   };
 
   const settingScope = {
-    subsystemId,
+    customSubsystemId,
     key: settingKey,
     keyPrefix,
     source: 0,
@@ -234,7 +234,7 @@ export function RPCTestSection() {
         Request.create({
           listSettings: {
             scope: {
-              subsystemId: "",
+              customSubsystemId: "",
               key: "",
               keyPrefix: "",
               source: SOURCE_ALL,
@@ -288,7 +288,7 @@ export function RPCTestSection() {
           Request.create({
             writeSetting: {
               setting: {
-                subsystemId: importedSetting.subsystemId,
+                customSubsystemId: importedSetting.customSubsystemId,
                 key: importedSetting.key,
                 source: SOURCE_ALL,
                 arrayIndex: importedSetting.arrayIndex ?? 0,
@@ -301,7 +301,7 @@ export function RPCTestSection() {
         );
         if (resp.error) {
           throw new Error(
-            `${importedSetting.subsystemId}/${importedSetting.key}: ${resp.error.message}`
+            `${importedSetting.customSubsystemId}/${importedSetting.key}: ${resp.error.message}`
           );
         }
       }
@@ -361,11 +361,11 @@ export function RPCTestSection() {
       <h2>Settings</h2>
 
       <div className="form-grid">
-        <label htmlFor="subsystem-input">Subsystem</label>
+        <label htmlFor="custom-subsystem-input">Custom Subsystem</label>
         <input
-          id="subsystem-input"
-          value={subsystemId}
-          onChange={(e) => setSubsystemId(e.target.value)}
+          id="custom-subsystem-input"
+          value={customSubsystemId}
+          onChange={(e) => setCustomSubsystemId(e.target.value)}
         />
 
         <label htmlFor="key-input">Key</label>
@@ -508,7 +508,7 @@ export function RPCTestSection() {
           <div>
             <dt>Setting</dt>
             <dd>
-              {setting.subsystemId}/{setting.key}
+              {setting.customSubsystemId}/{setting.key}
             </dd>
           </div>
           <div>
@@ -537,7 +537,7 @@ export function RPCTestSection() {
 
 function formatSetting(setting: Setting): string {
   const value = setting.value ? formatValue(setting.value) : "(hidden)";
-  return `${setting.subsystemId}/${setting.key} = ${value}`;
+  return `${setting.customSubsystemId}/${setting.key} = ${value}`;
 }
 
 function formatValue(value: SettingValue): string {

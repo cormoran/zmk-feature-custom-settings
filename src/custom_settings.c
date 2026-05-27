@@ -83,13 +83,14 @@ static void raise_setting_changed(const struct zmk_custom_setting *setting,
     });
 }
 
-bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting, const char *subsystem_id,
-                                const char *key, const char *key_prefix) {
+bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting,
+                                const char *custom_subsystem_id, const char *key,
+                                const char *key_prefix) {
     const char *public_key = zmk_custom_setting_public_key(setting);
 
-    if (subsystem_id && subsystem_id[0] != '\0' &&
-        strncmp(setting->subsystem_id, subsystem_id,
-                CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
+    if (custom_subsystem_id && custom_subsystem_id[0] != '\0' &&
+        strncmp(setting->custom_subsystem_id, custom_subsystem_id,
+                CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN) != 0) {
         return false;
     }
 
@@ -114,12 +115,12 @@ bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting, const 
     return true;
 }
 
-const struct zmk_custom_setting *zmk_custom_setting_find(const char *subsystem_id,
+const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subsystem_id,
                                                          const char *key) {
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (subsystem_id && subsystem_id[0] != '\0' &&
-            strncmp(setting->subsystem_id, subsystem_id,
-                    CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
+        if (custom_subsystem_id && custom_subsystem_id[0] != '\0' &&
+            strncmp(setting->custom_subsystem_id, custom_subsystem_id,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN) != 0) {
             continue;
         }
 
@@ -133,15 +134,16 @@ const struct zmk_custom_setting *zmk_custom_setting_find(const char *subsystem_i
 }
 
 const struct zmk_custom_setting *
-zmk_custom_setting_find_array_element(const char *subsystem_id, const char *key, uint32_t index) {
+zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const char *key,
+                                      uint32_t index) {
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
         if (!zmk_custom_setting_is_array(setting)) {
             continue;
         }
 
-        if (subsystem_id && subsystem_id[0] != '\0' &&
-            strncmp(setting->subsystem_id, subsystem_id,
-                    CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
+        if (custom_subsystem_id && custom_subsystem_id[0] != '\0' &&
+            strncmp(setting->custom_subsystem_id, custom_subsystem_id,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN) != 0) {
             continue;
         }
 
@@ -244,8 +246,8 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
 
 static int setting_storage_name(const struct zmk_custom_setting *setting, char *name,
                                 size_t name_size) {
-    int ret =
-        snprintf(name, name_size, SETTINGS_SUBTREE "/%s/%s", setting->subsystem_id, setting->key);
+    int ret = snprintf(name, name_size, SETTINGS_SUBTREE "/%s/%s", setting->custom_subsystem_id,
+                       setting->key);
     if (ret < 0 || ret >= name_size) {
         return -ENAMETOOLONG;
     }
@@ -314,9 +316,9 @@ int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
     return 0;
 }
 
-int zmk_custom_setting_read_by_key(const char *subsystem_id, const char *key,
+int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *key,
                                    struct zmk_custom_setting_value *value) {
-    const struct zmk_custom_setting *setting = zmk_custom_setting_find(subsystem_id, key);
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find(custom_subsystem_id, key);
     if (!setting) {
         return -ENOENT;
     }
@@ -324,10 +326,10 @@ int zmk_custom_setting_read_by_key(const char *subsystem_id, const char *key,
     return zmk_custom_setting_read(setting, value);
 }
 
-int zmk_custom_setting_read_array_by_key(const char *subsystem_id, const char *key, uint32_t index,
-                                         struct zmk_custom_setting_value *value) {
+int zmk_custom_setting_read_array_by_key(const char *custom_subsystem_id, const char *key,
+                                         uint32_t index, struct zmk_custom_setting_value *value) {
     const struct zmk_custom_setting *setting =
-        zmk_custom_setting_find_array_element(subsystem_id, key, index);
+        zmk_custom_setting_find_array_element(custom_subsystem_id, key, index);
     if (!setting) {
         return -ENOENT;
     }
@@ -380,10 +382,10 @@ int zmk_custom_setting_write(const struct zmk_custom_setting *const_setting,
     return ret;
 }
 
-int zmk_custom_setting_write_by_key(const char *subsystem_id, const char *key,
+int zmk_custom_setting_write_by_key(const char *custom_subsystem_id, const char *key,
                                     const struct zmk_custom_setting_value *value,
                                     enum zmk_custom_setting_write_mode mode) {
-    const struct zmk_custom_setting *setting = zmk_custom_setting_find(subsystem_id, key);
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find(custom_subsystem_id, key);
     if (!setting) {
         return -ENOENT;
     }
@@ -391,11 +393,12 @@ int zmk_custom_setting_write_by_key(const char *subsystem_id, const char *key,
     return zmk_custom_setting_write(setting, value, mode);
 }
 
-int zmk_custom_setting_write_array_by_key(const char *subsystem_id, const char *key, uint32_t index,
+int zmk_custom_setting_write_array_by_key(const char *custom_subsystem_id, const char *key,
+                                          uint32_t index,
                                           const struct zmk_custom_setting_value *value,
                                           enum zmk_custom_setting_write_mode mode) {
     const struct zmk_custom_setting *setting =
-        zmk_custom_setting_find_array_element(subsystem_id, key, index);
+        zmk_custom_setting_find_array_element(custom_subsystem_id, key, index);
     if (!setting) {
         return -ENOENT;
     }
@@ -487,13 +490,13 @@ int zmk_custom_setting_rollback_temporary(const struct zmk_custom_setting *const
     return 0;
 }
 
-static int apply_scope(const char *subsystem_id, const char *key, const char *key_prefix,
+static int apply_scope(const char *custom_subsystem_id, const char *key, const char *key_prefix,
                        uint32_t *affected_count,
                        int (*callback)(const struct zmk_custom_setting *)) {
     uint32_t count = 0;
     int first_error = 0;
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (!zmk_custom_setting_matches(setting, subsystem_id, key, key_prefix)) {
+        if (!zmk_custom_setting_matches(setting, custom_subsystem_id, key, key_prefix)) {
             continue;
         }
 
@@ -515,19 +518,22 @@ static int apply_scope(const char *subsystem_id, const char *key, const char *ke
     return first_error;
 }
 
-int zmk_custom_settings_save_scope(const char *subsystem_id, const char *key,
+int zmk_custom_settings_save_scope(const char *custom_subsystem_id, const char *key,
                                    const char *key_prefix, uint32_t *affected_count) {
-    return apply_scope(subsystem_id, key, key_prefix, affected_count, zmk_custom_setting_save);
+    return apply_scope(custom_subsystem_id, key, key_prefix, affected_count,
+                       zmk_custom_setting_save);
 }
 
-int zmk_custom_settings_discard_scope(const char *subsystem_id, const char *key,
+int zmk_custom_settings_discard_scope(const char *custom_subsystem_id, const char *key,
                                       const char *key_prefix, uint32_t *affected_count) {
-    return apply_scope(subsystem_id, key, key_prefix, affected_count, zmk_custom_setting_discard);
+    return apply_scope(custom_subsystem_id, key, key_prefix, affected_count,
+                       zmk_custom_setting_discard);
 }
 
-int zmk_custom_settings_reset_scope(const char *subsystem_id, const char *key,
+int zmk_custom_settings_reset_scope(const char *custom_subsystem_id, const char *key,
                                     const char *key_prefix, uint32_t *affected_count) {
-    return apply_scope(subsystem_id, key, key_prefix, affected_count, zmk_custom_setting_reset);
+    return apply_scope(custom_subsystem_id, key, key_prefix, affected_count,
+                       zmk_custom_setting_reset);
 }
 
 bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setting) {
@@ -595,18 +601,18 @@ static int value_from_storage(struct zmk_custom_setting *setting, const void *da
 static int custom_settings_handle_set(const char *name, size_t len, settings_read_cb read_cb,
                                       void *cb_arg) {
     const char *next;
-    char subsystem_id[CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN];
+    char custom_subsystem_id[CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN];
 
     int match_len = settings_name_next(name, &next);
-    if (match_len <= 0 || match_len >= sizeof(subsystem_id) || !next) {
+    if (match_len <= 0 || match_len >= sizeof(custom_subsystem_id) || !next) {
         return -ENOENT;
     }
 
-    memcpy(subsystem_id, name, match_len);
-    subsystem_id[match_len] = '\0';
+    memcpy(custom_subsystem_id, name, match_len);
+    custom_subsystem_id[match_len] = '\0';
 
     struct zmk_custom_setting *setting =
-        (struct zmk_custom_setting *)zmk_custom_setting_find(subsystem_id, next);
+        (struct zmk_custom_setting *)zmk_custom_setting_find(custom_subsystem_id, next);
     if (!setting) {
         return -ENOENT;
     }

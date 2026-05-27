@@ -32,7 +32,7 @@ describe("RPCTestSection Component", () => {
       expect(
         screen.getByRole("heading", { name: "Settings" })
       ).toBeInTheDocument();
-      expect(screen.getByLabelText(/Subsystem/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Custom Subsystem/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^Key$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
@@ -97,7 +97,7 @@ describe("RPCTestSection Component", () => {
 
 describe("settings JSON conversion", () => {
   const baseSetting: Setting = {
-    subsystemId: "test",
+    customSubsystemId: "test",
     key: "int_value",
     valueType: SettingValueType.SETTING_VALUE_TYPE_INT32,
     confidentiality: 2,
@@ -114,7 +114,7 @@ describe("settings JSON conversion", () => {
 
   it("exports scalar settings as typed JSON entries", () => {
     expect(settingToExportedSetting(baseSetting)).toEqual({
-      subsystemId: "test",
+      customSubsystemId: "test",
       key: "int_value",
       type: "int32",
       value: 42,
@@ -139,7 +139,7 @@ describe("settings JSON conversion", () => {
         arraySize: 2,
       })
     ).toEqual({
-      subsystemId: "test",
+      customSubsystemId: "test",
       key: "array_value",
       type: "bool",
       value: true,
@@ -153,7 +153,7 @@ describe("settings JSON conversion", () => {
     const [setting] = parseSettingsExportJson(json);
 
     expect(setting).toMatchObject({
-      subsystemId: "test",
+      customSubsystemId: "test",
       key: "int_value",
       type: "int32",
       value: 42,

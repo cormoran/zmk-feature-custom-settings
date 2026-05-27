@@ -366,7 +366,8 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
                             uint32_t source) {
     *dest = (zmk_custom_settings_Setting)zmk_custom_settings_Setting_init_zero;
 
-    copy_string(dest->subsystem_id, sizeof(dest->subsystem_id), setting->subsystem_id);
+    copy_string(dest->custom_subsystem_id, sizeof(dest->custom_subsystem_id),
+                setting->custom_subsystem_id);
     copy_string(dest->key, sizeof(dest->key), zmk_custom_setting_public_key(setting));
     dest->value_type = proto_value_type(setting->value_type);
     dest->confidentiality = proto_confidentiality(setting->confidentiality);
@@ -518,7 +519,7 @@ static int handle_list_settings(const zmk_custom_settings_ListSettingsRequest *r
     }
 
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (!zmk_custom_setting_matches(setting, scope->subsystem_id, scope->key,
+        if (!zmk_custom_setting_matches(setting, scope->custom_subsystem_id, scope->key,
                                         scope->key_prefix)) {
             continue;
         }
@@ -545,9 +546,9 @@ static int handle_get_setting(const zmk_custom_settings_GetSettingRequest *req,
     }
 
     const struct zmk_custom_setting *setting =
-        ref->has_array_index
-            ? zmk_custom_setting_find_array_element(ref->subsystem_id, ref->key, ref->array_index)
-            : zmk_custom_setting_find(ref->subsystem_id, ref->key);
+        ref->has_array_index ? zmk_custom_setting_find_array_element(ref->custom_subsystem_id,
+                                                                     ref->key, ref->array_index)
+                             : zmk_custom_setting_find(ref->custom_subsystem_id, ref->key);
     if (!setting) {
         return -ENOENT;
     }
@@ -593,8 +594,8 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
             return -EINVAL;
         }
 
-        setting =
-            zmk_custom_setting_find_array_element(ref->subsystem_id, ref->key, resolved_index);
+        setting = zmk_custom_setting_find_array_element(ref->custom_subsystem_id, ref->key,
+                                                        resolved_index);
         if (!setting) {
             return -ENOENT;
         }
@@ -602,7 +603,7 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
             return -EINVAL;
         }
     } else {
-        setting = zmk_custom_setting_find(ref->subsystem_id, ref->key);
+        setting = zmk_custom_setting_find(ref->custom_subsystem_id, ref->key);
         if (!setting) {
             return -ENOENT;
         }
@@ -629,7 +630,7 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
 
 static bool scope_write_unlock_required(const zmk_custom_settings_SettingScope *scope) {
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (zmk_custom_setting_matches(setting, scope->subsystem_id, scope->key,
+        if (zmk_custom_setting_matches(setting, scope->custom_subsystem_id, scope->key,
                                        scope->key_prefix) &&
             needs_unlock(setting->write_permission)) {
             return true;
@@ -654,7 +655,7 @@ static int handle_scope_mutation(const zmk_custom_settings_SettingScope *scope,
     }
 
     uint32_t count = 0;
-    int ret = callback(scope->subsystem_id, scope->key, scope->key_prefix, &count);
+    int ret = callback(scope->custom_subsystem_id, scope->key, scope->key_prefix, &count);
     if (ret < 0) {
         return ret;
     }

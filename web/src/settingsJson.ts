@@ -11,7 +11,7 @@ const SETTINGS_EXPORT_VERSION = 1;
 type ExportedSettingType = "bytes" | "int32" | "bool" | "string";
 
 export interface ExportedSetting {
-  subsystemId: string;
+  customSubsystemId: string;
   key: string;
   type: ExportedSettingType;
   value: boolean | number | string | number[];
@@ -50,7 +50,7 @@ export function settingToExportedSetting(
   }
 
   const exported: ExportedSetting = {
-    subsystemId: setting.subsystemId,
+    customSubsystemId: setting.customSubsystemId,
     key: setting.key,
     type,
     value,
@@ -103,7 +103,7 @@ export function exportedSettingValueToProto(
   if (setting.arrayIndex !== undefined) {
     if (setting.arraySize === undefined) {
       throw new Error(
-        `${setting.subsystemId}/${setting.key} is missing arraySize`
+        `${setting.customSubsystemId}/${setting.key} is missing arraySize`
       );
     }
 
@@ -140,28 +140,28 @@ function exportedScalarValueToProto(setting: ExportedSetting): SettingValue {
     case "bytes":
       if (!Array.isArray(setting.value)) {
         throw new Error(
-          `${setting.subsystemId}/${setting.key} bytes value must be an array`
+          `${setting.customSubsystemId}/${setting.key} bytes value must be an array`
         );
       }
       return { bytesValue: Uint8Array.from(setting.value) };
     case "int32":
       if (typeof setting.value !== "number") {
         throw new Error(
-          `${setting.subsystemId}/${setting.key} int32 value must be a number`
+          `${setting.customSubsystemId}/${setting.key} int32 value must be a number`
         );
       }
       return { int32Value: setting.value };
     case "bool":
       if (typeof setting.value !== "boolean") {
         throw new Error(
-          `${setting.subsystemId}/${setting.key} bool value must be a boolean`
+          `${setting.customSubsystemId}/${setting.key} bool value must be a boolean`
         );
       }
       return { boolValue: setting.value };
     case "string":
       if (typeof setting.value !== "string") {
         throw new Error(
-          `${setting.subsystemId}/${setting.key} string value must be a string`
+          `${setting.customSubsystemId}/${setting.key} string value must be a string`
         );
       }
       return { stringValue: setting.value };
@@ -173,11 +173,11 @@ function parseExportedSetting(entry: unknown, index: number): ExportedSetting {
     throw new Error(`settings[${index}] must be an object`);
   }
 
-  const subsystemId = readString(entry, "subsystemId", index);
+  const customSubsystemId = readString(entry, "customSubsystemId", index);
   const key = readString(entry, "key", index);
   const type = readSettingType(entry.type, index);
   const value = readSettingValue(entry.value, type, index);
-  const exported: ExportedSetting = { subsystemId, key, type, value };
+  const exported: ExportedSetting = { customSubsystemId, key, type, value };
 
   if (entry.arrayIndex !== undefined) {
     exported.arrayIndex = readNonNegativeInteger(

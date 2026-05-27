@@ -94,7 +94,7 @@ struct zmk_custom_setting_constraint {
 };
 
 struct zmk_custom_setting {
-    const char *subsystem_id;
+    const char *custom_subsystem_id;
     const char *key;
     const char *array_key;
     uint32_t array_index;
@@ -166,15 +166,16 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_BEHAVIOR_ID                                                             \
     ((struct zmk_custom_setting_constraint){.type = ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID})
 
-#define ZMK_CUSTOM_SETTING_DEFINE(_name, _subsystem_id, _key, _value_type, _default_value,         \
+#define ZMK_CUSTOM_SETTING_DEFINE(_name, _custom_subsystem_id, _key, _value_type, _default_value,  \
                                   _confidentiality, _read_permission, _write_permission,           \
                                   _constraint)                                                     \
-    BUILD_ASSERT(sizeof(_subsystem_id) <= CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN,         \
-                 "Custom setting subsystem id is too long");                                       \
+    BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
+                     CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
+                 "Custom subsystem id is too long");                                               \
     BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
                  "Custom setting key is too long");                                                \
     STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
-        .subsystem_id = _subsystem_id,                                                             \
+        .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
         .array_key = NULL,                                                                         \
         .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
@@ -187,17 +188,18 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .default_value = _default_value,                                                           \
     }
 
-#define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(_name, _subsystem_id, _key, _index, _array_size,   \
-                                                _value_type, _default_value, _confidentiality,     \
-                                                _read_permission, _write_permission, _constraint)  \
-    BUILD_ASSERT(sizeof(_subsystem_id) <= CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN,         \
-                 "Custom setting subsystem id is too long");                                       \
+#define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(                                                   \
+    _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
+    _confidentiality, _read_permission, _write_permission, _constraint)                            \
+    BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
+                     CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
+                 "Custom subsystem id is too long");                                               \
     BUILD_ASSERT(sizeof(_key "/" ZMK_CUSTOM_SETTINGS_STRINGIFY(_index)) <=                         \
                      CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                                       \
                  "Custom setting array element key is too long");                                  \
     BUILD_ASSERT((_index) < (_array_size), "Custom setting array index must be in range");         \
     STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
-        .subsystem_id = _subsystem_id,                                                             \
+        .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key "/" ZMK_CUSTOM_SETTINGS_STRINGIFY(_index),                                     \
         .array_key = _key,                                                                         \
         .array_index = (_index),                                                                   \
@@ -212,28 +214,32 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 
 #define ZMK_CUSTOM_SETTING_FOREACH(_var) STRUCT_SECTION_FOREACH(zmk_custom_setting, _var)
 
-const struct zmk_custom_setting *zmk_custom_setting_find(const char *subsystem_id, const char *key);
+const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subsystem_id,
+                                                         const char *key);
 const struct zmk_custom_setting *
-zmk_custom_setting_find_array_element(const char *subsystem_id, const char *key, uint32_t index);
+zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const char *key,
+                                      uint32_t index);
 const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setting);
 bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting);
-bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting, const char *subsystem_id,
-                                const char *key, const char *key_prefix);
+bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting,
+                                const char *custom_subsystem_id, const char *key,
+                                const char *key_prefix);
 
 int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
                             struct zmk_custom_setting_value *value);
-int zmk_custom_setting_read_by_key(const char *subsystem_id, const char *key,
+int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *key,
                                    struct zmk_custom_setting_value *value);
-int zmk_custom_setting_read_array_by_key(const char *subsystem_id, const char *key, uint32_t index,
-                                         struct zmk_custom_setting_value *value);
+int zmk_custom_setting_read_array_by_key(const char *custom_subsystem_id, const char *key,
+                                         uint32_t index, struct zmk_custom_setting_value *value);
 
 int zmk_custom_setting_write(const struct zmk_custom_setting *setting,
                              const struct zmk_custom_setting_value *value,
                              enum zmk_custom_setting_write_mode mode);
-int zmk_custom_setting_write_by_key(const char *subsystem_id, const char *key,
+int zmk_custom_setting_write_by_key(const char *custom_subsystem_id, const char *key,
                                     const struct zmk_custom_setting_value *value,
                                     enum zmk_custom_setting_write_mode mode);
-int zmk_custom_setting_write_array_by_key(const char *subsystem_id, const char *key, uint32_t index,
+int zmk_custom_setting_write_array_by_key(const char *custom_subsystem_id, const char *key,
+                                          uint32_t index,
                                           const struct zmk_custom_setting_value *value,
                                           enum zmk_custom_setting_write_mode mode);
 
@@ -242,11 +248,11 @@ int zmk_custom_setting_discard(const struct zmk_custom_setting *setting);
 int zmk_custom_setting_reset(const struct zmk_custom_setting *setting);
 int zmk_custom_setting_rollback_temporary(const struct zmk_custom_setting *setting);
 
-int zmk_custom_settings_save_scope(const char *subsystem_id, const char *key,
+int zmk_custom_settings_save_scope(const char *custom_subsystem_id, const char *key,
                                    const char *key_prefix, uint32_t *affected_count);
-int zmk_custom_settings_discard_scope(const char *subsystem_id, const char *key,
+int zmk_custom_settings_discard_scope(const char *custom_subsystem_id, const char *key,
                                       const char *key_prefix, uint32_t *affected_count);
-int zmk_custom_settings_reset_scope(const char *subsystem_id, const char *key,
+int zmk_custom_settings_reset_scope(const char *custom_subsystem_id, const char *key,
                                     const char *key_prefix, uint32_t *affected_count);
 
 bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setting);
