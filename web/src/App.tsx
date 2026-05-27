@@ -7,16 +7,25 @@ import {
   ZMKAppContext,
 } from "@cormoran/zmk-studio-react-hook";
 import {
+  Notification as SettingsNotification,
   Request,
   Response,
   Setting,
   SettingScalarValue,
   SettingValue,
+  SettingNotificationKind,
   SettingValueType,
   SettingWriteMode,
 } from "./proto/zmk/custom_settings/custom_settings";
+import {
+  createSettingsExportDocument,
+  exportedSettingValueToProto,
+  parseSettingsExportJson,
+} from "./settingsJson";
 
 export const SUBSYSTEM_IDENTIFIER = "zmk__custom_settings";
+const LIST_NOTIFICATION_TIMEOUT_MS = 750;
+const SOURCE_ALL = 0xffffffff;
 
 function App() {
   return (
@@ -89,6 +98,7 @@ export function RPCTestSection() {
   );
   const [setting, setSetting] = useState<Setting | null>(null);
   const [response, setResponse] = useState<string | null>(null);
+  const [jsonText, setJsonText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
   if (!zmkApp) return null;
@@ -139,35 +149,166 @@ export function RPCTestSection() {
     return scalarValue;
   };
 
-  const sendRequest = async (request: Request) => {
-    if (!zmkApp.state.connection || !subsystem) return;
+  const callCustomRequest = async (request: Request): Promise<Response> => {
+    if (!zmkApp.state.connection || !subsystem) {
+      throw new Error("Custom settings subsystem is not available");
+    }
 
+    const service = new ZMKCustomSubsystem(
+      zmkApp.state.connection,
+      subsystem.index
+    );
+    const payload = Request.encode(request).finish();
+    const responsePayload = await service.callRPC(payload);
+    if (!responsePayload) {
+      throw new Error("Empty response");
+    }
+
+    return Response.decode(responsePayload);
+  };
+
+  const sendRequest = async (request: Request) => {
     setIsLoading(true);
     setResponse(null);
 
     try {
-      const service = new ZMKCustomSubsystem(
-        zmkApp.state.connection,
-        subsystem.index
-      );
-      const payload = Request.encode(request).finish();
-      const responsePayload = await service.callRPC(payload);
-
-      if (responsePayload) {
-        const resp = Response.decode(responsePayload);
-        if (resp.getSetting?.setting) {
-          setSetting(resp.getSetting.setting);
-          setResponse(formatSetting(resp.getSetting.setting));
-        } else if (resp.status) {
-          setResponse(
-            `${resp.status.message || "OK"} (${resp.status.affectedCount})`
-          );
-        } else if (resp.error) {
-          setResponse(`Error: ${resp.error.message}`);
-        }
+      const resp = await callCustomRequest(request);
+      if (resp.getSetting?.setting) {
+        setSetting(resp.getSetting.setting);
+        setResponse(formatSetting(resp.getSetting.setting));
+      } else if (resp.status) {
+        setResponse(
+          `${resp.status.message || "OK"} (${resp.status.affectedCount})`
+        );
+      } else if (resp.error) {
+        setResponse(`Error: ${resp.error.message}`);
       }
     } catch (error) {
       console.error("RPC call failed:", error);
+      setResponse(
+        `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const collectListSettings = async (): Promise<Setting[]> => {
+    if (!subsystem) return [];
+
+    const collected: Setting[] = [];
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let resolveList: () => void = () => {};
+
+    const listComplete = new Promise<void>((resolve) => {
+      resolveList = resolve;
+    });
+
+    const scheduleResolve = () => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      timeout = setTimeout(resolveList, LIST_NOTIFICATION_TIMEOUT_MS);
+    };
+
+    const unsubscribe = zmkApp.onNotification({
+      type: "custom",
+      subsystemIndex: subsystem.index,
+      callback: (customNotification) => {
+        const notification = SettingsNotification.decode(
+          customNotification.payload
+        );
+        if (
+          notification.kind ===
+            SettingNotificationKind.SETTING_NOTIFICATION_KIND_LIST_ITEM &&
+          notification.setting
+        ) {
+          collected.push(notification.setting);
+          scheduleResolve();
+        }
+      },
+    });
+
+    try {
+      const resp = await callCustomRequest(
+        Request.create({
+          listSettings: {
+            scope: {
+              subsystemId: "",
+              key: "",
+              keyPrefix: "",
+              source: SOURCE_ALL,
+            },
+          },
+        })
+      );
+      if (resp.error) {
+        throw new Error(resp.error.message || "List failed");
+      }
+
+      scheduleResolve();
+      await listComplete;
+    } finally {
+      unsubscribe();
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    }
+
+    return collected;
+  };
+
+  const exportJson = async () => {
+    setIsLoading(true);
+    setResponse(null);
+
+    try {
+      const settings = await collectListSettings();
+      const exported = createSettingsExportDocument(settings);
+      setJsonText(JSON.stringify(exported, null, 2));
+      setResponse(`Exported ${exported.settings.length} setting values`);
+    } catch (error) {
+      console.error("Export failed:", error);
+      setResponse(
+        `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const importJson = async () => {
+    setIsLoading(true);
+    setResponse(null);
+
+    try {
+      const settings = parseSettingsExportJson(jsonText);
+      for (const importedSetting of settings) {
+        const resp = await callCustomRequest(
+          Request.create({
+            writeSetting: {
+              setting: {
+                subsystemId: importedSetting.subsystemId,
+                key: importedSetting.key,
+                source: SOURCE_ALL,
+                arrayIndex: importedSetting.arrayIndex ?? 0,
+                hasArrayIndex: importedSetting.arrayIndex !== undefined,
+              },
+              value: exportedSettingValueToProto(importedSetting),
+              mode: writeMode,
+            },
+          })
+        );
+        if (resp.error) {
+          throw new Error(
+            `${importedSetting.subsystemId}/${importedSetting.key}: ${resp.error.message}`
+          );
+        }
+      }
+
+      setResponse(`Imported ${settings.length} setting values`);
+    } catch (error) {
+      console.error("Import failed:", error);
       setResponse(
         `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
       );
@@ -338,6 +479,28 @@ export function RPCTestSection() {
         >
           Reset
         </button>
+      </div>
+
+      <div className="json-panel">
+        <label htmlFor="settings-json">Settings JSON</label>
+        <textarea
+          id="settings-json"
+          rows={12}
+          value={jsonText}
+          onChange={(e) => setJsonText(e.target.value)}
+        />
+        <div className="toolbar">
+          <button className="btn" disabled={isLoading} onClick={exportJson}>
+            Export JSON
+          </button>
+          <button
+            className="btn btn-primary"
+            disabled={isLoading || jsonText.trim().length === 0}
+            onClick={importJson}
+          >
+            Import JSON
+          </button>
+        </div>
       </div>
 
       {setting && (

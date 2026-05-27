@@ -3,7 +3,17 @@ import {
   createConnectedMockZMKApp,
   ZMKAppProvider,
 } from "@cormoran/zmk-studio-react-hook/testing";
+import {
+  exportedSettingValueToProto,
+  parseSettingsExportJson,
+  settingsExportToJson,
+  settingToExportedSetting,
+} from "../src/settingsJson";
 import { RPCTestSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
+import {
+  Setting,
+  SettingValueType,
+} from "../src/proto/zmk/custom_settings/custom_settings";
 
 describe("RPCTestSection Component", () => {
   describe("With Subsystem", () => {
@@ -26,6 +36,13 @@ describe("RPCTestSection Component", () => {
       expect(screen.getByLabelText(/^Key$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Settings JSON/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Export JSON" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Import JSON" })
+      ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Write" })).toBeInTheDocument();
     });
 
@@ -75,5 +92,72 @@ describe("RPCTestSection Component", () => {
 
       expect(container.firstChild).toBeNull();
     });
+  });
+});
+
+describe("settings JSON conversion", () => {
+  const baseSetting: Setting = {
+    subsystemId: "test",
+    key: "int_value",
+    valueType: SettingValueType.SETTING_VALUE_TYPE_INT32,
+    confidentiality: 2,
+    readPermission: 0,
+    writePermission: 0,
+    constraint: undefined,
+    hasUnsavedValue: false,
+    value: { int32Value: 42 },
+    source: 0,
+    isArray: false,
+    arrayIndex: 0,
+    arraySize: 0,
+  };
+
+  it("exports scalar settings as typed JSON entries", () => {
+    expect(settingToExportedSetting(baseSetting)).toEqual({
+      subsystemId: "test",
+      key: "int_value",
+      type: "int32",
+      value: 42,
+    });
+  });
+
+  it("exports array settings with public key and explicit index", () => {
+    expect(
+      settingToExportedSetting({
+        ...baseSetting,
+        key: "array_value",
+        value: {
+          arrayValue: {
+            index: 1,
+            size: 2,
+            value: { boolValue: true },
+          },
+        },
+        valueType: SettingValueType.SETTING_VALUE_TYPE_BOOL,
+        isArray: true,
+        arrayIndex: 1,
+        arraySize: 2,
+      })
+    ).toEqual({
+      subsystemId: "test",
+      key: "array_value",
+      type: "bool",
+      value: true,
+      arrayIndex: 1,
+      arraySize: 2,
+    });
+  });
+
+  it("parses exported JSON back to write values", () => {
+    const json = settingsExportToJson([baseSetting]);
+    const [setting] = parseSettingsExportJson(json);
+
+    expect(setting).toMatchObject({
+      subsystemId: "test",
+      key: "int_value",
+      type: "int32",
+      value: 42,
+    });
+    expect(exportedSettingValueToProto(setting)).toEqual({ int32Value: 42 });
   });
 });

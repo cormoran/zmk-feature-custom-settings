@@ -119,7 +119,8 @@ The custom Studio subsystem identifier is `zmk__custom_settings`.
 
 The web UI in `web/` connects to a keyboard over serial, finds the
 `zmk__custom_settings` subsystem, and sends typed read/write/save/discard/reset
-requests.
+requests. It can also export all RPC-readable setting values as JSON and import
+that JSON back to the device using the selected write mode.
 
 ```bash
 cd web

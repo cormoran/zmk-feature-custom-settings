@@ -67,6 +67,24 @@
   gap: 0.5rem;
 }
 
+.json-panel {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.json-panel label {
+  font-weight: 600;
+}
+
+.json-panel textarea {
+  min-width: 0;
+  padding: 0.5rem;
+  resize: vertical;
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
 .setting-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
