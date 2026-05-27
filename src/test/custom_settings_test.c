@@ -20,6 +20,22 @@ ZMK_CUSTOM_SETTING_DEFINE(test_int_setting, "test", "int_value",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_value", 0, 2,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_1, "test", "array_value", 1, 2,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
     int ret = zmk_custom_setting_read(setting, &value);
@@ -71,7 +87,31 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    return expect_int_value(setting, 10);
+    ret = expect_int_value(setting, 10);
+    if (ret < 0) {
+        return ret;
+    }
+
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array_element("test", "array_value", 1);
+    if (!array_setting || !zmk_custom_setting_is_array(array_setting)) {
+        LOG_ERR("Test custom array setting not registered");
+        return -ENOENT;
+    }
+
+    ret = expect_int_value(array_setting, 2);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write_array_by_key("test", "array_value", 1,
+                                                &ZMK_CUSTOM_SETTING_VALUE_INT32(55),
+                                                ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return expect_int_value(array_setting, 55);
 }
 
 SYS_INIT(custom_settings_test_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);

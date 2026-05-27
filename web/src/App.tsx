@@ -10,6 +10,7 @@ import {
   Request,
   Response,
   Setting,
+  SettingScalarValue,
   SettingValue,
   SettingValueType,
   SettingWriteMode,
@@ -80,6 +81,9 @@ export function RPCTestSection() {
     SettingValueType.SETTING_VALUE_TYPE_INT32
   );
   const [value, setValue] = useState("10");
+  const [isArray, setIsArray] = useState(false);
+  const [arrayIndex, setArrayIndex] = useState(0);
+  const [arraySize, setArraySize] = useState(1);
   const [writeMode, setWriteMode] = useState<SettingWriteMode>(
     SettingWriteMode.SETTING_WRITE_MODE_MEMORY
   );
@@ -95,6 +99,8 @@ export function RPCTestSection() {
     subsystemId,
     key: settingKey,
     source: 0,
+    arrayIndex,
+    hasArrayIndex: isArray,
   };
 
   const settingScope = {
@@ -104,7 +110,7 @@ export function RPCTestSection() {
     source: 0,
   };
 
-  const parseValue = (): SettingValue => {
+  const parseScalarValue = (): SettingScalarValue => {
     switch (valueType) {
       case SettingValueType.SETTING_VALUE_TYPE_BYTES:
         return { bytesValue: new TextEncoder().encode(value) };
@@ -116,6 +122,21 @@ export function RPCTestSection() {
       default:
         return { int32Value: Number.parseInt(value, 10) || 0 };
     }
+  };
+
+  const parseValue = (): SettingValue => {
+    const scalarValue = parseScalarValue();
+    if (isArray) {
+      return {
+        arrayValue: {
+          index: arrayIndex,
+          size: arraySize,
+          value: scalarValue,
+        },
+      };
+    }
+
+    return scalarValue;
   };
 
   const sendRequest = async (request: Request) => {
@@ -238,6 +259,36 @@ export function RPCTestSection() {
           </option>
         </select>
 
+        <label htmlFor="array-input">Array</label>
+        <input
+          id="array-input"
+          type="checkbox"
+          checked={isArray}
+          onChange={(e) => setIsArray(e.target.checked)}
+        />
+
+        <label htmlFor="array-index-input">Array Index</label>
+        <input
+          id="array-index-input"
+          type="number"
+          min={0}
+          value={arrayIndex}
+          onChange={(e) =>
+            setArrayIndex(Number.parseInt(e.target.value, 10) || 0)
+          }
+        />
+
+        <label htmlFor="array-size-input">Array Size</label>
+        <input
+          id="array-size-input"
+          type="number"
+          min={1}
+          value={arraySize}
+          onChange={(e) =>
+            setArraySize(Number.parseInt(e.target.value, 10) || 1)
+          }
+        />
+
         <label htmlFor="value-input">Value</label>
         <input
           id="value-input"
@@ -298,6 +349,14 @@ export function RPCTestSection() {
             </dd>
           </div>
           <div>
+            <dt>Array</dt>
+            <dd>
+              {setting.isArray
+                ? `${setting.arrayIndex}/${setting.arraySize}`
+                : "no"}
+            </dd>
+          </div>
+          <div>
             <dt>Unsaved</dt>
             <dd>{setting.hasUnsavedValue ? "yes" : "no"}</dd>
           </div>
@@ -319,6 +378,14 @@ function formatSetting(setting: Setting): string {
 }
 
 function formatValue(value: SettingValue): string {
+  if (value.arrayValue !== undefined) {
+    return `[${value.arrayValue.index}/${value.arrayValue.size}] ${formatScalarValue(value.arrayValue.value ?? {})}`;
+  }
+
+  return formatScalarValue(value);
+}
+
+function formatScalarValue(value: SettingScalarValue): string {
   if (value.int32Value !== undefined) return `${value.int32Value}`;
   if (value.boolValue !== undefined) return value.boolValue ? "true" : "false";
   if (value.stringValue !== undefined) return value.stringValue;

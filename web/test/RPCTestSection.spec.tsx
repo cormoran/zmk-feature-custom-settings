@@ -24,6 +24,8 @@ describe("RPCTestSection Component", () => {
       ).toBeInTheDocument();
       expect(screen.getByLabelText(/Subsystem/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^Key$/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Write" })).toBeInTheDocument();
     });
 

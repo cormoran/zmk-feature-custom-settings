@@ -1,5 +1,7 @@
 # Nanopb options for custom_settings.proto.
 
+zmk.custom_settings.SettingScalarValue.bytes_value max_size:64
+zmk.custom_settings.SettingScalarValue.string_value max_size:64
 zmk.custom_settings.SettingValue.bytes_value max_size:64
 zmk.custom_settings.SettingValue.string_value max_size:64
 

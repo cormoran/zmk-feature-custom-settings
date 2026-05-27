@@ -34,7 +34,7 @@ enum SettingNotificationKind {
     SETTING_NOTIFICATION_KIND_RESET = 4;
 }
 
-message SettingValue {
+message SettingScalarValue {
     oneof value_type {
         bytes bytes_value = 1;
         int32 int32_value = 2;
@@ -43,13 +43,29 @@ message SettingValue {
     }
 }
 
+message SettingArrayValue {
+    uint32 index = 1;
+    uint32 size = 2;
+    SettingScalarValue value = 3;
+}
+
+message SettingValue {
+    oneof value_type {
+        bytes bytes_value = 1;
+        int32 int32_value = 2;
+        bool bool_value = 3;
+        string string_value = 4;
+        SettingArrayValue array_value = 5;
+    }
+}
+
 message SettingConstraintRange {
-    SettingValue min = 1;
-    SettingValue max = 2;
+    SettingScalarValue min = 1;
+    SettingScalarValue max = 2;
 }
 
 message SettingConstraintOptions {
-    repeated SettingValue values = 1;
+    repeated SettingScalarValue values = 1;
     repeated string labels = 2;
 }
 
@@ -77,6 +93,8 @@ message SettingRef {
     string subsystem_id = 1;
     string key = 2;
     uint32 source = 3;
+    uint32 array_index = 4;
+    bool has_array_index = 5;
 }
 
 message SettingScope {
@@ -97,6 +115,9 @@ message Setting {
     bool has_unsaved_value = 8;
     SettingValue value = 9;
     uint32 source = 10;
+    bool is_array = 11;
+    uint32 array_index = 12;
+    uint32 array_size = 13;
 }
 
 message ListSettingsRequest { SettingScope scope = 1; }

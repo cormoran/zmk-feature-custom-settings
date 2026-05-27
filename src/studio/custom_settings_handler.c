@@ -149,12 +149,12 @@ proto_notification_kind(enum zmk_custom_setting_changed_kind kind) {
     }
 }
 
-static int proto_to_value(const zmk_custom_settings_SettingValue *src,
-                          struct zmk_custom_setting_value *dest) {
+static int scalar_proto_to_value(const zmk_custom_settings_SettingScalarValue *src,
+                                 struct zmk_custom_setting_value *dest) {
     *dest = (struct zmk_custom_setting_value){0};
 
     switch (src->which_value_type) {
-    case zmk_custom_settings_SettingValue_bytes_value_tag:
+    case zmk_custom_settings_SettingScalarValue_bytes_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES;
         dest->size = src->value_type.bytes_value.size;
         if (dest->size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
@@ -162,15 +162,15 @@ static int proto_to_value(const zmk_custom_settings_SettingValue *src,
         }
         memcpy(dest->bytes_value, src->value_type.bytes_value.bytes, dest->size);
         return 0;
-    case zmk_custom_settings_SettingValue_int32_value_tag:
+    case zmk_custom_settings_SettingScalarValue_int32_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
         dest->int32_value = src->value_type.int32_value;
         return 0;
-    case zmk_custom_settings_SettingValue_bool_value_tag:
+    case zmk_custom_settings_SettingScalarValue_bool_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL;
         dest->bool_value = src->value_type.bool_value;
         return 0;
-    case zmk_custom_settings_SettingValue_string_value_tag:
+    case zmk_custom_settings_SettingScalarValue_string_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
         dest->size =
             bounded_strlen(src->value_type.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
@@ -181,13 +181,64 @@ static int proto_to_value(const zmk_custom_settings_SettingValue *src,
     }
 }
 
-static int value_to_proto(const struct zmk_custom_setting_value *src,
-                          zmk_custom_settings_SettingValue *dest) {
-    *dest = (zmk_custom_settings_SettingValue)zmk_custom_settings_SettingValue_init_zero;
+static int proto_to_value(const zmk_custom_settings_SettingValue *src,
+                          struct zmk_custom_setting_value *dest, bool *is_array,
+                          uint32_t *array_index, uint32_t *array_size) {
+    *is_array = false;
+
+    switch (src->which_value_type) {
+    case zmk_custom_settings_SettingValue_bytes_value_tag:
+    case zmk_custom_settings_SettingValue_int32_value_tag:
+    case zmk_custom_settings_SettingValue_bool_value_tag:
+    case zmk_custom_settings_SettingValue_string_value_tag: {
+        zmk_custom_settings_SettingScalarValue scalar =
+            zmk_custom_settings_SettingScalarValue_init_zero;
+        switch (src->which_value_type) {
+        case zmk_custom_settings_SettingValue_bytes_value_tag:
+            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_bytes_value_tag;
+            scalar.value_type.bytes_value.size = src->value_type.bytes_value.size;
+            memcpy(scalar.value_type.bytes_value.bytes, src->value_type.bytes_value.bytes,
+                   scalar.value_type.bytes_value.size);
+            break;
+        case zmk_custom_settings_SettingValue_int32_value_tag:
+            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_int32_value_tag;
+            scalar.value_type.int32_value = src->value_type.int32_value;
+            break;
+        case zmk_custom_settings_SettingValue_bool_value_tag:
+            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_bool_value_tag;
+            scalar.value_type.bool_value = src->value_type.bool_value;
+            break;
+        case zmk_custom_settings_SettingValue_string_value_tag:
+            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_string_value_tag;
+            copy_string(scalar.value_type.string_value, sizeof(scalar.value_type.string_value),
+                        src->value_type.string_value);
+            break;
+        default:
+            return -EINVAL;
+        }
+        return scalar_proto_to_value(&scalar, dest);
+    }
+    case zmk_custom_settings_SettingValue_array_value_tag:
+        if (!src->value_type.array_value.has_value) {
+            return -EINVAL;
+        }
+        *is_array = true;
+        *array_index = src->value_type.array_value.index;
+        *array_size = src->value_type.array_value.size;
+        return scalar_proto_to_value(&src->value_type.array_value.value, dest);
+    default:
+        return -EINVAL;
+    }
+}
+
+static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
+                                 zmk_custom_settings_SettingScalarValue *dest) {
+    *dest =
+        (zmk_custom_settings_SettingScalarValue)zmk_custom_settings_SettingScalarValue_init_zero;
 
     switch (src->type) {
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
-        dest->which_value_type = zmk_custom_settings_SettingValue_bytes_value_tag;
+        dest->which_value_type = zmk_custom_settings_SettingScalarValue_bytes_value_tag;
         dest->value_type.bytes_value.size = src->size;
         if (src->size > sizeof(dest->value_type.bytes_value.bytes)) {
             return -EMSGSIZE;
@@ -195,17 +246,62 @@ static int value_to_proto(const struct zmk_custom_setting_value *src,
         memcpy(dest->value_type.bytes_value.bytes, src->bytes_value, src->size);
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
-        dest->which_value_type = zmk_custom_settings_SettingValue_int32_value_tag;
+        dest->which_value_type = zmk_custom_settings_SettingScalarValue_int32_value_tag;
         dest->value_type.int32_value = src->int32_value;
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
-        dest->which_value_type = zmk_custom_settings_SettingValue_bool_value_tag;
+        dest->which_value_type = zmk_custom_settings_SettingScalarValue_bool_value_tag;
         dest->value_type.bool_value = src->bool_value;
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
-        dest->which_value_type = zmk_custom_settings_SettingValue_string_value_tag;
+        dest->which_value_type = zmk_custom_settings_SettingScalarValue_string_value_tag;
         copy_string(dest->value_type.string_value, sizeof(dest->value_type.string_value),
                     src->string_value);
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static int value_to_proto(const struct zmk_custom_setting *setting,
+                          const struct zmk_custom_setting_value *src,
+                          zmk_custom_settings_SettingValue *dest) {
+    *dest = (zmk_custom_settings_SettingValue)zmk_custom_settings_SettingValue_init_zero;
+
+    if (zmk_custom_setting_is_array(setting)) {
+        dest->which_value_type = zmk_custom_settings_SettingValue_array_value_tag;
+        dest->value_type.array_value.index = setting->array_index;
+        dest->value_type.array_value.size = setting->array_size;
+        dest->value_type.array_value.has_value = true;
+        return value_to_scalar_proto(src, &dest->value_type.array_value.value);
+    }
+
+    zmk_custom_settings_SettingScalarValue scalar =
+        zmk_custom_settings_SettingScalarValue_init_zero;
+    int ret = value_to_scalar_proto(src, &scalar);
+    if (ret < 0) {
+        return ret;
+    }
+
+    switch (scalar.which_value_type) {
+    case zmk_custom_settings_SettingScalarValue_bytes_value_tag:
+        dest->which_value_type = zmk_custom_settings_SettingValue_bytes_value_tag;
+        dest->value_type.bytes_value.size = scalar.value_type.bytes_value.size;
+        memcpy(dest->value_type.bytes_value.bytes, scalar.value_type.bytes_value.bytes,
+               dest->value_type.bytes_value.size);
+        return 0;
+    case zmk_custom_settings_SettingScalarValue_int32_value_tag:
+        dest->which_value_type = zmk_custom_settings_SettingValue_int32_value_tag;
+        dest->value_type.int32_value = scalar.value_type.int32_value;
+        return 0;
+    case zmk_custom_settings_SettingScalarValue_bool_value_tag:
+        dest->which_value_type = zmk_custom_settings_SettingValue_bool_value_tag;
+        dest->value_type.bool_value = scalar.value_type.bool_value;
+        return 0;
+    case zmk_custom_settings_SettingScalarValue_string_value_tag:
+        dest->which_value_type = zmk_custom_settings_SettingValue_string_value_tag;
+        copy_string(dest->value_type.string_value, sizeof(dest->value_type.string_value),
+                    scalar.value_type.string_value);
         return 0;
     default:
         return -EINVAL;
@@ -223,11 +319,11 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
         dest->which_constraint_type = zmk_custom_settings_SettingConstraint_range_tag;
         dest->constraint_type.range.has_min = true;
         dest->constraint_type.range.has_max = true;
-        int ret = value_to_proto(&src->range.min, &dest->constraint_type.range.min);
+        int ret = value_to_scalar_proto(&src->range.min, &dest->constraint_type.range.min);
         if (ret < 0) {
             return ret;
         }
-        return value_to_proto(&src->range.max, &dest->constraint_type.range.max);
+        return value_to_scalar_proto(&src->range.max, &dest->constraint_type.range.max);
     }
     case ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS:
         dest->which_constraint_type = zmk_custom_settings_SettingConstraint_options_tag;
@@ -236,8 +332,8 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
         dest->constraint_type.options.labels_count =
             MIN(src->options.count, ARRAY_SIZE(dest->constraint_type.options.labels));
         for (size_t i = 0; i < dest->constraint_type.options.values_count; i++) {
-            int ret =
-                value_to_proto(&src->options.values[i], &dest->constraint_type.options.values[i]);
+            int ret = value_to_scalar_proto(&src->options.values[i],
+                                            &dest->constraint_type.options.values[i]);
             if (ret < 0) {
                 return ret;
             }
@@ -271,13 +367,18 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     *dest = (zmk_custom_settings_Setting)zmk_custom_settings_Setting_init_zero;
 
     copy_string(dest->subsystem_id, sizeof(dest->subsystem_id), setting->subsystem_id);
-    copy_string(dest->key, sizeof(dest->key), setting->key);
+    copy_string(dest->key, sizeof(dest->key), zmk_custom_setting_public_key(setting));
     dest->value_type = proto_value_type(setting->value_type);
     dest->confidentiality = proto_confidentiality(setting->confidentiality);
     dest->read_permission = proto_permission(setting->read_permission);
     dest->write_permission = proto_permission(setting->write_permission);
     dest->has_unsaved_value = zmk_custom_setting_has_unsaved_value(setting);
     dest->source = source;
+    dest->is_array = zmk_custom_setting_is_array(setting);
+    if (dest->is_array) {
+        dest->array_index = setting->array_index;
+        dest->array_size = setting->array_size;
+    }
 
     if (setting->constraint.type != ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
         dest->has_constraint = true;
@@ -296,7 +397,7 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
         }
 
         dest->has_value = true;
-        ret = value_to_proto(&value, &dest->value);
+        ret = value_to_proto(setting, &value, &dest->value);
         if (ret < 0) {
             dest->has_value = false;
             return ret;
@@ -443,7 +544,10 @@ static int handle_get_setting(const zmk_custom_settings_GetSettingRequest *req,
         return -ENOENT;
     }
 
-    const struct zmk_custom_setting *setting = zmk_custom_setting_find(ref->subsystem_id, ref->key);
+    const struct zmk_custom_setting *setting =
+        ref->has_array_index
+            ? zmk_custom_setting_find_array_element(ref->subsystem_id, ref->key, ref->array_index)
+            : zmk_custom_setting_find(ref->subsystem_id, ref->key);
     if (!setting) {
         return -ENOENT;
     }
@@ -473,20 +577,40 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
         return 0;
     }
 
-    const struct zmk_custom_setting *setting = zmk_custom_setting_find(ref->subsystem_id, ref->key);
-    if (!setting) {
-        return -ENOENT;
+    struct zmk_custom_setting_value value;
+    bool value_is_array = false;
+    uint32_t array_index = 0;
+    uint32_t array_size = 0;
+    int ret = proto_to_value(&req->value, &value, &value_is_array, &array_index, &array_size);
+    if (ret < 0) {
+        return ret;
+    }
+
+    const struct zmk_custom_setting *setting = NULL;
+    if (value_is_array || ref->has_array_index) {
+        uint32_t resolved_index = value_is_array ? array_index : ref->array_index;
+        if (value_is_array && ref->has_array_index && ref->array_index != array_index) {
+            return -EINVAL;
+        }
+
+        setting =
+            zmk_custom_setting_find_array_element(ref->subsystem_id, ref->key, resolved_index);
+        if (!setting) {
+            return -ENOENT;
+        }
+        if (value_is_array && array_size != setting->array_size) {
+            return -EINVAL;
+        }
+    } else {
+        setting = zmk_custom_setting_find(ref->subsystem_id, ref->key);
+        if (!setting) {
+            return -ENOENT;
+        }
     }
 
     if (needs_unlock(setting->write_permission)) {
         set_error(resp, "Unlock required");
         return 0;
-    }
-
-    struct zmk_custom_setting_value value;
-    int ret = proto_to_value(&req->value, &value);
-    if (ret < 0) {
-        return ret;
     }
 
     enum zmk_custom_setting_write_mode mode =

@@ -85,20 +85,30 @@ static void raise_setting_changed(const struct zmk_custom_setting *setting,
 
 bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting, const char *subsystem_id,
                                 const char *key, const char *key_prefix) {
+    const char *public_key = zmk_custom_setting_public_key(setting);
+
     if (subsystem_id && subsystem_id[0] != '\0' &&
         strncmp(setting->subsystem_id, subsystem_id,
                 CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
         return false;
     }
 
-    if (key && key[0] != '\0' &&
-        strncmp(setting->key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) != 0) {
-        return false;
+    if (key && key[0] != '\0') {
+        bool key_matches_storage =
+            strncmp(setting->key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) == 0;
+        bool key_matches_public =
+            strncmp(public_key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) == 0;
+        if (!key_matches_storage && !key_matches_public) {
+            return false;
+        }
     }
 
-    if (key_prefix && key_prefix[0] != '\0' &&
-        strncmp(setting->key, key_prefix, strlen(key_prefix)) != 0) {
-        return false;
+    if (key_prefix && key_prefix[0] != '\0') {
+        bool prefix_matches_storage = strncmp(setting->key, key_prefix, strlen(key_prefix)) == 0;
+        bool prefix_matches_public = strncmp(public_key, key_prefix, strlen(key_prefix)) == 0;
+        if (!prefix_matches_storage && !prefix_matches_public) {
+            return false;
+        }
     }
 
     return true;
@@ -107,12 +117,49 @@ bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting, const 
 const struct zmk_custom_setting *zmk_custom_setting_find(const char *subsystem_id,
                                                          const char *key) {
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (zmk_custom_setting_matches(setting, subsystem_id, key, NULL)) {
+        if (subsystem_id && subsystem_id[0] != '\0' &&
+            strncmp(setting->subsystem_id, subsystem_id,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
+            continue;
+        }
+
+        if (key && key[0] != '\0' &&
+            strncmp(setting->key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) == 0) {
             return setting;
         }
     }
 
     return NULL;
+}
+
+const struct zmk_custom_setting *
+zmk_custom_setting_find_array_element(const char *subsystem_id, const char *key, uint32_t index) {
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (!zmk_custom_setting_is_array(setting)) {
+            continue;
+        }
+
+        if (subsystem_id && subsystem_id[0] != '\0' &&
+            strncmp(setting->subsystem_id, subsystem_id,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_SUBSYSTEM_ID_MAX_LEN) != 0) {
+            continue;
+        }
+
+        if (strncmp(setting->array_key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) == 0 &&
+            setting->array_index == index) {
+            return setting;
+        }
+    }
+
+    return NULL;
+}
+
+const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setting) {
+    return zmk_custom_setting_is_array(setting) ? setting->array_key : setting->key;
+}
+
+bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting) {
+    return setting && setting->array_key != NULL;
 }
 
 static int value_type_validate(const struct zmk_custom_setting *setting,
@@ -277,6 +324,17 @@ int zmk_custom_setting_read_by_key(const char *subsystem_id, const char *key,
     return zmk_custom_setting_read(setting, value);
 }
 
+int zmk_custom_setting_read_array_by_key(const char *subsystem_id, const char *key, uint32_t index,
+                                         struct zmk_custom_setting_value *value) {
+    const struct zmk_custom_setting *setting =
+        zmk_custom_setting_find_array_element(subsystem_id, key, index);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    return zmk_custom_setting_read(setting, value);
+}
+
 int zmk_custom_setting_write(const struct zmk_custom_setting *const_setting,
                              const struct zmk_custom_setting_value *value,
                              enum zmk_custom_setting_write_mode mode) {
@@ -326,6 +384,18 @@ int zmk_custom_setting_write_by_key(const char *subsystem_id, const char *key,
                                     const struct zmk_custom_setting_value *value,
                                     enum zmk_custom_setting_write_mode mode) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find(subsystem_id, key);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    return zmk_custom_setting_write(setting, value, mode);
+}
+
+int zmk_custom_setting_write_array_by_key(const char *subsystem_id, const char *key, uint32_t index,
+                                          const struct zmk_custom_setting_value *value,
+                                          enum zmk_custom_setting_write_mode mode) {
+    const struct zmk_custom_setting *setting =
+        zmk_custom_setting_find_array_element(subsystem_id, key, index);
     if (!setting) {
         return -ENOENT;
     }

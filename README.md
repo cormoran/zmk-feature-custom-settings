@@ -9,7 +9,8 @@ web UI.
 ## Features
 
 - Register settings from any module with a subsystem namespace and key.
-- Store typed values: bytes, int32, bool, and string.
+- Store typed values: bytes, int32, bool, string, and fixed-size arrays of
+  those scalar types.
 - Validate writes with optional range, option-list, HID usage, layer ID, or
   behavior ID constraints.
 - Write values in memory, persist them to flash, discard memory changes, or
@@ -73,6 +74,28 @@ ZMK_CUSTOM_SETTING_DEFINE(my_speed_setting, "my_module", "speed",
                           ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 ```
 
+Array settings are registered one element at a time. The firmware storage key is
+expanded to `key/index`, but the public API and RPC protocol use the base key
+plus an explicit array index.
+
+```c
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_0, "my_module", "layers", 0, 2,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_1, "my_module", "layers", 1, 2,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+```
+
 Read or update it from firmware:
 
 ```c
@@ -84,6 +107,10 @@ zmk_custom_setting_read(setting, &value);
 zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(20),
                          ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 zmk_custom_setting_save(setting);
+
+zmk_custom_setting_write_array_by_key("my_module", "layers", 1,
+                                      &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                      ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
 
 The custom Studio subsystem identifier is `zmk__custom_settings`.
