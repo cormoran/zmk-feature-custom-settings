@@ -17,7 +17,7 @@ describe("RPCTestSection Component", () => {
     it("should render RPC controls when subsystem is found", () => {
       const mockZMKApp = createConnectedMockZMKApp({
         deviceName: "Test Device",
-        subsystems: [SUBSYSTEM_IDENTIFIER],
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
       });
 
       render(
@@ -45,7 +45,7 @@ describe("RPCTestSection Component", () => {
 
     it("should show default input value", () => {
       const mockZMKApp = createConnectedMockZMKApp({
-        subsystems: [SUBSYSTEM_IDENTIFIER],
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
       });
 
       render(
@@ -94,19 +94,16 @@ describe("RPCTestSection Component", () => {
 
 describe("settings JSON conversion", () => {
   const baseSetting: Setting = {
-    customSubsystemId: "test",
+    customSubsystemIndex: 1,
     key: "int_value",
-    confidentiality: 2,
-    readPermission: 0,
-    writePermission: 0,
-    constraints: [],
+    meta: undefined,
     hasUnsavedValue: false,
     value: { int32Value: 42 },
     source: 0,
   };
 
   it("exports scalar settings as typed JSON entries", () => {
-    expect(settingToExportedSetting(baseSetting)).toEqual({
+    expect(settingToExportedSetting(baseSetting, () => "test")).toEqual({
       customSubsystemId: "test",
       key: "int_value",
       type: "int32",
@@ -116,17 +113,20 @@ describe("settings JSON conversion", () => {
 
   it("exports array settings with public key and explicit index", () => {
     expect(
-      settingToExportedSetting({
-        ...baseSetting,
-        key: "array_value",
-        value: {
-          arrayValue: {
-            index: 1,
-            size: 2,
-            value: { boolValue: true },
+      settingToExportedSetting(
+        {
+          ...baseSetting,
+          key: "array_value",
+          value: {
+            arrayValue: {
+              index: 1,
+              size: 2,
+              value: { boolValue: true },
+            },
           },
         },
-      })
+        () => "test"
+      )
     ).toEqual({
       customSubsystemId: "test",
       key: "array_value",
@@ -138,7 +138,7 @@ describe("settings JSON conversion", () => {
   });
 
   it("parses exported JSON back to write values", () => {
-    const json = settingsExportToJson([baseSetting]);
+    const json = settingsExportToJson([baseSetting], () => "test");
     const [setting] = parseSettingsExportJson(json);
 
     expect(setting).toMatchObject({

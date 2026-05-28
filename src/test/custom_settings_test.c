@@ -10,8 +10,28 @@
 #include <zephyr/logging/log.h>
 
 #include <zmk/custom_settings.h>
+#if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
+#include <zmk/studio/custom.h>
+#endif
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+
+#if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
+static struct zmk_rpc_custom_subsystem_meta test_custom_settings_meta = {
+    ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS(),
+    .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
+};
+
+static bool test_custom_settings_handle_request(const zmk_custom_CallRequest *req,
+                                                pb_callback_t *res) {
+    ARG_UNUSED(req);
+    ARG_UNUSED(res);
+
+    return false;
+}
+
+ZMK_RPC_CUSTOM_SUBSYSTEM(test, &test_custom_settings_meta, test_custom_settings_handle_request);
+#endif
 
 ZMK_CUSTOM_SETTING_DEFINE(test_int_setting, "test", "int_value",
                           ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(10),

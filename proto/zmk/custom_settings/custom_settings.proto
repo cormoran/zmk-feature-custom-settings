@@ -2,14 +2,6 @@ syntax = "proto3";
 
 package zmk.custom_settings;
 
-enum SettingValueType {
-    SETTING_VALUE_TYPE_UNKNOWN = 0;
-    SETTING_VALUE_TYPE_BYTES = 1;
-    SETTING_VALUE_TYPE_INT32 = 2;
-    SETTING_VALUE_TYPE_BOOL = 3;
-    SETTING_VALUE_TYPE_STRING = 4;
-}
-
 enum SettingWriteMode {
     SETTING_WRITE_MODE_MEMORY = 0;
     SETTING_WRITE_MODE_PERSIST = 1;
@@ -90,34 +82,44 @@ message SettingConstraint {
 }
 
 message SettingRef {
-    optional string custom_subsystem_id = 1;
+    optional uint32 custom_subsystem_index = 1;
     optional string key = 2;
     optional uint32 source = 3;
     optional uint32 array_index = 4;
 }
 
 message SettingScope {
-    optional string custom_subsystem_id = 1;
+    optional uint32 custom_subsystem_index = 1;
     optional string key = 2;
     optional string key_prefix = 3;
     optional uint32 source = 4;
 }
 
+message SettingMeta {
+    SettingConfidentiality confidentiality = 1;
+    SettingPermission read_permission = 2;
+    SettingPermission write_permission = 3;
+    repeated SettingConstraint constraints = 4;
+}
+
 message Setting {
-    string custom_subsystem_id = 1;
+    uint32 custom_subsystem_index = 1;
     string key = 2;
-    SettingConfidentiality confidentiality = 4;
-    SettingPermission read_permission = 5;
-    SettingPermission write_permission = 6;
-    repeated SettingConstraint constraints = 7;
+    SettingMeta meta = 3;
     bool has_unsaved_value = 8;
     SettingValue value = 9;
     uint32 source = 10;
 }
 
-message ListSettingsRequest { SettingScope scope = 1; }
+message ListSettingsRequest {
+    SettingScope scope = 1;
+    bool require_meta = 2;
+}
 
-message GetSettingRequest { SettingRef setting = 1; }
+message GetSettingRequest {
+    SettingRef setting = 1;
+    bool require_meta = 2;
+}
 
 message WriteSettingRequest {
     SettingRef setting = 1;
@@ -166,4 +168,59 @@ message SettingNotification {
 
 message Notification {
     oneof notification_type { SettingNotification setting = 1; }
+}
+
+message InternalSettingRef {
+    optional string custom_subsystem_id = 1;
+    optional string key = 2;
+    optional uint32 source = 3;
+    optional uint32 array_index = 4;
+}
+
+message InternalSettingScope {
+    optional string custom_subsystem_id = 1;
+    optional string key = 2;
+    optional string key_prefix = 3;
+    optional uint32 source = 4;
+}
+
+message InternalListSettingsRequest {
+    InternalSettingScope scope = 1;
+    bool require_meta = 2;
+}
+
+message InternalWriteSettingRequest {
+    InternalSettingRef setting = 1;
+    SettingValue value = 2;
+    SettingWriteMode mode = 3;
+}
+
+message InternalScopeMutationRequest { InternalSettingScope scope = 1; }
+
+message InternalRequest {
+    oneof request_type {
+        InternalListSettingsRequest list_settings = 1;
+        InternalWriteSettingRequest write_setting = 2;
+        InternalScopeMutationRequest save_settings = 3;
+        InternalScopeMutationRequest discard_settings = 4;
+        InternalScopeMutationRequest reset_settings = 5;
+    }
+}
+
+message InternalSetting {
+    string custom_subsystem_id = 1;
+    string key = 2;
+    SettingMeta meta = 3;
+    bool has_unsaved_value = 8;
+    SettingValue value = 9;
+    uint32 source = 10;
+}
+
+message InternalSettingNotification {
+    SettingNotificationKind kind = 1;
+    InternalSetting setting = 2;
+}
+
+message InternalNotification {
+    oneof notification_type { InternalSettingNotification setting = 1; }
 }

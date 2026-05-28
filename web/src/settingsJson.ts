@@ -26,7 +26,10 @@ export interface SettingsExportDocument {
 }
 
 export function settingToExportedSetting(
-  setting: Setting
+  setting: Setting,
+  subsystemIdentifierForIndex: (index: number) => string | undefined = (
+    index
+  ) => String(index)
 ): ExportedSetting | null {
   if (!setting.value) {
     return null;
@@ -43,8 +46,15 @@ export function settingToExportedSetting(
     return null;
   }
 
+  const customSubsystemId = subsystemIdentifierForIndex(
+    setting.customSubsystemIndex
+  );
+  if (!customSubsystemId) {
+    return null;
+  }
+
   const exported: ExportedSetting = {
-    customSubsystemId: setting.customSubsystemId,
+    customSubsystemId,
     key: setting.key,
     type,
     value,
@@ -59,20 +69,30 @@ export function settingToExportedSetting(
 }
 
 export function createSettingsExportDocument(
-  settings: Setting[]
+  settings: Setting[],
+  subsystemIdentifierForIndex?: (index: number) => string | undefined
 ): SettingsExportDocument {
   return {
     format: SETTINGS_EXPORT_FORMAT,
     version: SETTINGS_EXPORT_VERSION,
     exportedAt: new Date().toISOString(),
     settings: settings
-      .map(settingToExportedSetting)
+      .map((setting) =>
+        settingToExportedSetting(setting, subsystemIdentifierForIndex)
+      )
       .filter((setting): setting is ExportedSetting => setting !== null),
   };
 }
 
-export function settingsExportToJson(settings: Setting[]): string {
-  return JSON.stringify(createSettingsExportDocument(settings), null, 2);
+export function settingsExportToJson(
+  settings: Setting[],
+  subsystemIdentifierForIndex?: (index: number) => string | undefined
+): string {
+  return JSON.stringify(
+    createSettingsExportDocument(settings, subsystemIdentifierForIndex),
+    null,
+    2
+  );
 }
 
 export function parseSettingsExportJson(json: string): ExportedSetting[] {

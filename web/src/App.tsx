@@ -14,7 +14,6 @@ import {
   SettingScalarValue,
   SettingValue,
   SettingNotificationKind,
-  SettingValueType,
   SettingWriteMode,
 } from "./proto/zmk/custom_settings/custom_settings";
 import {
@@ -26,6 +25,13 @@ import {
 export const SUBSYSTEM_IDENTIFIER = "zmk__custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
 const SOURCE_ALL = 0xffffffff;
+
+enum EditorValueType {
+  Int32 = "int32",
+  Bool = "bool",
+  String = "string",
+  Bytes = "bytes",
+}
 
 function App() {
   return (
@@ -86,13 +92,14 @@ export function RPCTestSection() {
   const [customSubsystemId, setCustomSubsystemId] = useState("test");
   const [settingKey, setSettingKey] = useState("int_value");
   const [keyPrefix, setKeyPrefix] = useState("");
-  const [valueType, setValueType] = useState<SettingValueType>(
-    SettingValueType.SETTING_VALUE_TYPE_INT32
+  const [valueType, setValueType] = useState<EditorValueType>(
+    EditorValueType.Int32
   );
   const [value, setValue] = useState("10");
   const [isArray, setIsArray] = useState(false);
   const [arrayIndex, setArrayIndex] = useState(0);
   const [arraySize, setArraySize] = useState(1);
+  const [requireMeta, setRequireMeta] = useState(false);
   const [writeMode, setWriteMode] = useState<SettingWriteMode>(
     SettingWriteMode.SETTING_WRITE_MODE_MEMORY
   );
@@ -104,16 +111,17 @@ export function RPCTestSection() {
   if (!zmkApp) return null;
 
   const subsystem = zmkApp.findSubsystem(SUBSYSTEM_IDENTIFIER);
+  const settingSubsystem = zmkApp.findSubsystem(customSubsystemId);
 
   const settingRef = {
-    customSubsystemId,
+    customSubsystemIndex: settingSubsystem?.index,
     key: settingKey,
     source: 0,
     arrayIndex: isArray ? arrayIndex : undefined,
   };
 
   const settingScope = {
-    customSubsystemId,
+    customSubsystemIndex: settingSubsystem?.index,
     key: settingKey,
     keyPrefix,
     source: 0,
@@ -121,13 +129,13 @@ export function RPCTestSection() {
 
   const parseScalarValue = (): SettingScalarValue => {
     switch (valueType) {
-      case SettingValueType.SETTING_VALUE_TYPE_BYTES:
+      case EditorValueType.Bytes:
         return { bytesValue: new TextEncoder().encode(value) };
-      case SettingValueType.SETTING_VALUE_TYPE_BOOL:
+      case EditorValueType.Bool:
         return { boolValue: value === "true" || value === "1" };
-      case SettingValueType.SETTING_VALUE_TYPE_STRING:
+      case EditorValueType.String:
         return { stringValue: value };
-      case SettingValueType.SETTING_VALUE_TYPE_INT32:
+      case EditorValueType.Int32:
       default:
         return { int32Value: Number.parseInt(value, 10) || 0 };
     }
@@ -165,6 +173,12 @@ export function RPCTestSection() {
 
     return Response.decode(responsePayload);
   };
+
+  const subsystemIdentifierForIndex = (index: number) =>
+    zmkApp.state.customSubsystems?.subsystems[index]?.identifier;
+
+  const subsystemIndexForIdentifier = (identifier: string) =>
+    zmkApp.findSubsystem(identifier)?.index;
 
   const sendRequest = async (request: Request) => {
     setIsLoading(true);
@@ -233,7 +247,6 @@ export function RPCTestSection() {
         Request.create({
           listSettings: {
             scope: {
-              customSubsystemId: "",
               key: "",
               keyPrefix: "",
               source: SOURCE_ALL,
@@ -263,7 +276,10 @@ export function RPCTestSection() {
 
     try {
       const settings = await collectListSettings();
-      const exported = createSettingsExportDocument(settings);
+      const exported = createSettingsExportDocument(
+        settings,
+        subsystemIdentifierForIndex
+      );
       setJsonText(JSON.stringify(exported, null, 2));
       setResponse(`Exported ${exported.settings.length} setting values`);
     } catch (error) {
@@ -283,11 +299,20 @@ export function RPCTestSection() {
     try {
       const settings = parseSettingsExportJson(jsonText);
       for (const importedSetting of settings) {
+        const customSubsystemIndex = subsystemIndexForIdentifier(
+          importedSetting.customSubsystemId
+        );
+        if (customSubsystemIndex === undefined) {
+          throw new Error(
+            `Custom subsystem not found: ${importedSetting.customSubsystemId}`
+          );
+        }
+
         const resp = await callCustomRequest(
           Request.create({
             writeSetting: {
               setting: {
-                customSubsystemId: importedSetting.customSubsystemId,
+                customSubsystemIndex,
                 key: importedSetting.key,
                 source: SOURCE_ALL,
                 arrayIndex: importedSetting.arrayIndex,
@@ -316,10 +341,14 @@ export function RPCTestSection() {
   };
 
   const getSetting = () =>
-    sendRequest(Request.create({ getSetting: { setting: settingRef } }));
+    sendRequest(
+      Request.create({ getSetting: { setting: settingRef, requireMeta } })
+    );
 
   const listSettings = () =>
-    sendRequest(Request.create({ listSettings: { scope: settingScope } }));
+    sendRequest(
+      Request.create({ listSettings: { scope: settingScope, requireMeta } })
+    );
 
   const writeSetting = () =>
     sendRequest(
@@ -384,18 +413,12 @@ export function RPCTestSection() {
         <select
           id="type-input"
           value={valueType}
-          onChange={(e) => setValueType(Number(e.target.value))}
+          onChange={(e) => setValueType(e.target.value as EditorValueType)}
         >
-          <option value={SettingValueType.SETTING_VALUE_TYPE_INT32}>
-            int32
-          </option>
-          <option value={SettingValueType.SETTING_VALUE_TYPE_BOOL}>bool</option>
-          <option value={SettingValueType.SETTING_VALUE_TYPE_STRING}>
-            string
-          </option>
-          <option value={SettingValueType.SETTING_VALUE_TYPE_BYTES}>
-            bytes
-          </option>
+          <option value={EditorValueType.Int32}>int32</option>
+          <option value={EditorValueType.Bool}>bool</option>
+          <option value={EditorValueType.String}>string</option>
+          <option value={EditorValueType.Bytes}>bytes</option>
         </select>
 
         <label htmlFor="array-input">Array</label>
@@ -448,6 +471,14 @@ export function RPCTestSection() {
             persist
           </option>
         </select>
+
+        <label htmlFor="require-meta-input">Include Metadata</label>
+        <input
+          id="require-meta-input"
+          type="checkbox"
+          checked={requireMeta}
+          onChange={(e) => setRequireMeta(e.target.checked)}
+        />
       </div>
 
       <div className="toolbar">
@@ -506,7 +537,9 @@ export function RPCTestSection() {
           <div>
             <dt>Setting</dt>
             <dd>
-              {setting.customSubsystemId}/{setting.key}
+              {subsystemIdentifierForIndex(setting.customSubsystemIndex) ??
+                setting.customSubsystemIndex}
+              /{setting.key}
             </dd>
           </div>
           <div>
@@ -535,7 +568,7 @@ export function RPCTestSection() {
 
 function formatSetting(setting: Setting): string {
   const value = setting.value ? formatValue(setting.value) : "(hidden)";
-  return `${setting.customSubsystemId}/${setting.key} = ${value}`;
+  return `${setting.customSubsystemIndex}/${setting.key} = ${value}`;
 }
 
 function formatValue(value: SettingValue): string {

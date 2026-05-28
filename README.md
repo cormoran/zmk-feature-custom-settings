@@ -9,6 +9,7 @@ web UI.
 ## Features
 
 - Register settings from any module with a custom subsystem namespace and key.
+  RPC clients address the namespace by its ZMK Studio custom subsystem index.
 - Store typed values: bytes, int32, bool, string, and fixed-size arrays of
   those scalar types.
 - Validate writes with optional range, option-list, HID usage, layer ID, or
@@ -51,7 +52,7 @@ CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
 ```
 
 For split keyboards, enable ZMK's relay-event transport on both halves and size
-the relay payload for the encoded protobuf messages you expect to relay:
+the relay payload for the encoded internal relay messages you expect to relay:
 
 ```conf
 CONFIG_ZMK_SPLIT_RELAY_EVENT=y
@@ -73,6 +74,10 @@ ZMK_CUSTOM_SETTING_DEFINE(my_speed_setting, "my_module", "speed",
                           ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
                           ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 ```
+
+For RPC access, the setting namespace should match a Studio custom subsystem
+identifier registered by the module that owns the setting. The web UI obtains
+that subsystem's index from ZMK Studio and sends the index in setting requests.
 
 Array settings are registered one element at a time. The firmware storage key is
 expanded to `key/index`, but the public API and RPC protocol use the base key
