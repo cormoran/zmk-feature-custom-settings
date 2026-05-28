@@ -220,28 +220,40 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
         return ret;
     }
 
-    switch (setting->constraint.type) {
-    case ZMK_CUSTOM_SETTING_CONSTRAINT_NONE:
-    case ZMK_CUSTOM_SETTING_CONSTRAINT_HID_USAGE:
-    case ZMK_CUSTOM_SETTING_CONSTRAINT_LAYER_ID:
-    case ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID:
-        return 0;
-    case ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE:
-        if (compare_values(value, &setting->constraint.range.min) < 0 ||
-            compare_values(value, &setting->constraint.range.max) > 0) {
-            return -ERANGE;
-        }
-        return 0;
-    case ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS:
-        for (size_t i = 0; i < setting->constraint.options.count; i++) {
-            if (value_equals(value, &setting->constraint.options.values[i])) {
-                return 0;
+    for (size_t c = 0; c < setting->constraints_count; c++) {
+        const struct zmk_custom_setting_constraint *constraint = &setting->constraints[c];
+
+        switch (constraint->type) {
+        case ZMK_CUSTOM_SETTING_CONSTRAINT_NONE:
+        case ZMK_CUSTOM_SETTING_CONSTRAINT_HID_USAGE:
+        case ZMK_CUSTOM_SETTING_CONSTRAINT_LAYER_ID:
+        case ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID:
+            break;
+        case ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE:
+            if (compare_values(value, &constraint->range.min) < 0 ||
+                compare_values(value, &constraint->range.max) > 0) {
+                return -ERANGE;
             }
+            break;
+        case ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS: {
+            bool matched = false;
+            for (size_t i = 0; i < constraint->options.count; i++) {
+                if (value_equals(value, &constraint->options.values[i])) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                return -EINVAL;
+            }
+            break;
         }
-        return -EINVAL;
-    default:
-        return -EINVAL;
+        default:
+            return -EINVAL;
+        }
     }
+
+    return 0;
 }
 
 static int setting_storage_name(const struct zmk_custom_setting *setting, char *name,

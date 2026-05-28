@@ -2,7 +2,6 @@ import {
   Setting,
   SettingScalarValue,
   SettingValue,
-  SettingValueType,
 } from "./proto/zmk/custom_settings/custom_settings";
 
 const SETTINGS_EXPORT_FORMAT = "zmk-custom-settings";
@@ -26,24 +25,19 @@ export interface SettingsExportDocument {
   settings: ExportedSetting[];
 }
 
-const settingTypeNames: Record<SettingValueType, ExportedSettingType | null> = {
-  [SettingValueType.SETTING_VALUE_TYPE_UNKNOWN]: null,
-  [SettingValueType.SETTING_VALUE_TYPE_BYTES]: "bytes",
-  [SettingValueType.SETTING_VALUE_TYPE_INT32]: "int32",
-  [SettingValueType.SETTING_VALUE_TYPE_BOOL]: "bool",
-  [SettingValueType.SETTING_VALUE_TYPE_STRING]: "string",
-  [SettingValueType.UNRECOGNIZED]: null,
-};
-
 export function settingToExportedSetting(
   setting: Setting
 ): ExportedSetting | null {
-  const type = settingTypeNames[setting.valueType];
-  if (!type || !setting.value) {
+  if (!setting.value) {
     return null;
   }
 
   const scalarValue = setting.value.arrayValue?.value ?? setting.value;
+  const type = scalarValueType(scalarValue);
+  if (!type) {
+    return null;
+  }
+
   const value = scalarValueToJsonValue(type, scalarValue);
   if (value === undefined) {
     return null;
@@ -56,9 +50,9 @@ export function settingToExportedSetting(
     value,
   };
 
-  if (setting.value.arrayValue || setting.isArray) {
-    exported.arrayIndex = setting.value.arrayValue?.index ?? setting.arrayIndex;
-    exported.arraySize = setting.value.arrayValue?.size ?? setting.arraySize;
+  if (setting.value.arrayValue) {
+    exported.arrayIndex = setting.value.arrayValue.index;
+    exported.arraySize = setting.value.arrayValue.size;
   }
 
   return exported;
@@ -117,6 +111,16 @@ export function exportedSettingValueToProto(
   }
 
   return scalarValue;
+}
+
+function scalarValueType(
+  value: SettingScalarValue
+): ExportedSettingType | null {
+  if (value.bytesValue !== undefined) return "bytes";
+  if (value.int32Value !== undefined) return "int32";
+  if (value.boolValue !== undefined) return "bool";
+  if (value.stringValue !== undefined) return "string";
+  return null;
 }
 
 function scalarValueToJsonValue(

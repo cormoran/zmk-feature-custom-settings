@@ -109,8 +109,7 @@ export function RPCTestSection() {
     customSubsystemId,
     key: settingKey,
     source: 0,
-    arrayIndex,
-    hasArrayIndex: isArray,
+    arrayIndex: isArray ? arrayIndex : undefined,
   };
 
   const settingScope = {
@@ -291,8 +290,7 @@ export function RPCTestSection() {
                 customSubsystemId: importedSetting.customSubsystemId,
                 key: importedSetting.key,
                 source: SOURCE_ALL,
-                arrayIndex: importedSetting.arrayIndex ?? 0,
-                hasArrayIndex: importedSetting.arrayIndex !== undefined,
+                arrayIndex: importedSetting.arrayIndex,
               },
               value: exportedSettingValueToProto(importedSetting),
               mode: writeMode,
@@ -514,8 +512,8 @@ export function RPCTestSection() {
           <div>
             <dt>Array</dt>
             <dd>
-              {setting.isArray
-                ? `${setting.arrayIndex}/${setting.arraySize}`
+              {setting.value?.arrayValue
+                ? `${setting.value.arrayValue.index}/${setting.value.arrayValue.size}`
                 : "no"}
             </dd>
           </div>

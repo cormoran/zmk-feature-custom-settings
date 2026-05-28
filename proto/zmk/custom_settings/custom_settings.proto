@@ -90,34 +90,29 @@ message SettingConstraint {
 }
 
 message SettingRef {
-    string custom_subsystem_id = 1;
-    string key = 2;
-    uint32 source = 3;
-    uint32 array_index = 4;
-    bool has_array_index = 5;
+    optional string custom_subsystem_id = 1;
+    optional string key = 2;
+    optional uint32 source = 3;
+    optional uint32 array_index = 4;
 }
 
 message SettingScope {
-    string custom_subsystem_id = 1;
-    string key = 2;
-    string key_prefix = 3;
-    uint32 source = 4;
+    optional string custom_subsystem_id = 1;
+    optional string key = 2;
+    optional string key_prefix = 3;
+    optional uint32 source = 4;
 }
 
 message Setting {
     string custom_subsystem_id = 1;
     string key = 2;
-    SettingValueType value_type = 3;
     SettingConfidentiality confidentiality = 4;
     SettingPermission read_permission = 5;
     SettingPermission write_permission = 6;
-    SettingConstraint constraint = 7;
+    repeated SettingConstraint constraints = 7;
     bool has_unsaved_value = 8;
     SettingValue value = 9;
     uint32 source = 10;
-    bool is_array = 11;
-    uint32 array_index = 12;
-    uint32 array_size = 13;
 }
 
 message ListSettingsRequest { SettingScope scope = 1; }

@@ -19,6 +19,10 @@ config ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN
 config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     bool "Enable custom settings Studio RPC"
     depends on ZMK_STUDIO
+    select NANOPB
+    imply NANOPB_NO_ERRMSG
+    imply NANOPB_WITHOUT_64BIT
+    imply NANOPB_NO_ENCODE_SIZE_CHECK
 
 config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
     bool "Relay custom settings RPC across split halves"

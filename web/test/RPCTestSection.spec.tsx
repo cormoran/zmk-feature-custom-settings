@@ -10,10 +10,7 @@ import {
   settingToExportedSetting,
 } from "../src/settingsJson";
 import { RPCTestSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
-import {
-  Setting,
-  SettingValueType,
-} from "../src/proto/zmk/custom_settings/custom_settings";
+import { Setting } from "../src/proto/zmk/custom_settings/custom_settings";
 
 describe("RPCTestSection Component", () => {
   describe("With Subsystem", () => {
@@ -99,17 +96,13 @@ describe("settings JSON conversion", () => {
   const baseSetting: Setting = {
     customSubsystemId: "test",
     key: "int_value",
-    valueType: SettingValueType.SETTING_VALUE_TYPE_INT32,
     confidentiality: 2,
     readPermission: 0,
     writePermission: 0,
-    constraint: undefined,
+    constraints: [],
     hasUnsavedValue: false,
     value: { int32Value: 42 },
     source: 0,
-    isArray: false,
-    arrayIndex: 0,
-    arraySize: 0,
   };
 
   it("exports scalar settings as typed JSON entries", () => {
@@ -133,10 +126,6 @@ describe("settings JSON conversion", () => {
             value: { boolValue: true },
           },
         },
-        valueType: SettingValueType.SETTING_VALUE_TYPE_BOOL,
-        isArray: true,
-        arrayIndex: 1,
-        arraySize: 2,
       })
     ).toEqual({
       customSubsystemId: "test",

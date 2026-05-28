@@ -103,7 +103,8 @@ struct zmk_custom_setting {
     enum zmk_custom_setting_confidentiality confidentiality;
     enum zmk_custom_setting_permission read_permission;
     enum zmk_custom_setting_permission write_permission;
-    struct zmk_custom_setting_constraint constraint;
+    const struct zmk_custom_setting_constraint *constraints;
+    size_t constraints_count;
     struct zmk_custom_setting_value default_value;
 
     bool initialized;
@@ -169,11 +170,19 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_DEFINE(_name, _custom_subsystem_id, _key, _value_type, _default_value,  \
                                   _confidentiality, _read_permission, _write_permission,           \
                                   _constraint)                                                     \
+    ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(_name, _custom_subsystem_id, _key, _value_type,     \
+                                               _default_value, _confidentiality, _read_permission, \
+                                               _write_permission, _constraint)
+
+#define ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(_name, _custom_subsystem_id, _key, _value_type, \
+                                                   _default_value, _confidentiality,               \
+                                                   _read_permission, _write_permission, ...)       \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
     BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
                  "Custom setting key is too long");                                                \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
     STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
@@ -184,13 +193,21 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
         .write_permission = _write_permission,                                                     \
-        .constraint = _constraint,                                                                 \
+        .constraints = _name##_constraints,                                                        \
+        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
         .default_value = _default_value,                                                           \
     }
 
 #define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(                                                   \
     _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
     _confidentiality, _read_permission, _write_permission, _constraint)                            \
+    ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_CONSTRAINTS(                                      \
+        _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,       \
+        _confidentiality, _read_permission, _write_permission, _constraint)
+
+#define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_CONSTRAINTS(                                  \
+    _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
+    _confidentiality, _read_permission, _write_permission, ...)                                    \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -198,6 +215,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
                      CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                                       \
                  "Custom setting array element key is too long");                                  \
     BUILD_ASSERT((_index) < (_array_size), "Custom setting array index must be in range");         \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
     STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key "/" ZMK_CUSTOM_SETTINGS_STRINGIFY(_index),                                     \
@@ -208,7 +226,8 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
         .write_permission = _write_permission,                                                     \
-        .constraint = _constraint,                                                                 \
+        .constraints = _name##_constraints,                                                        \
+        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
         .default_value = _default_value,                                                           \
     }
 
