@@ -105,7 +105,7 @@ message SettingMeta {
 message Setting {
     uint32 custom_subsystem_index = 1;
     string key = 2;
-    SettingMeta meta = 3;
+    optional SettingMeta meta = 3;
     bool has_unsaved_value = 8;
     SettingValue value = 9;
     uint32 source = 10;
