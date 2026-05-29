@@ -29,8 +29,8 @@ config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     depends on ZMK_SPLIT_RELAY_EVENT
     help
-      Relays encoded custom settings RPC requests to split peripherals and
-      relays encoded setting notifications back to the central side. Increase
+      Relays custom settings RPC requests to split peripherals and encoded
+      setting notifications back to the central side. Increase
       CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN if your request or notification
       payloads exceed the default split relay event payload size.
 
