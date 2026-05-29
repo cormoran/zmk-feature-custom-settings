@@ -61,10 +61,12 @@ enum zmk_custom_setting_changed_kind {
 struct zmk_custom_setting_value {
     enum zmk_custom_setting_value_type type;
     size_t size;
-    uint8_t bytes_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
-    int32_t int32_value;
-    bool bool_value;
-    char string_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    union {
+        uint8_t bytes_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
+        int32_t int32_value;
+        bool bool_value;
+        char string_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    };
 };
 
 struct zmk_custom_setting_range {

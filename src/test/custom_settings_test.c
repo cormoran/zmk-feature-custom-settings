@@ -9,7 +9,10 @@
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 
+#include <dt-bindings/zmk/hid_usage_pages.h>
+#include <zmk/behavior.h>
 #include <zmk/custom_settings.h>
+#include <zmk/keymap.h>
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
 #include <zmk/studio/custom.h>
 #endif
@@ -56,6 +59,27 @@ ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_1, "test", "array_val
                                         ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                         ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
+ZMK_CUSTOM_SETTING_DEFINE(test_hid_usage_setting, "test", "hid_usage",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_HID_USAGE(HID_USAGE_KEY, 4, 29));
+
+ZMK_CUSTOM_SETTING_DEFINE(test_layer_id_setting, "test", "layer_id",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_LAYER_ID);
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+ZMK_CUSTOM_SETTING_DEFINE(test_behavior_id_setting, "test", "behavior_id",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_BEHAVIOR_ID);
+#endif
+
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
     int ret = zmk_custom_setting_read(setting, &value);
@@ -72,6 +96,75 @@ static int expect_int_value(const struct zmk_custom_setting *setting, int32_t ex
     return 0;
 }
 
+static int test_constraint_validation(void) {
+    const struct zmk_custom_setting *hid_usage = zmk_custom_setting_find("test", "hid_usage");
+    if (!hid_usage) {
+        LOG_ERR("Test HID usage setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_write(hid_usage, &ZMK_CUSTOM_SETTING_VALUE_INT32(29),
+                                       ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write(hid_usage, &ZMK_CUSTOM_SETTING_VALUE_INT32(30),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected HID usage validation failure, got %d", ret);
+        return -EINVAL;
+    }
+
+    const struct zmk_custom_setting *layer_id = zmk_custom_setting_find("test", "layer_id");
+    if (!layer_id) {
+        LOG_ERR("Test layer ID setting not registered");
+        return -ENOENT;
+    }
+
+    ret = zmk_custom_setting_write(layer_id, &ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write(layer_id, &ZMK_CUSTOM_SETTING_VALUE_INT32(ZMK_KEYMAP_LAYERS_LEN),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected layer ID validation failure, got %d", ret);
+        return -EINVAL;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+    const struct zmk_custom_setting *behavior_id = zmk_custom_setting_find("test", "behavior_id");
+    if (!behavior_id) {
+        LOG_ERR("Test behavior ID setting not registered");
+        return -ENOENT;
+    }
+
+    zmk_behavior_local_id_t key_press_id = zmk_behavior_get_local_id("key_press");
+    if (key_press_id == UINT16_MAX) {
+        LOG_ERR("Test key press behavior local ID not registered");
+        return -ENOENT;
+    }
+
+    ret = zmk_custom_setting_write(behavior_id, &ZMK_CUSTOM_SETTING_VALUE_INT32(key_press_id),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write(behavior_id, &ZMK_CUSTOM_SETTING_VALUE_INT32(UINT16_MAX),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected behavior ID validation failure, got %d", ret);
+        return -EINVAL;
+    }
+#endif
+
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "int_value");
     if (!setting) {
@@ -80,6 +173,11 @@ static int custom_settings_test_init(void) {
     }
 
     int ret = expect_int_value(setting, 10);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_constraint_validation();
     if (ret < 0) {
         return ret;
     }

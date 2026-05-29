@@ -16,7 +16,10 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 
+#include <dt-bindings/zmk/hid_usage_pages.h>
+#include <zmk/behavior.h>
 #include <zmk/custom_settings.h>
+#include <zmk/keymap.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -209,6 +212,73 @@ static int compare_values(const struct zmk_custom_setting_value *a,
     }
 }
 
+static int validate_int32_value(const struct zmk_custom_setting_value *value,
+                                int32_t *int32_value) {
+    if (value->type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32) {
+        return -EINVAL;
+    }
+
+    *int32_value = value->int32_value;
+    return 0;
+}
+
+static int validate_hid_usage_constraint(const struct zmk_custom_setting_constraint *constraint,
+                                         const struct zmk_custom_setting_value *value) {
+    int32_t int32_value;
+    int ret = validate_int32_value(value, &int32_value);
+    if (ret < 0) {
+        return ret;
+    }
+    if (int32_value < 0) {
+        return -ERANGE;
+    }
+
+    uint32_t usage = (uint32_t)int32_value;
+    uint32_t usage_page = ZMK_HID_USAGE_PAGE(usage);
+    uint32_t usage_id = ZMK_HID_USAGE_ID(usage);
+
+    if (usage_page == 0U) {
+        usage_page = constraint->hid_usage.usage_page;
+        usage_id = usage;
+    }
+
+    if (usage_page != constraint->hid_usage.usage_page ||
+        usage_id < constraint->hid_usage.usage_min || usage_id > constraint->hid_usage.usage_max) {
+        return -ERANGE;
+    }
+
+    return 0;
+}
+
+static int validate_layer_id_constraint(const struct zmk_custom_setting_value *value) {
+    int32_t layer_id;
+    int ret = validate_int32_value(value, &layer_id);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return layer_id >= 0 && layer_id < ZMK_KEYMAP_LAYERS_LEN ? 0 : -ERANGE;
+}
+
+static int validate_behavior_id_constraint(const struct zmk_custom_setting_value *value) {
+    int32_t behavior_id;
+    int ret = validate_int32_value(value, &behavior_id);
+    if (ret < 0) {
+        return ret;
+    }
+    if (behavior_id < 0 || behavior_id >= UINT16_MAX) {
+        return -ERANGE;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+    return zmk_behavior_find_behavior_name_from_local_id((zmk_behavior_local_id_t)behavior_id)
+               ? 0
+               : -EINVAL;
+#else
+    return -ENOTSUP;
+#endif
+}
+
 int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
                                 const struct zmk_custom_setting_value *value) {
     if (!setting || !value) {
@@ -225,9 +295,24 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
 
         switch (constraint->type) {
         case ZMK_CUSTOM_SETTING_CONSTRAINT_NONE:
+            break;
         case ZMK_CUSTOM_SETTING_CONSTRAINT_HID_USAGE:
+            ret = validate_hid_usage_constraint(constraint, value);
+            if (ret < 0) {
+                return ret;
+            }
+            break;
         case ZMK_CUSTOM_SETTING_CONSTRAINT_LAYER_ID:
+            ret = validate_layer_id_constraint(value);
+            if (ret < 0) {
+                return ret;
+            }
+            break;
         case ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID:
+            ret = validate_behavior_id_constraint(value);
+            if (ret < 0) {
+                return ret;
+            }
             break;
         case ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE:
             if (compare_values(value, &constraint->range.min) < 0 ||
