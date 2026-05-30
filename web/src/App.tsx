@@ -1,4 +1,4 @@
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import "./App.css";
 import { connect as serial_connect } from "@zmkfirmware/zmk-studio-ts-client/transport/serial";
 import {
@@ -92,9 +92,11 @@ function App() {
 
 export function RPCTestSection() {
   const zmkApp = useContext(ZMKAppContext);
-  const [customSubsystemId, setCustomSubsystemId] = useState("");
-  const [settingKey, setSettingKey] = useState("");
-  const [keyPrefix, setKeyPrefix] = useState("");
+  const [filterCustomSubsystemId, setFilterCustomSubsystemId] = useState("");
+  const [filterKey, setFilterKey] = useState("");
+  const [filterKeyPrefix, setFilterKeyPrefix] = useState("");
+  const [editorCustomSubsystemId, setEditorCustomSubsystemId] = useState("");
+  const [editorSettingKey, setEditorSettingKey] = useState("");
   const [valueType, setValueType] = useState<EditorValueType>(
     EditorValueType.Int32
   );
@@ -112,25 +114,27 @@ export function RPCTestSection() {
   const [jsonText, setJsonText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  if (!zmkApp) return null;
-
-  const subsystem = zmkApp.findSubsystem(SUBSYSTEM_IDENTIFIER);
-  const trimmedCustomSubsystemId = customSubsystemId.trim();
-  const settingSubsystem = trimmedCustomSubsystemId
-    ? zmkApp.findSubsystem(trimmedCustomSubsystemId)
+  const subsystem = zmkApp?.findSubsystem(SUBSYSTEM_IDENTIFIER) ?? undefined;
+  const trimmedFilterCustomSubsystemId = filterCustomSubsystemId.trim();
+  const trimmedEditorCustomSubsystemId = editorCustomSubsystemId.trim();
+  const filterSubsystem = trimmedFilterCustomSubsystemId
+    ? zmkApp?.findSubsystem(trimmedFilterCustomSubsystemId)
+    : undefined;
+  const editorSubsystem = trimmedEditorCustomSubsystemId
+    ? zmkApp?.findSubsystem(trimmedEditorCustomSubsystemId)
     : undefined;
 
   const settingRef = {
-    customSubsystemIndex: settingSubsystem?.index,
-    key: settingKey,
+    customSubsystemIndex: editorSubsystem?.index,
+    key: editorSettingKey,
     source: 0,
     arrayIndex: isArray ? arrayIndex : undefined,
   };
 
   const settingScope = {
-    customSubsystemIndex: settingSubsystem?.index,
-    key: optionalString(settingKey),
-    keyPrefix: optionalString(keyPrefix),
+    customSubsystemIndex: filterSubsystem?.index,
+    key: optionalString(filterKey),
+    keyPrefix: optionalString(filterKeyPrefix),
     source: 0,
   };
 
@@ -169,14 +173,12 @@ export function RPCTestSection() {
   };
 
   const callCustomRequest = async (request: Request): Promise<Response> => {
-    if (!zmkApp.state.connection || !subsystem) {
+    const connection = zmkApp?.state.connection;
+    if (!connection || !subsystem) {
       throw new Error("Custom settings subsystem is not available");
     }
 
-    const service = new ZMKCustomSubsystem(
-      zmkApp.state.connection,
-      subsystem.index
-    );
+    const service = new ZMKCustomSubsystem(connection, subsystem.index);
     const payload = Request.encode(request).finish();
     console.debug("[custom-settings] RPC request", {
       request: requestSummary(request),
@@ -200,10 +202,10 @@ export function RPCTestSection() {
   };
 
   const subsystemIdentifierForIndex = (index: number) =>
-    zmkApp.state.customSubsystems?.subsystems[index]?.identifier;
+    zmkApp?.state.customSubsystems?.subsystems[index]?.identifier;
 
   const subsystemIndexForIdentifier = (identifier: string) =>
-    zmkApp.findSubsystem(identifier)?.index;
+    zmkApp?.findSubsystem(identifier)?.index;
 
   const sendRequest = async (request: Request) => {
     setIsLoading(true);
@@ -237,7 +239,7 @@ export function RPCTestSection() {
     },
     includeMeta = false
   ): Promise<Setting[]> => {
-    if (!subsystem) return [];
+    if (!zmkApp || !subsystem) return [];
 
     console.debug("[custom-settings] list start", {
       scope: scopeSummary(requestScope),
@@ -449,9 +451,9 @@ export function RPCTestSection() {
     setResponse(null);
 
     try {
-      if (trimmedCustomSubsystemId && !settingSubsystem) {
+      if (trimmedFilterCustomSubsystemId && !filterSubsystem) {
         throw new Error(
-          `Custom subsystem not found: ${trimmedCustomSubsystemId}`
+          `Custom subsystem not found: ${trimmedFilterCustomSubsystemId}`
         );
       }
 
@@ -514,11 +516,11 @@ export function RPCTestSection() {
 
   const selectSettingForEdit = (nextSetting: Setting) => {
     setSetting(nextSetting);
-    setCustomSubsystemId(
+    setEditorCustomSubsystemId(
       subsystemIdentifierForIndex(nextSetting.customSubsystemIndex) ??
         `${nextSetting.customSubsystemIndex}`
     );
-    setSettingKey(nextSetting.key);
+    setEditorSettingKey(nextSetting.key);
 
     const arrayValue = nextSetting.value?.arrayValue;
     setIsArray(arrayValue !== undefined);
@@ -547,6 +549,52 @@ export function RPCTestSection() {
     }
   };
 
+  useEffect(() => {
+    if (!subsystem) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadAllSettings = async () => {
+      setIsLoading(true);
+      setResponse(null);
+
+      try {
+        const settings = await collectListSettings({ source: SOURCE_ALL });
+        if (cancelled) {
+          return;
+        }
+        setListedSettings(settings);
+        setResponse(`Listed ${settings.length} settings`);
+        if (settings.length > 0 && !setting) {
+          selectSettingForEdit(settings[0]);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Initial list failed:", error);
+          setResponse(
+            `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadAllSettings();
+
+    return () => {
+      cancelled = true;
+    };
+    // Run once when the connected custom settings subsystem becomes available.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subsystem?.index]);
+
+  if (!zmkApp) return null;
+
   if (!subsystem) {
     return (
       <section className="card">
@@ -564,134 +612,167 @@ export function RPCTestSection() {
     <section className="card">
       <h2>Settings</h2>
 
-      <div className="form-grid">
-        <label htmlFor="custom-subsystem-input">Custom Subsystem</label>
-        <input
-          id="custom-subsystem-input"
-          value={customSubsystemId}
-          onChange={(e) => setCustomSubsystemId(e.target.value)}
-        />
+      <section className="settings-panel">
+        <h3>Filter</h3>
+        <div className="form-grid">
+          <label htmlFor="filter-custom-subsystem-input">
+            Filter Subsystem
+          </label>
+          <input
+            id="filter-custom-subsystem-input"
+            value={filterCustomSubsystemId}
+            onChange={(e) => setFilterCustomSubsystemId(e.target.value)}
+          />
 
-        <label htmlFor="key-input">Key</label>
-        <input
-          id="key-input"
-          value={settingKey}
-          onChange={(e) => setSettingKey(e.target.value)}
-        />
+          <label htmlFor="filter-key-input">Filter Key</label>
+          <input
+            id="filter-key-input"
+            value={filterKey}
+            onChange={(e) => setFilterKey(e.target.value)}
+          />
 
-        <label htmlFor="prefix-input">Key Prefix</label>
-        <input
-          id="prefix-input"
-          value={keyPrefix}
-          onChange={(e) => setKeyPrefix(e.target.value)}
-        />
+          <label htmlFor="filter-prefix-input">Key Prefix</label>
+          <input
+            id="filter-prefix-input"
+            value={filterKeyPrefix}
+            onChange={(e) => setFilterKeyPrefix(e.target.value)}
+          />
 
-        <label htmlFor="type-input">Type</label>
-        <select
-          id="type-input"
-          value={valueType}
-          onChange={(e) => setValueType(e.target.value as EditorValueType)}
-        >
-          <option value={EditorValueType.Int32}>int32</option>
-          <option value={EditorValueType.Bool}>bool</option>
-          <option value={EditorValueType.String}>string</option>
-          <option value={EditorValueType.Bytes}>bytes</option>
-        </select>
+          <label htmlFor="require-meta-input">Include Metadata</label>
+          <input
+            id="require-meta-input"
+            type="checkbox"
+            checked={requireMeta}
+            onChange={(e) => setRequireMeta(e.target.checked)}
+          />
+        </div>
 
-        <label htmlFor="array-input">Array</label>
-        <input
-          id="array-input"
-          type="checkbox"
-          checked={isArray}
-          onChange={(e) => setIsArray(e.target.checked)}
-        />
+        <div className="toolbar">
+          <button className="btn" disabled={isLoading} onClick={listSettings}>
+            List
+          </button>
+          <button className="btn" disabled={isLoading} onClick={saveSettings}>
+            Save
+          </button>
+          <button
+            className="btn"
+            disabled={isLoading}
+            onClick={discardSettings}
+          >
+            Discard
+          </button>
+          <button
+            className="btn btn-danger"
+            disabled={isLoading}
+            onClick={resetSettings}
+          >
+            Reset
+          </button>
+        </div>
+      </section>
 
-        <label htmlFor="array-index-input">Array Index</label>
-        <input
-          id="array-index-input"
-          type="number"
-          min={0}
-          value={arrayIndex}
-          onChange={(e) =>
-            setArrayIndex(Number.parseInt(e.target.value, 10) || 0)
-          }
-        />
+      <section className="settings-panel">
+        <h3>Update Value</h3>
+        <div className="form-grid">
+          <label htmlFor="editor-custom-subsystem-input">
+            Setting Subsystem
+          </label>
+          <input
+            id="editor-custom-subsystem-input"
+            value={editorCustomSubsystemId}
+            onChange={(e) => setEditorCustomSubsystemId(e.target.value)}
+          />
 
-        <label htmlFor="array-size-input">Array Size</label>
-        <input
-          id="array-size-input"
-          type="number"
-          min={1}
-          value={arraySize}
-          onChange={(e) =>
-            setArraySize(Number.parseInt(e.target.value, 10) || 1)
-          }
-        />
+          <label htmlFor="editor-key-input">Setting Key</label>
+          <input
+            id="editor-key-input"
+            value={editorSettingKey}
+            onChange={(e) => setEditorSettingKey(e.target.value)}
+          />
 
-        <label htmlFor="value-input">Value</label>
-        <input
-          id="value-input"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-        />
+          <label htmlFor="type-input">Type</label>
+          <select
+            id="type-input"
+            value={valueType}
+            onChange={(e) => setValueType(e.target.value as EditorValueType)}
+          >
+            <option value={EditorValueType.Int32}>int32</option>
+            <option value={EditorValueType.Bool}>bool</option>
+            <option value={EditorValueType.String}>string</option>
+            <option value={EditorValueType.Bytes}>bytes</option>
+          </select>
 
-        <label htmlFor="mode-input">Write Mode</label>
-        <select
-          id="mode-input"
-          value={writeMode}
-          onChange={(e) => setWriteMode(Number(e.target.value))}
-        >
-          <option value={SettingWriteMode.SETTING_WRITE_MODE_MEMORY}>
-            memory
-          </option>
-          <option value={SettingWriteMode.SETTING_WRITE_MODE_PERSIST}>
-            persist
-          </option>
-        </select>
+          <label htmlFor="array-input">Array</label>
+          <input
+            id="array-input"
+            type="checkbox"
+            checked={isArray}
+            onChange={(e) => setIsArray(e.target.checked)}
+          />
 
-        <label htmlFor="require-meta-input">Include Metadata</label>
-        <input
-          id="require-meta-input"
-          type="checkbox"
-          checked={requireMeta}
-          onChange={(e) => setRequireMeta(e.target.checked)}
-        />
-      </div>
+          <label htmlFor="array-index-input">Array Index</label>
+          <input
+            id="array-index-input"
+            type="number"
+            min={0}
+            value={arrayIndex}
+            onChange={(e) =>
+              setArrayIndex(Number.parseInt(e.target.value, 10) || 0)
+            }
+          />
 
-      <div className="toolbar">
-        <button className="btn" disabled={isLoading} onClick={listSettings}>
-          List
-        </button>
-        <button className="btn" disabled={isLoading} onClick={getSetting}>
-          Read
-        </button>
-        <button
-          className="btn btn-primary"
-          disabled={isLoading}
-          onClick={writeSetting}
-        >
-          Write
-        </button>
-        <button className="btn" disabled={isLoading} onClick={pushBackArray}>
-          Push Back
-        </button>
-        <button className="btn" disabled={isLoading} onClick={popBackArray}>
-          Pop Back
-        </button>
-        <button className="btn" disabled={isLoading} onClick={saveSettings}>
-          Save
-        </button>
-        <button className="btn" disabled={isLoading} onClick={discardSettings}>
-          Discard
-        </button>
-        <button
-          className="btn btn-danger"
-          disabled={isLoading}
-          onClick={resetSettings}
-        >
-          Reset
-        </button>
-      </div>
+          <label htmlFor="array-size-input">Array Size</label>
+          <input
+            id="array-size-input"
+            type="number"
+            min={1}
+            value={arraySize}
+            onChange={(e) =>
+              setArraySize(Number.parseInt(e.target.value, 10) || 1)
+            }
+          />
+
+          <label htmlFor="value-input">Value</label>
+          <input
+            id="value-input"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+
+          <label htmlFor="mode-input">Write Mode</label>
+          <select
+            id="mode-input"
+            value={writeMode}
+            onChange={(e) => setWriteMode(Number(e.target.value))}
+          >
+            <option value={SettingWriteMode.SETTING_WRITE_MODE_MEMORY}>
+              memory
+            </option>
+            <option value={SettingWriteMode.SETTING_WRITE_MODE_PERSIST}>
+              persist
+            </option>
+          </select>
+        </div>
+
+        <div className="toolbar">
+          <button className="btn" disabled={isLoading} onClick={getSetting}>
+            Read
+          </button>
+          <button
+            className="btn btn-primary"
+            disabled={isLoading}
+            onClick={writeSetting}
+          >
+            Write
+          </button>
+          <button className="btn" disabled={isLoading} onClick={pushBackArray}>
+            Push Back
+          </button>
+          <button className="btn" disabled={isLoading} onClick={popBackArray}>
+            Pop Back
+          </button>
+        </div>
+      </section>
 
       <div className="settings-list">
         <div className="settings-list-header">
@@ -738,7 +819,8 @@ export function RPCTestSection() {
           </div>
         ) : (
           <p className="empty-message">
-            Click List to load settings from the device.
+            Settings load automatically when the device connects. Use List to
+            reload the current filter.
           </p>
         )}
       </div>

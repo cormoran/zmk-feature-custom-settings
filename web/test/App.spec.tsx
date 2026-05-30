@@ -1,7 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { setupZMKMocks } from "@cormoran/zmk-studio-react-hook/testing";
+import { call_rpc } from "@zmkfirmware/zmk-studio-ts-client";
 import App from "../src/App";
+import { Response } from "../src/proto/zmk/custom_settings/custom_settings";
 
 // Mock the ZMK client
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
@@ -39,7 +41,9 @@ describe("App Component", () => {
     let mocks: ReturnType<typeof setupZMKMocks>;
 
     beforeEach(() => {
+      jest.clearAllMocks();
       mocks = setupZMKMocks();
+      (call_rpc as jest.Mock).mockResolvedValue(emptyStatusResponse());
     });
 
     it("should connect to device when connect button is clicked", async () => {
@@ -73,3 +77,15 @@ describe("App Component", () => {
     });
   });
 });
+
+function emptyStatusResponse() {
+  return {
+    custom: {
+      call: {
+        payload: Response.encode(
+          Response.create({ status: { affectedCount: 0, message: "OK" } })
+        ).finish(),
+      },
+    },
+  };
+}

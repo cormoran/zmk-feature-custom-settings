@@ -1,8 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import {
   createConnectedMockZMKApp,
   ZMKAppProvider,
 } from "@cormoran/zmk-studio-react-hook/testing";
+import { call_rpc } from "@zmkfirmware/zmk-studio-ts-client";
 import {
   exportedSettingValueToProto,
   parseSettingsExportJson,
@@ -10,11 +11,23 @@ import {
   settingToExportedSetting,
 } from "../src/settingsJson";
 import { RPCTestSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
-import { Setting } from "../src/proto/zmk/custom_settings/custom_settings";
+import {
+  Response,
+  Setting,
+} from "../src/proto/zmk/custom_settings/custom_settings";
+
+jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
+  call_rpc: jest.fn(),
+}));
 
 describe("RPCTestSection Component", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (call_rpc as jest.Mock).mockResolvedValue(emptyStatusResponse());
+  });
+
   describe("With Subsystem", () => {
-    it("should render RPC controls when subsystem is found", () => {
+    it("should render RPC controls when subsystem is found", async () => {
       const mockZMKApp = createConnectedMockZMKApp({
         deviceName: "Test Device",
         subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
@@ -29,16 +42,25 @@ describe("RPCTestSection Component", () => {
       expect(
         screen.getByRole("heading", { name: "Settings" })
       ).toBeInTheDocument();
-      expect(screen.getByLabelText(/Custom Subsystem/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/^Key$/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Filter" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Update Value" })
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText(/Filter Subsystem/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Filter Key/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Setting Subsystem/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Setting Key/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
       expect(
         screen.getByRole("heading", { name: "Device Settings" })
       ).toBeInTheDocument();
       expect(
-        screen.getByText(/Click List to load settings from the device/i)
+        screen.getByText(/Settings load automatically/i)
       ).toBeInTheDocument();
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(1));
       expect(screen.getByLabelText(/Settings JSON/i)).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Export JSON" })
@@ -55,7 +77,7 @@ describe("RPCTestSection Component", () => {
       ).toBeInTheDocument();
     });
 
-    it("should show default input value", () => {
+    it("should show default input value", async () => {
       const mockZMKApp = createConnectedMockZMKApp({
         subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
       });
@@ -68,6 +90,7 @@ describe("RPCTestSection Component", () => {
 
       const input = screen.getByLabelText(/Value/i) as HTMLInputElement;
       expect(input.value).toBe("10");
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(1));
     });
   });
 
@@ -103,6 +126,18 @@ describe("RPCTestSection Component", () => {
     });
   });
 });
+
+function emptyStatusResponse() {
+  return {
+    custom: {
+      call: {
+        payload: Response.encode(
+          Response.create({ status: { affectedCount: 0, message: "OK" } })
+        ).finish(),
+      },
+    },
+  };
+}
 
 describe("settings JSON conversion", () => {
   const baseSetting: Setting = {
