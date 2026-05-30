@@ -8,6 +8,10 @@ if(CONFIG_ZMK_CUSTOM_SETTINGS)
         target_sources(app PRIVATE src/test/custom_settings_test.c)
     endif()
 
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES)
+        target_sources(app PRIVATE src/test/zmk_config_sample_settings.c)
+    endif()
+
     if(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC)
         target_sources(app PRIVATE src/studio/custom_settings_handler.c)
 

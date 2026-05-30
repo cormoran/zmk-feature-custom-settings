@@ -42,4 +42,7 @@ config ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 
+config ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES
+    bool "Enable custom settings samples for tests/zmk-config"
+
 endif
