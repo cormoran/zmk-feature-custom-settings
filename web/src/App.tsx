@@ -148,6 +148,7 @@ export function RPCTestSection() {
         arrayValue: {
           index: arrayIndex,
           size: arraySize,
+          maxSize: Math.max(arraySize, arrayIndex + 1),
           value: scalarValue,
         },
       };
@@ -546,7 +547,7 @@ export function RPCTestSection() {
             <dt>Array</dt>
             <dd>
               {setting.value?.arrayValue
-                ? `${setting.value.arrayValue.index}/${setting.value.arrayValue.size}`
+                ? `${setting.value.arrayValue.index}/${setting.value.arrayValue.size} (max ${setting.value.arrayValue.maxSize})`
                 : "no"}
             </dd>
           </div>
@@ -573,7 +574,7 @@ function formatSetting(setting: Setting): string {
 
 function formatValue(value: SettingValue): string {
   if (value.arrayValue !== undefined) {
-    return `[${value.arrayValue.index}/${value.arrayValue.size}] ${formatScalarValue(value.arrayValue.value ?? {})}`;
+    return `[${value.arrayValue.index}/${value.arrayValue.size} max ${value.arrayValue.maxSize}] ${formatScalarValue(value.arrayValue.value ?? {})}`;
   }
 
   return formatScalarValue(value);

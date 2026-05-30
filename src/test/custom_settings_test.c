@@ -44,6 +44,10 @@ static struct test_settings_record *test_settings_find_record(const char *name) 
     return NULL;
 }
 
+static bool test_settings_has_record(const char *name) {
+    return test_settings_find_record(name) != NULL;
+}
+
 static ssize_t test_settings_read_cb(void *cb_arg, void *data, size_t len) {
     const struct test_settings_record *record = cb_arg;
     size_t read_len = MIN(record->len, len);
@@ -156,7 +160,7 @@ ZMK_CUSTOM_SETTING_DEFINE(test_int_setting, "test", "int_value",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_value", 0, 2,
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_value", 0, 3,
                                         ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
                                         ZMK_CUSTOM_SETTING_VALUE_INT32(1),
                                         ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
@@ -164,9 +168,17 @@ ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_val
                                         ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                         ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_1, "test", "array_value", 1, 2,
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_1, "test", "array_value", 1, 3,
                                         ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
                                         ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_2, "test", "array_value", 2, 3,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(3),
                                         ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
                                         ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                         ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
@@ -455,10 +467,22 @@ static int test_array_lifecycle(void) {
         LOG_ERR("Test custom array setting not registered");
         return -ENOENT;
     }
+    const struct zmk_custom_setting *array_tail_setting =
+        zmk_custom_setting_find_array_element("test", "array_value", 2);
+    if (!array_tail_setting || !zmk_custom_setting_is_array(array_tail_setting)) {
+        LOG_ERR("Test custom array tail setting not registered");
+        return -ENOENT;
+    }
 
     int ret = zmk_custom_setting_reset(array_setting);
     if (ret < 0) {
         return ret;
+    }
+
+    if (zmk_custom_setting_array_size(array_setting) != 3 ||
+        zmk_custom_setting_array_max_size(array_setting) != 3) {
+        LOG_ERR("Unexpected default custom array size");
+        return -EINVAL;
     }
 
     ret = expect_int_value(array_setting, 2);
@@ -466,9 +490,13 @@ static int test_array_lifecycle(void) {
         return ret;
     }
 
-    ret = zmk_custom_setting_write_array_by_key("test", "array_value", 1,
-                                                &ZMK_CUSTOM_SETTING_VALUE_INT32(55),
-                                                ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    ret = expect_int_value(array_tail_setting, 3);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write_array_element(array_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(55),
+                                                 2, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -477,16 +505,27 @@ static int test_array_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
-    LOG_INF("PASS: custom_settings_update_read array[1]=55");
+    ret = zmk_custom_setting_read_array_by_key("test", "array_value", 2,
+                                               &(struct zmk_custom_setting_value){0});
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected inactive custom array element read to fail, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_update_read array[1]=55 size=2");
 
     ret = zmk_custom_setting_save(array_setting);
     if (ret < 0) {
         return ret;
     }
+    if (!test_settings_has_record("custom_settings/test/array_value/_size") ||
+        test_settings_has_record("custom_settings/test/array_value/2")) {
+        LOG_ERR("Unexpected persisted custom array records");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_save_required_array_items size=2");
 
-    ret = zmk_custom_setting_write_array_by_key("test", "array_value", 1,
-                                                &ZMK_CUSTOM_SETTING_VALUE_INT32(66),
-                                                ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    ret = zmk_custom_setting_write_array_element(array_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(66),
+                                                 2, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -500,11 +539,33 @@ static int test_array_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
-    LOG_INF("PASS: custom_settings_save_discard array[1]=55");
+    if (zmk_custom_setting_array_size(array_setting) != 2) {
+        LOG_ERR("Discard did not restore persisted custom array size");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_save_discard array[1]=55 size=2");
 
-    ret = zmk_custom_setting_reset(array_setting);
+    ret = zmk_custom_setting_write_array_element(array_tail_setting,
+                                                 &ZMK_CUSTOM_SETTING_VALUE_INT32(77), 3,
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
+    }
+
+    ret = expect_array_int_value_by_key("test", "array_value", 2, 77);
+    if (ret < 0) {
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_grow_array array[2]=77 size=3");
+
+    uint32_t affected_count = 0;
+    ret = zmk_custom_settings_reset_scope("test", "array_value", NULL, &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 3) {
+        LOG_ERR("Unexpected custom array reset affected count: %u", affected_count);
+        return -EINVAL;
     }
 
     ret = expect_array_int_value_by_key("test", "array_value", 1, 2);
@@ -512,7 +573,12 @@ static int test_array_lifecycle(void) {
         return ret;
     }
 
-    LOG_INF("PASS: custom_settings_reset array[1]=2");
+    ret = expect_array_int_value_by_key("test", "array_value", 2, 3);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_reset array[1]=2 size=3");
     return 0;
 }
 

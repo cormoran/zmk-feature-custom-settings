@@ -104,7 +104,10 @@ struct zmk_custom_setting {
     const char *key;
     const char *array_key;
     uint32_t array_index;
+    uint32_t array_max_size;
+    uint32_t default_array_size;
     uint32_t array_size;
+    uint32_t persistent_array_size;
     enum zmk_custom_setting_value_type value_type;
     enum zmk_custom_setting_confidentiality confidentiality;
     enum zmk_custom_setting_permission read_permission;
@@ -196,7 +199,10 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .key = _key,                                                                               \
         .array_key = NULL,                                                                         \
         .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        .array_max_size = 0,                                                                       \
+        .default_array_size = 0,                                                                   \
         .array_size = 0,                                                                           \
+        .persistent_array_size = 0,                                                                \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
@@ -206,7 +212,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .default_value = _default_value,                                                           \
     }
 
-/* Register one element of an array setting. Elements are stored as key/index. */
+/* Register one element of an array setting. _array_size is the maximum length. */
 #define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(                                                   \
     _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
     _confidentiality, _read_permission, _write_permission, _constraint)                            \
@@ -230,7 +236,10 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .key = _key "/" ZMK_CUSTOM_SETTINGS_STRINGIFY(_index),                                     \
         .array_key = _key,                                                                         \
         .array_index = (_index),                                                                   \
+        .array_max_size = (_array_size),                                                           \
+        .default_array_size = (_array_size),                                                       \
         .array_size = (_array_size),                                                               \
+        .persistent_array_size = (_array_size),                                                    \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
@@ -251,6 +260,10 @@ zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const cha
 /* Return the public key exposed by RPC. Array elements return their base key. */
 const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setting);
 bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting);
+/* Return the active array length for an array element. */
+uint32_t zmk_custom_setting_array_size(const struct zmk_custom_setting *setting);
+/* Return the maximum array length allocated by the registry. */
+uint32_t zmk_custom_setting_array_max_size(const struct zmk_custom_setting *setting);
 /* Match a setting against optional subsystem, exact key, and key-prefix filters. */
 bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting,
                                 const char *custom_subsystem_id, const char *key,
@@ -277,6 +290,11 @@ int zmk_custom_setting_write_array_by_key(const char *custom_subsystem_id, const
                                           uint32_t index,
                                           const struct zmk_custom_setting_value *value,
                                           enum zmk_custom_setting_write_mode mode);
+/* Write one array setting element and update the active array length. */
+int zmk_custom_setting_write_array_element(const struct zmk_custom_setting *setting,
+                                           const struct zmk_custom_setting_value *value,
+                                           uint32_t array_size,
+                                           enum zmk_custom_setting_write_mode mode);
 
 /* Save the current memory value to persistent storage. */
 int zmk_custom_setting_save(const struct zmk_custom_setting *setting);

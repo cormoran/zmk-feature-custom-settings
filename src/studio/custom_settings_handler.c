@@ -400,7 +400,8 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
     if (zmk_custom_setting_is_array(setting)) {
         dest->which_value_type = zmk_custom_settings_SettingValue_array_value_tag;
         dest->value_type.array_value.index = setting->array_index;
-        dest->value_type.array_value.size = setting->array_size;
+        dest->value_type.array_value.size = zmk_custom_setting_array_size(setting);
+        dest->value_type.array_value.max_size = zmk_custom_setting_array_max_size(setting);
         dest->value_type.array_value.has_value = true;
         return value_to_scalar_proto(src, &dest->value_type.array_value.value);
     }
@@ -734,6 +735,11 @@ static bool can_include_value(const struct zmk_custom_setting *setting) {
            !needs_unlock(setting->read_permission);
 }
 
+static bool setting_is_active(const struct zmk_custom_setting *setting) {
+    return !zmk_custom_setting_is_array(setting) ||
+           setting->array_index < zmk_custom_setting_array_size(setting);
+}
+
 static void list_settings_work_handler(struct k_work *work);
 
 K_WORK_DELAYABLE_DEFINE(list_settings_work, list_settings_work_handler);
@@ -764,7 +770,8 @@ static void list_settings_work_handler(struct k_work *work) {
 
     size_t index = 0;
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (index++ < next_index || !setting_matches_scope(setting, &scope)) {
+        if (index++ < next_index || !setting_is_active(setting) ||
+            !setting_matches_scope(setting, &scope)) {
             continue;
         }
 
@@ -871,7 +878,7 @@ static int handle_private_list_settings(const struct zmk_custom_settings_setting
     }
 
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (!setting_matches_scope(setting, scope)) {
+        if (!setting_is_active(setting) || !setting_matches_scope(setting, scope)) {
             continue;
         }
 
@@ -979,8 +986,11 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
     if (!setting) {
         return -ENOENT;
     }
-    if (value_is_array && array_size != setting->array_size) {
-        return -EINVAL;
+    if (value_is_array) {
+        if (array_size == 0 || array_size > zmk_custom_setting_array_max_size(setting) ||
+            setting->array_index >= array_size) {
+            return -EINVAL;
+        }
     }
 
     if (needs_unlock(setting->write_permission)) {
@@ -993,7 +1003,9 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    int ret = zmk_custom_setting_write(setting, value, mode);
+    int ret = value_is_array
+                  ? zmk_custom_setting_write_array_element(setting, value, array_size, mode)
+                  : zmk_custom_setting_write(setting, value, mode);
     if (ret < 0) {
         return ret;
     }

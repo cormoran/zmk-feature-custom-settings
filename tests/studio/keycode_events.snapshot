@@ -10,6 +10,8 @@ PASS: custom_settings_load scalar=30
 PASS: custom_settings_discard_persistent scalar=30
 PASS: custom_settings_reset scalar=10
 PASS: custom_settings_validate_range
-PASS: custom_settings_update_read array[1]=55
-PASS: custom_settings_save_discard array[1]=55
-PASS: custom_settings_reset array[1]=2
+PASS: custom_settings_update_read array[1]=55 size=2
+PASS: custom_settings_save_required_array_items size=2
+PASS: custom_settings_save_discard array[1]=55 size=2
+PASS: custom_settings_grow_array array[2]=77 size=3
+PASS: custom_settings_reset array[1]=2 size=3

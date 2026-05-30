@@ -121,6 +121,7 @@ describe("settings JSON conversion", () => {
             arrayValue: {
               index: 1,
               size: 2,
+              maxSize: 3,
               value: { boolValue: true },
             },
           },
@@ -134,6 +135,7 @@ describe("settings JSON conversion", () => {
       value: true,
       arrayIndex: 1,
       arraySize: 2,
+      arrayMaxSize: 3,
     });
   });
 

@@ -40,11 +40,12 @@ message SettingScalarValue {
     }
 }
 
-// Array values are encoded as one element plus the total array size.
+// Array values encode one active element, active length, and maximum length.
 message SettingArrayValue {
     uint32 index = 1;
     uint32 size = 2;
     SettingScalarValue value = 3;
+    uint32 max_size = 4;
 }
 
 // One setting value. Array elements wrap a scalar with array metadata.
