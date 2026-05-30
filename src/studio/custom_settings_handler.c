@@ -567,6 +567,10 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     *dest = (zmk_custom_settings_Setting)zmk_custom_settings_Setting_init_zero;
 
     int ret;
+    LOG_INF("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
+            "source=%u",
+            setting->custom_subsystem_id, zmk_custom_setting_public_key(setting), include_value,
+            include_meta, source);
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     uint32_t custom_subsystem_index = 0;
     ret = custom_subsystem_index_for_identifier(setting->custom_subsystem_id,
@@ -582,26 +586,41 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     copy_string(dest->key, sizeof(dest->key), zmk_custom_setting_public_key(setting));
     dest->has_unsaved_value = zmk_custom_setting_has_unsaved_value(setting);
     dest->source = source;
+    LOG_INF("Custom settings proto base ready: subsystem=%s key=%s has_unsaved=%d",
+            setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
+            dest->has_unsaved_value);
 
     if (include_meta) {
         dest->has_meta = true;
+        LOG_INF("Custom settings proto meta start: subsystem=%s key=%s",
+                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_meta_to_proto(setting, &dest->meta);
         if (ret < 0) {
             dest->has_meta = false;
             return ret;
         }
+        LOG_INF("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
+                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
+                (uint32_t)dest->meta.constraints_count);
     }
 
     if (include_value &&
         setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE) {
         dest->has_value = true;
+        LOG_INF("Custom settings proto value start: subsystem=%s key=%s",
+                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_value_to_proto(setting, &dest->value);
         if (ret < 0) {
             dest->has_value = false;
             return ret;
         }
+        LOG_INF("Custom settings proto value ready: subsystem=%s key=%s value_type=%u",
+                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
+                (uint32_t)dest->value.which_value_type);
     }
 
+    LOG_INF("Custom settings proto complete: subsystem=%s key=%s", setting->custom_subsystem_id,
+            zmk_custom_setting_public_key(setting));
     return 0;
 }
 
@@ -658,6 +677,9 @@ static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *
 }
 #endif
 
+static K_MUTEX_DEFINE(notification_buffer_lock);
+static zmk_custom_settings_Notification notification_buffer;
+
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
@@ -706,18 +728,22 @@ static int raise_encoded_studio_notification(const zmk_custom_settings_Notificat
 static int raise_setting_notification(const struct zmk_custom_setting *setting,
                                       zmk_custom_settings_SettingNotificationKind kind,
                                       bool include_value, bool include_meta, uint32_t source) {
-#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
-    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    zmk_custom_settings_Notification notification = zmk_custom_settings_Notification_init_zero;
-    notification.which_notification_type = zmk_custom_settings_Notification_setting_tag;
-    notification.notification_type.setting.kind = kind;
-    notification.notification_type.setting.has_setting = true;
-    int ret = setting_to_proto(setting, &notification.notification_type.setting.setting,
+    k_mutex_lock(&notification_buffer_lock, K_FOREVER);
+
+    zmk_custom_settings_Notification *notification = &notification_buffer;
+    *notification = (zmk_custom_settings_Notification)zmk_custom_settings_Notification_init_zero;
+    notification->which_notification_type = zmk_custom_settings_Notification_setting_tag;
+    notification->notification_type.setting.kind = kind;
+    notification->notification_type.setting.has_setting = true;
+    int ret = setting_to_proto(setting, &notification->notification_type.setting.setting,
                                include_value, include_meta, source);
     if (ret < 0) {
+        k_mutex_unlock(&notification_buffer_lock);
         return ret;
     }
 
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     struct zmk_custom_settings_relay_notification relay_notification = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
     };
@@ -725,42 +751,36 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
                 sizeof(relay_notification.custom_subsystem_id), setting->custom_subsystem_id);
     pb_ostream_t stream =
         pb_ostream_from_buffer(relay_notification.payload, sizeof(relay_notification.payload));
-    if (!pb_encode(&stream, zmk_custom_settings_Notification_fields, &notification)) {
+    if (!pb_encode(&stream, zmk_custom_settings_Notification_fields, notification)) {
         LOG_WRN("Failed to encode custom settings relay notification: %s", PB_GET_ERROR(&stream));
+        k_mutex_unlock(&notification_buffer_lock);
         return -EIO;
     }
     relay_notification.payload_size = stream.bytes_written;
-    return raise_zmk_custom_settings_relay_notification(relay_notification);
+    ret = raise_zmk_custom_settings_relay_notification(relay_notification);
 #else
-    zmk_custom_settings_Notification notification = zmk_custom_settings_Notification_init_zero;
-    notification.which_notification_type = zmk_custom_settings_Notification_setting_tag;
-    notification.notification_type.setting.kind = kind;
-    notification.notification_type.setting.has_setting = true;
-    int ret = setting_to_proto(setting, &notification.notification_type.setting.setting,
-                               include_value, include_meta, source);
-    if (ret < 0) {
-        return ret;
-    }
-
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     int index = custom_subsystem_index();
     if (index < 0) {
+        k_mutex_unlock(&notification_buffer_lock);
         return index;
     }
 
     pb_callback_t payload = {
         .funcs.encode = encode_notification_payload,
-        .arg = &notification,
+        .arg = notification,
     };
 
-    return raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
+    ret = raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
         .subsystem_index = (uint8_t)index,
         .encode_payload = payload,
     });
 #else
-    return 0;
+    ret = 0;
 #endif
 #endif
+    k_mutex_unlock(&notification_buffer_lock);
+    return ret;
 }
 
 static bool setting_is_active(const struct zmk_custom_setting *setting) {
@@ -987,16 +1007,17 @@ static int handle_private_get_setting(const struct zmk_custom_settings_setting_r
         return 0;
     }
 
-    zmk_custom_settings_GetSettingResponse get = zmk_custom_settings_GetSettingResponse_init_zero;
-    get.has_setting = true;
-    int ret = setting_to_proto(setting, &get.setting, true, include_meta,
-                               ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    resp->which_response_type = zmk_custom_settings_Response_get_setting_tag;
+    resp->response_type.get_setting =
+        (zmk_custom_settings_GetSettingResponse)zmk_custom_settings_GetSettingResponse_init_zero;
+    resp->response_type.get_setting.has_setting = true;
+    int ret = setting_to_proto(setting, &resp->response_type.get_setting.setting, true,
+                               include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
+        resp->which_response_type = 0;
         return ret;
     }
 
-    resp->which_response_type = zmk_custom_settings_Response_get_setting_tag;
-    resp->response_type.get_setting = get;
     return 0;
 }
 
@@ -1756,7 +1777,8 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
         return ret;
     }
 
-    zmk_custom_settings_Setting proto_setting = zmk_custom_settings_Setting_init_zero;
+    static zmk_custom_settings_Setting proto_setting;
+    proto_setting = (zmk_custom_settings_Setting)zmk_custom_settings_Setting_init_zero;
     ret = setting_to_proto(setting, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         return ret;
@@ -1843,14 +1865,18 @@ static int relay_notification_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    zmk_custom_settings_Notification notification = zmk_custom_settings_Notification_init_zero;
-    int ret = relayed_notification_to_public(ev, &notification);
+    k_mutex_lock(&notification_buffer_lock, K_FOREVER);
+    notification_buffer =
+        (zmk_custom_settings_Notification)zmk_custom_settings_Notification_init_zero;
+    int ret = relayed_notification_to_public(ev, &notification_buffer);
     if (ret < 0) {
         LOG_WRN("Failed to convert relayed custom settings notification: %d", ret);
+        k_mutex_unlock(&notification_buffer_lock);
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    raise_encoded_studio_notification(&notification);
+    raise_encoded_studio_notification(&notification_buffer);
+    k_mutex_unlock(&notification_buffer_lock);
     return ZMK_EV_EVENT_BUBBLE;
 }
 #endif
