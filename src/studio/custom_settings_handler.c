@@ -34,6 +34,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define SUBSYSTEM_IDENTIFIER_STRING "zmk__custom_settings"
+#define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
@@ -810,6 +811,12 @@ static void list_settings_work_handler(struct k_work *work) {
         list_settings_next_index = index;
         k_mutex_unlock(&list_settings_lock);
 
+        LOG_INF("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
+                "include_meta=%d",
+                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
+                zmk_custom_setting_is_array(setting) ? setting->array_index
+                                                     : ZMK_CUSTOM_SETTING_ARRAY_NONE,
+                can_include_value(setting), include_meta);
         int ret = raise_setting_notification(
             setting,
             zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
@@ -818,13 +825,14 @@ static void list_settings_work_handler(struct k_work *work) {
             LOG_WRN("Failed to raise custom settings list notification: %d", ret);
         }
 
-        k_work_schedule(&list_settings_work, K_NO_WAIT);
+        k_work_schedule(&list_settings_work, LIST_SETTINGS_NOTIFICATION_DELAY);
         return;
     }
 
     k_mutex_lock(&list_settings_lock, K_FOREVER);
     list_settings_active = false;
     k_mutex_unlock(&list_settings_lock);
+    LOG_INF("Custom settings list complete");
 }
 
 static void schedule_list_settings(const struct zmk_custom_settings_setting_scope *scope,
@@ -838,7 +846,13 @@ static void schedule_list_settings(const struct zmk_custom_settings_setting_scop
     list_settings_include_meta = include_meta;
     k_mutex_unlock(&list_settings_lock);
 
-    k_work_schedule(&list_settings_work, K_NO_WAIT);
+    LOG_INF(
+        "Custom settings list scheduled: subsystem=%s key=%s prefix=%s source=%u include_meta=%d",
+        setting_scope_custom_subsystem_id(scope) ? setting_scope_custom_subsystem_id(scope) : "",
+        setting_scope_key(scope) ? setting_scope_key(scope) : "",
+        setting_scope_key_prefix(scope) ? setting_scope_key_prefix(scope) : "",
+        setting_scope_source(scope), include_meta);
+    k_work_schedule(&list_settings_work, LIST_SETTINGS_NOTIFICATION_DELAY);
 }
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
@@ -920,6 +934,14 @@ static int handle_private_list_settings(const struct zmk_custom_settings_setting
         schedule_list_settings(scope, require_meta);
     }
 
+    LOG_INF("Custom settings list request accepted: count=%u subsystem=%s key=%s prefix=%s "
+            "source=%u require_meta=%d",
+            count,
+            setting_scope_custom_subsystem_id(scope) ? setting_scope_custom_subsystem_id(scope)
+                                                     : "",
+            setting_scope_key(scope) ? setting_scope_key(scope) : "",
+            setting_scope_key_prefix(scope) ? setting_scope_key_prefix(scope) : "",
+            setting_scope_source(scope), require_meta);
     set_status(resp, count, "List started");
     return 0;
 }

@@ -11,6 +11,8 @@ import {
   Request,
   Response,
   Setting,
+  SettingRef,
+  SettingScope,
   SettingScalarValue,
   SettingValue,
   SettingNotificationKind,
@@ -126,8 +128,8 @@ export function RPCTestSection() {
 
   const settingScope = {
     customSubsystemIndex: settingSubsystem?.index,
-    key: settingKey.trim(),
-    keyPrefix: keyPrefix.trim(),
+    key: optionalString(settingKey),
+    keyPrefix: optionalString(keyPrefix),
     source: 0,
   };
 
@@ -175,12 +177,25 @@ export function RPCTestSection() {
       subsystem.index
     );
     const payload = Request.encode(request).finish();
+    console.debug("[custom-settings] RPC request", {
+      request: requestSummary(request),
+      payloadSize: payload.length,
+      subsystemIndex: subsystem.index,
+    });
     const responsePayload = await service.callRPC(payload);
     if (!responsePayload) {
+      console.debug("[custom-settings] RPC empty response", {
+        request: requestSummary(request),
+      });
       throw new Error("Empty response");
     }
 
-    return Response.decode(responsePayload);
+    const decoded = Response.decode(responsePayload);
+    console.debug("[custom-settings] RPC response", {
+      response: responseSummary(decoded),
+      payloadSize: responsePayload.length,
+    });
+    return decoded;
   };
 
   const subsystemIdentifierForIndex = (index: number) =>
@@ -216,15 +231,17 @@ export function RPCTestSection() {
   };
 
   const collectListSettings = async (
-    requestScope = {
-      key: "",
-      keyPrefix: "",
+    requestScope: SettingScope = {
       source: SOURCE_ALL,
     },
     includeMeta = false
   ): Promise<Setting[]> => {
     if (!subsystem) return [];
 
+    console.debug("[custom-settings] list start", {
+      scope: scopeSummary(requestScope),
+      requireMeta: includeMeta,
+    });
     const collected: Setting[] = [];
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let resolveList: () => void = () => {};
@@ -237,15 +254,35 @@ export function RPCTestSection() {
       if (timeout) {
         clearTimeout(timeout);
       }
-      timeout = setTimeout(resolveList, LIST_NOTIFICATION_TIMEOUT_MS);
+      timeout = setTimeout(() => {
+        console.debug("[custom-settings] list quiet timeout", {
+          collected: collected.length,
+          timeoutMs: LIST_NOTIFICATION_TIMEOUT_MS,
+        });
+        resolveList();
+      }, LIST_NOTIFICATION_TIMEOUT_MS);
     };
 
     const unsubscribe = zmkApp.onNotification({
       type: "custom",
       subsystemIndex: subsystem.index,
       callback: (customNotification) => {
-        const notification = SettingsNotification.decode(
-          customNotification.payload
+        console.debug("[custom-settings] custom notification", {
+          subsystemIndex: customNotification.subsystemIndex,
+          payloadSize: customNotification.payload.length,
+        });
+        let notification;
+        try {
+          notification = SettingsNotification.decode(
+            customNotification.payload
+          );
+        } catch (error) {
+          console.debug("[custom-settings] notification decode failed", error);
+          return;
+        }
+        console.debug(
+          "[custom-settings] decoded notification",
+          notificationSummary(notification)
         );
         if (
           notification.setting?.kind ===
@@ -271,6 +308,10 @@ export function RPCTestSection() {
         throw new Error(resp.error.message || "List failed");
       }
 
+      console.debug(
+        "[custom-settings] list RPC accepted",
+        responseSummary(resp)
+      );
       scheduleResolve();
       await listComplete;
     } finally {
@@ -278,6 +319,9 @@ export function RPCTestSection() {
       if (timeout) {
         clearTimeout(timeout);
       }
+      console.debug("[custom-settings] list complete", {
+        collected: collected.length,
+      });
     }
 
     return collected;
@@ -780,6 +824,184 @@ function formatSource(source: number): string {
   if (source === 0) return "local";
   if (source === SOURCE_ALL) return "all";
   return `${source}`;
+}
+
+function optionalString(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function requestSummary(request: Request): Record<string, unknown> {
+  if (request.listSettings) {
+    return {
+      kind: "listSettings",
+      scope: scopeSummary(request.listSettings.scope),
+      requireMeta: request.listSettings.requireMeta,
+    };
+  }
+  if (request.getSetting) {
+    return {
+      kind: "getSetting",
+      setting: refSummary(request.getSetting.setting),
+      requireMeta: request.getSetting.requireMeta,
+    };
+  }
+  if (request.writeSetting) {
+    return {
+      kind: "writeSetting",
+      setting: refSummary(request.writeSetting.setting),
+      valueKind: valueKind(request.writeSetting.value),
+      mode: request.writeSetting.mode,
+    };
+  }
+  if (request.saveSettings) {
+    return {
+      kind: "saveSettings",
+      scope: scopeSummary(request.saveSettings.scope),
+    };
+  }
+  if (request.discardSettings) {
+    return {
+      kind: "discardSettings",
+      scope: scopeSummary(request.discardSettings.scope),
+    };
+  }
+  if (request.resetSettings) {
+    return {
+      kind: "resetSettings",
+      scope: scopeSummary(request.resetSettings.scope),
+    };
+  }
+  if (request.pushBackArray) {
+    return {
+      kind: "pushBackArray",
+      setting: refSummary(request.pushBackArray.setting),
+      valueKind: scalarValueKind(request.pushBackArray.value),
+      mode: request.pushBackArray.mode,
+    };
+  }
+  if (request.popBackArray) {
+    return {
+      kind: "popBackArray",
+      setting: refSummary(request.popBackArray.setting),
+      mode: request.popBackArray.mode,
+    };
+  }
+
+  return { kind: "unknown" };
+}
+
+function responseSummary(response: Response): Record<string, unknown> {
+  if (response.error) {
+    return { kind: "error", message: response.error.message };
+  }
+  if (response.status) {
+    return {
+      kind: "status",
+      affectedCount: response.status.affectedCount,
+      message: response.status.message,
+    };
+  }
+  if (response.getSetting) {
+    return {
+      kind: "getSetting",
+      setting: settingSummary(response.getSetting.setting),
+    };
+  }
+
+  return { kind: "unknown" };
+}
+
+function notificationSummary(
+  notification: SettingsNotification
+): Record<string, unknown> {
+  if (notification.setting) {
+    return {
+      kind: "setting",
+      notificationKind: notification.setting.kind,
+      setting: settingSummary(notification.setting.setting),
+    };
+  }
+
+  return { kind: "unknown" };
+}
+
+function settingSummary(setting: Setting | undefined): Record<string, unknown> {
+  if (!setting) {
+    return { present: false };
+  }
+
+  return {
+    present: true,
+    customSubsystemIndex: setting.customSubsystemIndex,
+    key: setting.key,
+    source: setting.source,
+    hasUnsavedValue: setting.hasUnsavedValue,
+    hasMeta: setting.meta !== undefined,
+    hasValue: setting.value !== undefined,
+    valueKind: valueKind(setting.value),
+  };
+}
+
+function refSummary(ref: SettingRef | undefined): Record<string, unknown> {
+  if (!ref) {
+    return { present: false };
+  }
+
+  return {
+    present: true,
+    customSubsystemIndex: ref.customSubsystemIndex,
+    key: ref.key,
+    source: ref.source,
+    arrayIndex: ref.arrayIndex,
+  };
+}
+
+function scopeSummary(
+  scope: SettingScope | undefined
+): Record<string, unknown> {
+  if (!scope) {
+    return { present: false };
+  }
+
+  return {
+    present: true,
+    customSubsystemIndex: scope.customSubsystemIndex,
+    key: scope.key,
+    keyPrefix: scope.keyPrefix,
+    source: scope.source,
+  };
+}
+
+function valueKind(value: SettingValue | undefined): string {
+  if (!value) {
+    return "none";
+  }
+  if (value.arrayValue) {
+    return `array:${scalarValueKind(value.arrayValue.value)}`;
+  }
+
+  return scalarValueKind(value);
+}
+
+function scalarValueKind(value: SettingScalarValue | undefined): string {
+  if (!value) {
+    return "none";
+  }
+  if (value.bytesValue !== undefined) {
+    return "bytes";
+  }
+  if (value.int32Value !== undefined) {
+    return "int32";
+  }
+  if (value.boolValue !== undefined) {
+    return "bool";
+  }
+  if (value.stringValue !== undefined) {
+    return "string";
+  }
+
+  return "empty";
 }
 
 export default App;
