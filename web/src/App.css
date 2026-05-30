@@ -67,6 +67,66 @@
   gap: 0.5rem;
 }
 
+.settings-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.settings-list-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-list-header h3 {
+  margin: 0;
+}
+
+.settings-list-header span,
+.empty-message {
+  color: #555;
+}
+
+.settings-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #ddd;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 0.5rem;
+  border-bottom: 1px solid #eee;
+  text-align: left;
+  vertical-align: top;
+}
+
+.settings-table th {
+  background: #f6f8fa;
+}
+
+.link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #1f6feb;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.link-button:hover,
+.link-button:focus {
+  text-decoration: underline;
+}
+
 .json-panel {
   display: grid;
   gap: 0.5rem;

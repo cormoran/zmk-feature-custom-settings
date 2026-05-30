@@ -33,6 +33,12 @@ describe("RPCTestSection Component", () => {
       expect(screen.getByLabelText(/^Key$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Device Settings" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Click List to load settings from the device/i)
+      ).toBeInTheDocument();
       expect(screen.getByLabelText(/Settings JSON/i)).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Export JSON" })

@@ -89,8 +89,8 @@ function App() {
 
 export function RPCTestSection() {
   const zmkApp = useContext(ZMKAppContext);
-  const [customSubsystemId, setCustomSubsystemId] = useState("test");
-  const [settingKey, setSettingKey] = useState("int_value");
+  const [customSubsystemId, setCustomSubsystemId] = useState("");
+  const [settingKey, setSettingKey] = useState("");
   const [keyPrefix, setKeyPrefix] = useState("");
   const [valueType, setValueType] = useState<EditorValueType>(
     EditorValueType.Int32
@@ -104,6 +104,7 @@ export function RPCTestSection() {
     SettingWriteMode.SETTING_WRITE_MODE_MEMORY
   );
   const [setting, setSetting] = useState<Setting | null>(null);
+  const [listedSettings, setListedSettings] = useState<Setting[]>([]);
   const [response, setResponse] = useState<string | null>(null);
   const [jsonText, setJsonText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -111,7 +112,10 @@ export function RPCTestSection() {
   if (!zmkApp) return null;
 
   const subsystem = zmkApp.findSubsystem(SUBSYSTEM_IDENTIFIER);
-  const settingSubsystem = zmkApp.findSubsystem(customSubsystemId);
+  const trimmedCustomSubsystemId = customSubsystemId.trim();
+  const settingSubsystem = trimmedCustomSubsystemId
+    ? zmkApp.findSubsystem(trimmedCustomSubsystemId)
+    : undefined;
 
   const settingRef = {
     customSubsystemIndex: settingSubsystem?.index,
@@ -122,15 +126,20 @@ export function RPCTestSection() {
 
   const settingScope = {
     customSubsystemIndex: settingSubsystem?.index,
-    key: settingKey,
-    keyPrefix,
+    key: settingKey.trim(),
+    keyPrefix: keyPrefix.trim(),
     source: 0,
+  };
+
+  const listScope = {
+    ...settingScope,
+    source: SOURCE_ALL,
   };
 
   const parseScalarValue = (): SettingScalarValue => {
     switch (valueType) {
       case EditorValueType.Bytes:
-        return { bytesValue: new TextEncoder().encode(value) };
+        return { bytesValue: parseBytesValue(value) };
       case EditorValueType.Bool:
         return { boolValue: value === "true" || value === "1" };
       case EditorValueType.String:
@@ -206,7 +215,14 @@ export function RPCTestSection() {
     }
   };
 
-  const collectListSettings = async (): Promise<Setting[]> => {
+  const collectListSettings = async (
+    requestScope = {
+      key: "",
+      keyPrefix: "",
+      source: SOURCE_ALL,
+    },
+    includeMeta = false
+  ): Promise<Setting[]> => {
     if (!subsystem) return [];
 
     const collected: Setting[] = [];
@@ -246,11 +262,8 @@ export function RPCTestSection() {
       const resp = await callCustomRequest(
         Request.create({
           listSettings: {
-            scope: {
-              key: "",
-              keyPrefix: "",
-              source: SOURCE_ALL,
-            },
+            scope: requestScope,
+            requireMeta: includeMeta,
           },
         })
       );
@@ -345,10 +358,32 @@ export function RPCTestSection() {
       Request.create({ getSetting: { setting: settingRef, requireMeta } })
     );
 
-  const listSettings = () =>
-    sendRequest(
-      Request.create({ listSettings: { scope: settingScope, requireMeta } })
-    );
+  const listSettings = async () => {
+    setIsLoading(true);
+    setResponse(null);
+
+    try {
+      if (trimmedCustomSubsystemId && !settingSubsystem) {
+        throw new Error(
+          `Custom subsystem not found: ${trimmedCustomSubsystemId}`
+        );
+      }
+
+      const settings = await collectListSettings(listScope, requireMeta);
+      setListedSettings(settings);
+      setResponse(`Listed ${settings.length} settings`);
+      if (settings.length > 0 && !setting) {
+        selectSettingForEdit(settings[0]);
+      }
+    } catch (error) {
+      console.error("List failed:", error);
+      setResponse(
+        `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const writeSetting = () =>
     sendRequest(
@@ -390,6 +425,41 @@ export function RPCTestSection() {
 
   const resetSettings = () =>
     sendRequest(Request.create({ resetSettings: { scope: settingScope } }));
+
+  const selectSettingForEdit = (nextSetting: Setting) => {
+    setSetting(nextSetting);
+    setCustomSubsystemId(
+      subsystemIdentifierForIndex(nextSetting.customSubsystemIndex) ??
+        `${nextSetting.customSubsystemIndex}`
+    );
+    setSettingKey(nextSetting.key);
+
+    const arrayValue = nextSetting.value?.arrayValue;
+    setIsArray(arrayValue !== undefined);
+    if (arrayValue) {
+      setArrayIndex(arrayValue.index);
+      setArraySize(arrayValue.size);
+      applyScalarValueToEditor(arrayValue.value ?? {});
+    } else if (nextSetting.value) {
+      applyScalarValueToEditor(nextSetting.value);
+    }
+  };
+
+  const applyScalarValueToEditor = (nextValue: SettingScalarValue) => {
+    if (nextValue.int32Value !== undefined) {
+      setValueType(EditorValueType.Int32);
+      setValue(`${nextValue.int32Value}`);
+    } else if (nextValue.boolValue !== undefined) {
+      setValueType(EditorValueType.Bool);
+      setValue(nextValue.boolValue ? "true" : "false");
+    } else if (nextValue.stringValue !== undefined) {
+      setValueType(EditorValueType.String);
+      setValue(nextValue.stringValue);
+    } else if (nextValue.bytesValue !== undefined) {
+      setValueType(EditorValueType.Bytes);
+      setValue(formatBytesValue(nextValue.bytesValue));
+    }
+  };
 
   if (!subsystem) {
     return (
@@ -537,6 +607,56 @@ export function RPCTestSection() {
         </button>
       </div>
 
+      <div className="settings-list">
+        <div className="settings-list-header">
+          <h3>Device Settings</h3>
+          <span>{listedSettings.length} loaded</span>
+        </div>
+        {listedSettings.length > 0 ? (
+          <div className="settings-table-wrap">
+            <table className="settings-table">
+              <thead>
+                <tr>
+                  <th>Setting</th>
+                  <th>Value</th>
+                  <th>Unsaved</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {listedSettings.map((listedSetting, index) => (
+                  <tr key={settingRowKey(listedSetting, index)}>
+                    <td>
+                      <button
+                        className="link-button"
+                        type="button"
+                        onClick={() => selectSettingForEdit(listedSetting)}
+                      >
+                        {settingDisplayName(
+                          listedSetting,
+                          subsystemIdentifierForIndex
+                        )}
+                      </button>
+                    </td>
+                    <td>
+                      {listedSetting.value
+                        ? formatValue(listedSetting.value)
+                        : "(hidden)"}
+                    </td>
+                    <td>{listedSetting.hasUnsavedValue ? "yes" : "no"}</td>
+                    <td>{formatSource(listedSetting.source)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="empty-message">
+            Click List to load settings from the device.
+          </p>
+        )}
+      </div>
+
       <div className="json-panel">
         <label htmlFor="settings-json">Settings JSON</label>
         <textarea
@@ -611,11 +731,55 @@ function formatScalarValue(value: SettingScalarValue): string {
   if (value.boolValue !== undefined) return value.boolValue ? "true" : "false";
   if (value.stringValue !== undefined) return value.stringValue;
   if (value.bytesValue !== undefined) {
-    return Array.from(value.bytesValue)
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join(" ");
+    return formatBytesValue(value.bytesValue);
   }
   return "";
+}
+
+function parseBytesValue(value: string): Uint8Array {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return new Uint8Array();
+
+  const tokens = trimmed.split(/[\s,]+/).filter(Boolean);
+  if (
+    tokens.length > 0 &&
+    tokens.every((token) => /^[0-9a-fA-F]{1,2}$/.test(token))
+  ) {
+    return Uint8Array.from(tokens.map((token) => Number.parseInt(token, 16)));
+  }
+
+  return new TextEncoder().encode(value);
+}
+
+function formatBytesValue(value: Uint8Array): string {
+  return Array.from(value)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join(" ");
+}
+
+function settingRowKey(setting: Setting, index: number): string {
+  const arrayIndex = setting.value?.arrayValue?.index ?? "scalar";
+  return `${setting.source}:${setting.customSubsystemIndex}:${setting.key}:${arrayIndex}:${index}`;
+}
+
+function settingDisplayName(
+  setting: Setting,
+  subsystemIdentifierForIndex: (index: number) => string | undefined
+): string {
+  const subsystem =
+    subsystemIdentifierForIndex(setting.customSubsystemIndex) ??
+    `${setting.customSubsystemIndex}`;
+  const arraySuffix =
+    setting.value?.arrayValue !== undefined
+      ? `[${setting.value.arrayValue.index}]`
+      : "";
+  return `${subsystem}/${setting.key}${arraySuffix}`;
+}
+
+function formatSource(source: number): string {
+  if (source === 0) return "local";
+  if (source === SOURCE_ALL) return "all";
+  return `${source}`;
 }
 
 export default App;
