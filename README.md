@@ -49,7 +49,14 @@ CONFIG_ZMK_CUSTOM_SETTINGS=y
 # Optional: expose settings through the custom Studio RPC subsystem.
 CONFIG_ZMK_STUDIO=y
 CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
+CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=64
+CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
 ```
+
+`CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` must be large enough for custom settings
+RPC requests. `CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE` should also be
+increased because listing settings builds encoded notifications from the low
+priority workqueue.
 
 For split keyboards, enable ZMK's relay-event transport on both halves and size
 the relay event buffer for the setting notifications you expect to relay:
