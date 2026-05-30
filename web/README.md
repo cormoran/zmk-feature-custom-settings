@@ -1,6 +1,6 @@
 # ZMK Custom Settings Web UI
 
-React + TypeScript UI for the `zmk__custom_settings` custom Studio RPC
+React + TypeScript UI for the `cormoran_custom_settings` custom Studio RPC
 subsystem.
 
 The UI runs in a browser with Web Serial support. Connect a keyboard whose
@@ -33,7 +33,7 @@ src/
 ├── App.tsx
 ├── App.css
 └── proto/
-    └── zmk/custom_settings/custom_settings.ts
+    └── cormoran/zmk/custom_settings/custom_settings.ts
 
 test/
 ├── App.spec.tsx
@@ -41,4 +41,4 @@ test/
 ```
 
 The protobuf schema lives at
-`../proto/zmk/custom_settings/custom_settings.proto`.
+`../proto/cormoran/zmk/custom_settings/custom_settings.proto`.

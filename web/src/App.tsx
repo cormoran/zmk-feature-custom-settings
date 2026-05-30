@@ -17,7 +17,7 @@ import {
   SettingValue,
   SettingNotificationKind,
   SettingWriteMode,
-} from "./proto/zmk/custom_settings/custom_settings";
+} from "./proto/cormoran/zmk/custom_settings/custom_settings";
 import {
   createSettingsExportDocument,
   countExportedSettings,
@@ -25,7 +25,7 @@ import {
   parseSettingsExportJson,
 } from "./settingsJson";
 
-export const SUBSYSTEM_IDENTIFIER = "zmk__custom_settings";
+export const SUBSYSTEM_IDENTIFIER = "cormoran_custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
 const LIST_REQUEST_TIMEOUT_MS = 5000;
 const SOURCE_LOCAL = 0;

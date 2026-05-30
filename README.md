@@ -83,7 +83,7 @@ CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
 Register a setting from another module:
 
 ```c
-#include <zmk/custom_settings.h>
+#include <cormoran/zmk/custom_settings.h>
 
 ZMK_CUSTOM_SETTING_DEFINE(
     // C symbol name for this setting registration.
@@ -193,7 +193,7 @@ For RPC access, the setting namespace should match a Studio custom subsystem
 identifier registered by the module that owns the setting. The web UI obtains
 that subsystem's index from ZMK Studio and sends the index in setting requests.
 The custom Studio subsystem identifier for this module is
-`zmk__custom_settings`.
+`cormoran_custom_settings`.
 
 ### Array Settings
 
@@ -263,7 +263,7 @@ zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_ME
 ## Web UI
 
 The web UI in `web/` connects to a keyboard over serial, finds the
-`zmk__custom_settings` subsystem, and sends typed read/write/save/discard/reset
+`cormoran_custom_settings` subsystem, and sends typed read/write/save/discard/reset
 requests. It can also export all RPC-readable setting values as JSON and import
 that JSON back to the device using the selected write mode. Array values can be
 written by index or changed with push-back/pop-back commands.

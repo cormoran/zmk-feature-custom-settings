@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package zmk.custom_settings;
+package cormoran.zmk.custom_settings;
 
 enum SettingWriteMode {
     // Update RAM only. The value can later be saved or discarded.
