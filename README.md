@@ -22,6 +22,8 @@ web UI.
 
 ## Module User Guide
 
+### Add The Module
+
 Add the module to `config/west.yml`. This module uses the custom Studio RPC
 support from cormoran's ZMK branch.
 
@@ -40,6 +42,8 @@ manifest:
       import:
         file: app/west.yml
 ```
+
+### Enable The Module
 
 Enable the module in your keyboard config:
 
@@ -62,6 +66,8 @@ settings builds encoded notifications from the low priority workqueue.
 When Studio RPC is enabled, setting values are limited to 64 bytes and setting
 keys are limited to 48 bytes by the generated RPC schema.
 
+### Split Keyboards
+
 For split keyboards, enable ZMK's relay-event transport on both halves and size
 the relay event buffer for the setting notifications you expect to relay:
 
@@ -72,35 +78,69 @@ CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
 CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
 ```
 
+### Register Settings
+
 Register a setting from another module:
 
 ```c
 #include <zmk/custom_settings.h>
 
 ZMK_CUSTOM_SETTING_DEFINE(
-    /* C symbol name for this setting registration. */
+    // C symbol name for this setting registration.
     my_speed_setting,
-    /* Custom Studio subsystem id owned by your module. */
+    // Custom Studio subsystem id owned by your module.
     "my_module",
-    /* Setting key within that subsystem. */
+    // Setting key within that subsystem.
     "speed",
-    /* Value type exposed by the firmware API and RPC. */
+    // Value type exposed by the firmware API and RPC.
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-    /* Default value used when nothing is saved in flash. */
+    // Default value used when nothing is saved in flash.
     ZMK_CUSTOM_SETTING_VALUE_INT32(10),
-    /* RPC visibility: public, personal, or device-private. */
+    // RPC visibility: public, personal, or device-private.
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-    /* Read permission: secure requires Studio unlock. */
+    // Read permission: secure requires Studio unlock.
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-    /* Write permission: secure requires Studio unlock. */
+    // Write permission: secure requires Studio unlock.
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-    /* Optional validation rule; use NO_CONSTRAINT when unrestricted. */
+    // Optional validation rule; use NO_CONSTRAINT when unrestricted.
     ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 ```
 
 The subsystem id and key are the stable identifiers used by firmware and RPC
 clients. Pick short, unique names because they are encoded into settings keys
 and Studio custom subsystem requests.
+
+### Setting Reference
+
+#### Value Types
+
+| Value type | Default value helper | Description |
+| --- | --- | --- |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES` | `ZMK_CUSTOM_SETTING_VALUE_BYTES(...)` | Raw bytes. Use this for binary data or for module-defined data that needs custom RPC conversion hooks. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32` | `ZMK_CUSTOM_SETTING_VALUE_INT32(value)` | Signed 32-bit integer. Use this for numeric settings, indexes, and IDs. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL` | `ZMK_CUSTOM_SETTING_VALUE_BOOL(value)` | Boolean setting. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING` | `ZMK_CUSTOM_SETTING_VALUE_STRING(value)` | UTF-8/string setting stored with an explicit byte length. |
+
+#### Confidentiality
+
+| Confidentiality | RPC behavior | Typical use |
+| --- | --- | --- |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE` | Value is not exposed over RPC. | Device-local secrets or implementation details that Studio clients should not read. |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL` | Value may be read over RPC, but clients should treat it as personal data and avoid publishing it. | User-specific preferences or values that may identify the user's setup. |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC` | Value may be read over RPC and exported/shared by clients. | Layout, behavior, or tuning settings intended to be portable. |
+
+#### Constraints
+
+| Constraint helper or type | Applies to | Description |
+| --- | --- | --- |
+| `ZMK_CUSTOM_SETTING_NO_CONSTRAINT` | Any type | No validation beyond matching the registered value type. |
+| `ZMK_CUSTOM_SETTING_RANGE_INT32(min, max)` | `INT32` | Requires the integer value to be between `min` and `max`, inclusive. |
+| `ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS` | Any scalar type | Requires the value to match one of the provided `struct zmk_custom_setting_options` entries. Optional labels are exposed in RPC metadata. |
+| `ZMK_CUSTOM_SETTING_HID_USAGE(usage_page, usage_min, usage_max)` | `INT32` | Requires an encoded HID usage whose page matches `usage_page` and whose usage is within the inclusive range. |
+| `ZMK_CUSTOM_SETTING_LAYER_ID` | `INT32` | Requires a valid local ZMK layer ID. |
+| `ZMK_CUSTOM_SETTING_BEHAVIOR_ID` | `INT32` | Requires a valid local ZMK behavior ID when behavior local IDs are enabled. |
+
+### Bytes RPC Conversion
 
 Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
 flash storage keep the internal byte format; RPC read/write uses the converted
@@ -113,7 +153,7 @@ static int my_blob_to_rpc(const struct zmk_custom_setting *setting,
                           size_t dest_capacity) {
     ARG_UNUSED(setting);
 
-    /* Encode an internal C struct into RPC bytes, for example with nanopb. */
+    // Encode an internal C struct into RPC bytes, for example with nanopb.
     if (src_size > dest_capacity) {
         return -EMSGSIZE;
     }
@@ -128,7 +168,7 @@ static int my_blob_from_rpc(const struct zmk_custom_setting *setting,
                             size_t dest_capacity) {
     ARG_UNUSED(setting);
 
-    /* Decode RPC bytes back into the firmware's internal C struct layout. */
+    // Decode RPC bytes back into the firmware's internal C struct layout.
     if (src_size > dest_capacity) {
         return -EMSGSIZE;
     }
@@ -147,9 +187,15 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 ```
 
+### Studio RPC Access
+
 For RPC access, the setting namespace should match a Studio custom subsystem
 identifier registered by the module that owns the setting. The web UI obtains
 that subsystem's index from ZMK Studio and sends the index in setting requests.
+The custom Studio subsystem identifier for this module is
+`zmk__custom_settings`.
+
+### Array Settings
 
 Array settings are registered one element at a time up to the maximum supported
 length. The active array length can be smaller than the maximum. The firmware
@@ -184,7 +230,9 @@ ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_2, "my_module", "layers", 2, 3,
                                         ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
 ```
 
-Read or update it from firmware:
+### Firmware API
+
+Read or update settings from firmware:
 
 ```c
 struct zmk_custom_setting_value value;
@@ -211,8 +259,6 @@ zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
-
-The custom Studio subsystem identifier is `zmk__custom_settings`.
 
 ## Web UI
 
