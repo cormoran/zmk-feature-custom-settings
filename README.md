@@ -86,23 +86,23 @@ Register a setting from another module:
 #include <zmk/custom_settings.h>
 
 ZMK_CUSTOM_SETTING_DEFINE(
-    /* C symbol name for this setting registration. */
+    // C symbol name for this setting registration.
     my_speed_setting,
-    /* Custom Studio subsystem id owned by your module. */
+    // Custom Studio subsystem id owned by your module.
     "my_module",
-    /* Setting key within that subsystem. */
+    // Setting key within that subsystem.
     "speed",
-    /* Value type exposed by the firmware API and RPC. */
+    // Value type exposed by the firmware API and RPC.
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-    /* Default value used when nothing is saved in flash. */
+    // Default value used when nothing is saved in flash.
     ZMK_CUSTOM_SETTING_VALUE_INT32(10),
-    /* RPC visibility: public, personal, or device-private. */
+    // RPC visibility: public, personal, or device-private.
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-    /* Read permission: secure requires Studio unlock. */
+    // Read permission: secure requires Studio unlock.
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-    /* Write permission: secure requires Studio unlock. */
+    // Write permission: secure requires Studio unlock.
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-    /* Optional validation rule; use NO_CONSTRAINT when unrestricted. */
+    // Optional validation rule; use NO_CONSTRAINT when unrestricted.
     ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 ```
 
@@ -153,7 +153,7 @@ static int my_blob_to_rpc(const struct zmk_custom_setting *setting,
                           size_t dest_capacity) {
     ARG_UNUSED(setting);
 
-    /* Encode an internal C struct into RPC bytes, for example with nanopb. */
+    // Encode an internal C struct into RPC bytes, for example with nanopb.
     if (src_size > dest_capacity) {
         return -EMSGSIZE;
     }
@@ -168,7 +168,7 @@ static int my_blob_from_rpc(const struct zmk_custom_setting *setting,
                             size_t dest_capacity) {
     ARG_UNUSED(setting);
 
-    /* Decode RPC bytes back into the firmware's internal C struct layout. */
+    // Decode RPC bytes back into the firmware's internal C struct layout.
     if (src_size > dest_capacity) {
         return -EMSGSIZE;
     }
