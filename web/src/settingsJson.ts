@@ -16,7 +16,6 @@ export interface ExportedSetting {
   value: boolean | number | string | number[];
   arrayIndex?: number;
   arraySize?: number;
-  arrayMaxSize?: number;
 }
 
 export interface SettingsExportDocument {
@@ -64,7 +63,6 @@ export function settingToExportedSetting(
   if (setting.value.arrayValue) {
     exported.arrayIndex = setting.value.arrayValue.index;
     exported.arraySize = setting.value.arrayValue.size;
-    exported.arrayMaxSize = setting.value.arrayValue.maxSize;
   }
 
   return exported;
@@ -127,7 +125,6 @@ export function exportedSettingValueToProto(
       arrayValue: {
         index: setting.arrayIndex,
         size: setting.arraySize,
-        maxSize: setting.arrayMaxSize ?? setting.arraySize,
         value: scalarValue,
       },
     };
@@ -217,24 +214,9 @@ function parseExportedSetting(entry: unknown, index: number): ExportedSetting {
       "arraySize",
       index
     );
-    if (entry.arrayMaxSize !== undefined) {
-      exported.arrayMaxSize = readPositiveInteger(
-        entry.arrayMaxSize,
-        "arrayMaxSize",
-        index
-      );
-    }
     if (exported.arrayIndex >= exported.arraySize) {
       throw new Error(
         `settings[${index}].arrayIndex must be smaller than arraySize`
-      );
-    }
-    if (
-      exported.arrayMaxSize !== undefined &&
-      exported.arraySize > exported.arrayMaxSize
-    ) {
-      throw new Error(
-        `settings[${index}].arraySize must be no larger than arrayMaxSize`
       );
     }
   }

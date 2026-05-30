@@ -148,7 +148,6 @@ export function RPCTestSection() {
         arrayValue: {
           index: arrayIndex,
           size: arraySize,
-          maxSize: Math.max(arraySize, arrayIndex + 1),
           value: scalarValue,
         },
       };
@@ -362,6 +361,27 @@ export function RPCTestSection() {
       })
     );
 
+  const pushBackArray = () =>
+    sendRequest(
+      Request.create({
+        pushBackArray: {
+          setting: settingRef,
+          value: parseScalarValue(),
+          mode: writeMode,
+        },
+      })
+    );
+
+  const popBackArray = () =>
+    sendRequest(
+      Request.create({
+        popBackArray: {
+          setting: settingRef,
+          mode: writeMode,
+        },
+      })
+    );
+
   const saveSettings = () =>
     sendRequest(Request.create({ saveSettings: { scope: settingScope } }));
 
@@ -496,6 +516,12 @@ export function RPCTestSection() {
         >
           Write
         </button>
+        <button className="btn" disabled={isLoading} onClick={pushBackArray}>
+          Push Back
+        </button>
+        <button className="btn" disabled={isLoading} onClick={popBackArray}>
+          Pop Back
+        </button>
         <button className="btn" disabled={isLoading} onClick={saveSettings}>
           Save
         </button>
@@ -547,7 +573,7 @@ export function RPCTestSection() {
             <dt>Array</dt>
             <dd>
               {setting.value?.arrayValue
-                ? `${setting.value.arrayValue.index}/${setting.value.arrayValue.size} (max ${setting.value.arrayValue.maxSize})`
+                ? `${setting.value.arrayValue.index}/${setting.value.arrayValue.size}`
                 : "no"}
             </dd>
           </div>
@@ -574,7 +600,7 @@ function formatSetting(setting: Setting): string {
 
 function formatValue(value: SettingValue): string {
   if (value.arrayValue !== undefined) {
-    return `[${value.arrayValue.index}/${value.arrayValue.size} max ${value.arrayValue.maxSize}] ${formatScalarValue(value.arrayValue.value ?? {})}`;
+    return `[${value.arrayValue.index}/${value.arrayValue.size}] ${formatScalarValue(value.arrayValue.value ?? {})}`;
   }
 
   return formatScalarValue(value);

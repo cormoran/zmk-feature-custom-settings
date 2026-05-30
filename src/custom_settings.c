@@ -137,6 +137,27 @@ const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subs
     return NULL;
 }
 
+const struct zmk_custom_setting *zmk_custom_setting_find_array(const char *custom_subsystem_id,
+                                                               const char *key) {
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (!zmk_custom_setting_is_array(setting)) {
+            continue;
+        }
+
+        if (custom_subsystem_id && custom_subsystem_id[0] != '\0' &&
+            strncmp(setting->custom_subsystem_id, custom_subsystem_id,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN) != 0) {
+            continue;
+        }
+
+        if (strncmp(setting->array_key, key, CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) == 0) {
+            return setting;
+        }
+    }
+
+    return NULL;
+}
+
 const struct zmk_custom_setting *
 zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const char *key,
                                       uint32_t index) {
@@ -686,6 +707,89 @@ int zmk_custom_setting_write_array_element(const struct zmk_custom_setting *cons
         copy_value(&setting->memory_value, value);
         setting->temporary_active = false;
         ret = save_setting_locked(setting);
+        break;
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+    k_mutex_unlock(&settings_lock);
+
+    if (ret == 0) {
+        raise_setting_changed(setting, mode == ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+                                           ? ZMK_CUSTOM_SETTING_CHANGED_SAVED
+                                           : ZMK_CUSTOM_SETTING_CHANGED_VALUE_UPDATED);
+    }
+
+    return ret;
+}
+
+int zmk_custom_setting_array_push_back(const struct zmk_custom_setting *setting,
+                                       const struct zmk_custom_setting_value *value,
+                                       enum zmk_custom_setting_write_mode mode) {
+    if (!setting || !value || !zmk_custom_setting_is_array(setting)) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    uint32_t array_size = setting->array_size;
+    uint32_t array_max_size = setting->array_max_size;
+    k_mutex_unlock(&settings_lock);
+
+    if (array_size >= array_max_size) {
+        return -ERANGE;
+    }
+
+    const struct zmk_custom_setting *tail = zmk_custom_setting_find_array_element(
+        setting->custom_subsystem_id, setting->array_key, array_size);
+    if (!tail) {
+        return -ENOENT;
+    }
+
+    return zmk_custom_setting_write_array_element(tail, value, array_size + 1, mode);
+}
+
+int zmk_custom_setting_array_pop_back(const struct zmk_custom_setting *const_setting,
+                                      struct zmk_custom_setting_value *value,
+                                      enum zmk_custom_setting_write_mode mode) {
+    if (!const_setting || !zmk_custom_setting_is_array(const_setting)) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    uint32_t array_size = setting->array_size;
+    if (array_size == 0) {
+        k_mutex_unlock(&settings_lock);
+        return -ENOENT;
+    }
+    k_mutex_unlock(&settings_lock);
+
+    const struct zmk_custom_setting *tail_const = zmk_custom_setting_find_array_element(
+        setting->custom_subsystem_id, setting->array_key, array_size - 1);
+    if (!tail_const) {
+        return -ENOENT;
+    }
+
+    struct zmk_custom_setting *tail = (struct zmk_custom_setting *)tail_const;
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    if (value) {
+        copy_value(value, effective_value(tail));
+    }
+
+    set_array_memory_size_locked(setting, array_size - 1);
+    tail->temporary_active = false;
+
+    int ret = 0;
+    switch (mode) {
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY:
+        break;
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST:
+        ret = save_setting_locked(tail);
+        break;
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY:
         break;
     default:
         ret = -EINVAL;

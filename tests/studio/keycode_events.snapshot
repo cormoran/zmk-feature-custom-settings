@@ -15,3 +15,6 @@ PASS: custom_settings_save_required_array_items size=2
 PASS: custom_settings_save_discard array[1]=55 size=2
 PASS: custom_settings_grow_array array[2]=77 size=3
 PASS: custom_settings_reset array[1]=2 size=3
+PASS: custom_settings_pop_back array[2]=3 size=2
+PASS: custom_settings_push_back array[2]=88 size=3
+PASS: custom_settings_push_back_full size=3

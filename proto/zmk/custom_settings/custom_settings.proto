@@ -40,12 +40,12 @@ message SettingScalarValue {
     }
 }
 
-// Array values encode one active element, active length, and maximum length.
+// Array values encode one active element plus the active array length.
 message SettingArrayValue {
     uint32 index = 1;
     uint32 size = 2;
     SettingScalarValue value = 3;
-    uint32 max_size = 4;
+    reserved 4;
 }
 
 // One setting value. Array elements wrap a scalar with array metadata.
@@ -145,6 +145,19 @@ message WriteSettingRequest {
     SettingWriteMode mode = 3;
 }
 
+// Append one scalar value to the end of an array setting.
+message PushBackArrayRequest {
+    SettingRef setting = 1;
+    SettingScalarValue value = 2;
+    SettingWriteMode mode = 3;
+}
+
+// Remove the last active value from an array setting.
+message PopBackArrayRequest {
+    SettingRef setting = 1;
+    SettingWriteMode mode = 2;
+}
+
 message SaveSettingsRequest { SettingScope scope = 1; }
 
 message DiscardSettingsRequest { SettingScope scope = 1; }
@@ -159,6 +172,8 @@ message Request {
         SaveSettingsRequest save_settings = 4;
         DiscardSettingsRequest discard_settings = 5;
         ResetSettingsRequest reset_settings = 6;
+        PushBackArrayRequest push_back_array = 7;
+        PopBackArrayRequest pop_back_array = 8;
     }
 }
 

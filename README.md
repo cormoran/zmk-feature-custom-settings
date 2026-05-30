@@ -83,7 +83,8 @@ Array settings are registered one element at a time up to the maximum supported
 length. The active array length can be smaller than the maximum. The firmware
 storage key is expanded to `key/index`, but the public API and RPC protocol use
 the base key plus an explicit array index and active length. Flash storage saves
-the active length and only the active array items.
+the active length and only the active array items. RPC does not expose the
+maximum length; appending past it returns an error.
 
 ```c
 ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_0, "my_module", "layers", 0, 3,
@@ -131,6 +132,12 @@ const struct zmk_custom_setting *layer_1 =
     zmk_custom_setting_find_array_element("my_module", "layers", 1);
 zmk_custom_setting_write_array_element(layer_1, &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
                                        2, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+const struct zmk_custom_setting *layers =
+    zmk_custom_setting_find_array("my_module", "layers");
+zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
 
 The custom Studio subsystem identifier is `zmk__custom_settings`.
@@ -140,7 +147,8 @@ The custom Studio subsystem identifier is `zmk__custom_settings`.
 The web UI in `web/` connects to a keyboard over serial, finds the
 `zmk__custom_settings` subsystem, and sends typed read/write/save/discard/reset
 requests. It can also export all RPC-readable setting values as JSON and import
-that JSON back to the device using the selected write mode.
+that JSON back to the device using the selected write mode. Array values can be
+written by index or changed with push-back/pop-back commands.
 
 ```bash
 cd web

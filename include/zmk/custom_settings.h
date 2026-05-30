@@ -253,6 +253,9 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 
 const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subsystem_id,
                                                          const char *key);
+/* Find any element of an array setting by its public base key. */
+const struct zmk_custom_setting *zmk_custom_setting_find_array(const char *custom_subsystem_id,
+                                                               const char *key);
 /* Find one element of an array setting by its public base key and element index. */
 const struct zmk_custom_setting *
 zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const char *key,
@@ -295,6 +298,14 @@ int zmk_custom_setting_write_array_element(const struct zmk_custom_setting *sett
                                            const struct zmk_custom_setting_value *value,
                                            uint32_t array_size,
                                            enum zmk_custom_setting_write_mode mode);
+/* Append one value to an array setting and grow the active length by one. */
+int zmk_custom_setting_array_push_back(const struct zmk_custom_setting *setting,
+                                       const struct zmk_custom_setting_value *value,
+                                       enum zmk_custom_setting_write_mode mode);
+/* Remove the last active array element and optionally return its previous value. */
+int zmk_custom_setting_array_pop_back(const struct zmk_custom_setting *setting,
+                                      struct zmk_custom_setting_value *value,
+                                      enum zmk_custom_setting_write_mode mode);
 
 /* Save the current memory value to persistent storage. */
 int zmk_custom_setting_save(const struct zmk_custom_setting *setting);

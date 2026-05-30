@@ -579,6 +579,48 @@ static int test_array_lifecycle(void) {
     }
 
     LOG_INF("PASS: custom_settings_reset array[1]=2 size=3");
+
+    struct zmk_custom_setting_value popped_value;
+    ret = zmk_custom_setting_array_pop_back(array_setting, &popped_value,
+                                            ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    if (popped_value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 || popped_value.int32_value != 3 ||
+        zmk_custom_setting_array_size(array_setting) != 2) {
+        LOG_ERR("Unexpected custom array pop_back result");
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_read_array_by_key("test", "array_value", 2,
+                                               &(struct zmk_custom_setting_value){0});
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected popped custom array element read to fail, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_pop_back array[2]=3 size=2");
+
+    ret = zmk_custom_setting_array_push_back(array_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(88),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 2, 88);
+    if (ret < 0) {
+        return ret;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 3) {
+        LOG_ERR("Custom array push_back did not grow active size");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_push_back array[2]=88 size=3");
+
+    ret = zmk_custom_setting_array_push_back(array_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected full custom array push_back to fail, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_push_back_full size=3");
     return 0;
 }
 

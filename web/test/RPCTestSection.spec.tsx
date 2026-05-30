@@ -41,6 +41,12 @@ describe("RPCTestSection Component", () => {
         screen.getByRole("button", { name: "Import JSON" })
       ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Write" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Push Back" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Pop Back" })
+      ).toBeInTheDocument();
     });
 
     it("should show default input value", () => {
@@ -121,7 +127,6 @@ describe("settings JSON conversion", () => {
             arrayValue: {
               index: 1,
               size: 2,
-              maxSize: 3,
               value: { boolValue: true },
             },
           },
@@ -135,7 +140,6 @@ describe("settings JSON conversion", () => {
       value: true,
       arrayIndex: 1,
       arraySize: 2,
-      arrayMaxSize: 3,
     });
   });
 

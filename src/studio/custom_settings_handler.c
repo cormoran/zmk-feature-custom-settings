@@ -93,6 +93,8 @@ enum zmk_custom_settings_relay_request_type {
     ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE,
     ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_DISCARD,
     ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_RESET,
+    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK,
+    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK,
 };
 
 struct zmk_custom_settings_relay_value {
@@ -122,6 +124,15 @@ struct zmk_custom_settings_relay_request {
             struct zmk_custom_settings_setting_ref setting;
             struct zmk_custom_settings_relay_value value;
         } write_setting;
+        struct {
+            uint8_t mode;
+            struct zmk_custom_settings_setting_ref setting;
+            struct zmk_custom_settings_relay_value value;
+        } push_back_array;
+        struct {
+            uint8_t mode;
+            struct zmk_custom_settings_setting_ref setting;
+        } pop_back_array;
         struct {
             struct zmk_custom_settings_setting_scope scope;
         } scope_mutation;
@@ -197,6 +208,19 @@ setting_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
                                                        setting_ref_key(ref), ref->array_index)
                : zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref),
                                          setting_ref_key(ref));
+}
+
+static const struct zmk_custom_setting *
+array_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
+    if (!ref->has_key) {
+        return NULL;
+    }
+
+    return ref->has_array_index
+               ? zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
+                                                       setting_ref_key(ref), ref->array_index)
+               : zmk_custom_setting_find_array(setting_ref_custom_subsystem_id(ref),
+                                               setting_ref_key(ref));
 }
 
 static const char *
@@ -401,7 +425,6 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
         dest->which_value_type = zmk_custom_settings_SettingValue_array_value_tag;
         dest->value_type.array_value.index = setting->array_index;
         dest->value_type.array_value.size = zmk_custom_setting_array_size(setting);
-        dest->value_type.array_value.max_size = zmk_custom_setting_array_max_size(setting);
         dest->value_type.array_value.has_value = true;
         return value_to_scalar_proto(src, &dest->value_type.array_value.value);
     }
@@ -730,14 +753,15 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
 #endif
 }
 
-static bool can_include_value(const struct zmk_custom_setting *setting) {
-    return setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE &&
-           !needs_unlock(setting->read_permission);
-}
-
 static bool setting_is_active(const struct zmk_custom_setting *setting) {
     return !zmk_custom_setting_is_array(setting) ||
            setting->array_index < zmk_custom_setting_array_size(setting);
+}
+
+static bool can_include_value(const struct zmk_custom_setting *setting) {
+    return setting_is_active(setting) &&
+           setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE &&
+           !needs_unlock(setting->read_permission);
 }
 
 static void list_settings_work_handler(struct k_work *work);
@@ -1039,6 +1063,115 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
 #endif
 }
 
+static int handle_private_push_back_array(const struct zmk_custom_settings_setting_ref *ref,
+                                          const struct zmk_custom_setting_value *value,
+                                          zmk_custom_settings_SettingWriteMode write_mode,
+                                          zmk_custom_settings_Response *resp) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    const struct zmk_custom_setting *setting = array_for_ref(ref);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    if (needs_unlock(setting->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    enum zmk_custom_setting_write_mode mode =
+        write_mode == zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
+
+    int ret = zmk_custom_setting_array_push_back(setting, value, mode);
+    if (ret < 0) {
+        return ret;
+    }
+
+    set_status(resp, 1, "Array value pushed");
+    return 0;
+}
+
+static int handle_push_back_array(const zmk_custom_settings_PushBackArrayRequest *req,
+                                  zmk_custom_settings_Response *resp) {
+#if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value value;
+    ret = scalar_proto_to_value(&req->value, &value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return handle_private_push_back_array(&private_ref, &value, req->mode, resp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+static int handle_private_pop_back_array(const struct zmk_custom_settings_setting_ref *ref,
+                                         zmk_custom_settings_SettingWriteMode write_mode,
+                                         zmk_custom_settings_Response *resp) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    const struct zmk_custom_setting *setting = array_for_ref(ref);
+    if (!setting) {
+        return -ENOENT;
+    }
+
+    if (needs_unlock(setting->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    enum zmk_custom_setting_write_mode mode =
+        write_mode == zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
+
+    int ret = zmk_custom_setting_array_pop_back(setting, NULL, mode);
+    if (ret < 0) {
+        return ret;
+    }
+
+    set_status(resp, 1, "Array value popped");
+    return 0;
+}
+
+static int handle_pop_back_array(const zmk_custom_settings_PopBackArrayRequest *req,
+                                 zmk_custom_settings_Response *resp) {
+#if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return handle_private_pop_back_array(&private_ref, req->mode, resp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
 static bool scope_has_permission(const struct zmk_custom_settings_setting_scope *scope,
                                  enum zmk_custom_setting_permission permission,
                                  bool read_permission) {
@@ -1119,6 +1252,12 @@ static bool should_relay_to_peripherals(const zmk_custom_settings_Request *req) 
     case zmk_custom_settings_Request_write_setting_tag:
         return ref_source(&req->request_type.write_setting.setting) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    case zmk_custom_settings_Request_push_back_array_tag:
+        return ref_source(&req->request_type.push_back_array.setting) ==
+               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    case zmk_custom_settings_Request_pop_back_array_tag:
+        return ref_source(&req->request_type.pop_back_array.setting) ==
+               ZMK_CUSTOM_SETTING_SOURCE_ALL;
     default:
         return false;
     }
@@ -1158,6 +1297,24 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
         }
 
         const struct zmk_custom_setting *setting = setting_for_ref(&ref);
+        return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
+    }
+    case zmk_custom_settings_Request_push_back_array_tag: {
+        struct zmk_custom_settings_setting_ref ref;
+        if (setting_ref_to_private(&req->request_type.push_back_array.setting, &ref) < 0) {
+            return false;
+        }
+
+        const struct zmk_custom_setting *setting = array_for_ref(&ref);
+        return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
+    }
+    case zmk_custom_settings_Request_pop_back_array_tag: {
+        struct zmk_custom_settings_setting_ref ref;
+        if (setting_ref_to_private(&req->request_type.pop_back_array.setting, &ref) < 0) {
+            return false;
+        }
+
+        const struct zmk_custom_setting *setting = array_for_ref(&ref);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
     case zmk_custom_settings_Request_save_settings_tag: {
@@ -1255,6 +1412,28 @@ static int request_to_relay_request(const zmk_custom_settings_Request *src,
         dest->request.write_setting.array_size = array_size;
         return value_to_relay_value(&value, &dest->request.write_setting.value);
     }
+    case zmk_custom_settings_Request_push_back_array_tag: {
+        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK;
+        dest->request.push_back_array.mode = src->request_type.push_back_array.mode;
+        int ret = setting_ref_to_private(&src->request_type.push_back_array.setting,
+                                         &dest->request.push_back_array.setting);
+        if (ret < 0) {
+            return ret;
+        }
+
+        struct zmk_custom_setting_value value;
+        ret = scalar_proto_to_value(&src->request_type.push_back_array.value, &value);
+        if (ret < 0) {
+            return ret;
+        }
+
+        return value_to_relay_value(&value, &dest->request.push_back_array.value);
+    }
+    case zmk_custom_settings_Request_pop_back_array_tag:
+        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK;
+        dest->request.pop_back_array.mode = src->request_type.pop_back_array.mode;
+        return setting_ref_to_private(&src->request_type.pop_back_array.setting,
+                                      &dest->request.pop_back_array.setting);
     case zmk_custom_settings_Request_save_settings_tag:
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE;
         return setting_scope_to_private(&src->request_type.save_settings.scope,
@@ -1295,6 +1474,10 @@ static int process_request(const zmk_custom_settings_Request *req,
         return handle_get_setting(&req->request_type.get_setting, resp);
     case zmk_custom_settings_Request_write_setting_tag:
         return handle_write_setting(&req->request_type.write_setting, resp);
+    case zmk_custom_settings_Request_push_back_array_tag:
+        return handle_push_back_array(&req->request_type.push_back_array, resp);
+    case zmk_custom_settings_Request_pop_back_array_tag:
+        return handle_pop_back_array(&req->request_type.pop_back_array, resp);
     case zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);
@@ -1355,6 +1538,20 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
             req->request.write_setting.array_index, req->request.write_setting.array_size,
             (zmk_custom_settings_SettingWriteMode)req->request.write_setting.mode, resp);
     }
+    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK: {
+        struct zmk_custom_setting_value value;
+        int ret = relay_value_to_value(&req->request.push_back_array.value, &value);
+        if (ret < 0) {
+            return ret;
+        }
+        return handle_private_push_back_array(
+            &req->request.push_back_array.setting, &value,
+            (zmk_custom_settings_SettingWriteMode)req->request.push_back_array.mode, resp);
+    }
+    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK:
+        return handle_private_pop_back_array(
+            &req->request.pop_back_array.setting,
+            (zmk_custom_settings_SettingWriteMode)req->request.pop_back_array.mode, resp);
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE:
         return handle_private_scope_mutation(&req->request.scope_mutation.scope, resp,
                                              "Settings saved", zmk_custom_settings_save_scope);
@@ -1492,6 +1689,14 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
         LOG_ERR("Split peripheral relay test setting not registered");
         return -ENOENT;
     }
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array("test", "array_value");
+    const struct zmk_custom_setting *array_tail =
+        zmk_custom_setting_find_array_element("test", "array_value", 2);
+    if (!array_setting || !array_tail) {
+        LOG_ERR("Split peripheral relay array setting not registered");
+        return -ENOENT;
+    }
 
     struct zmk_custom_settings_relay_request request = {
         .source = 1,
@@ -1529,6 +1734,77 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
     }
 
     printk("PASS: split_peripheral_relay\n");
+
+    ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_settings_relay_request pop_request = {
+        .source = 1,
+        .type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK,
+    };
+    pop_request.request.pop_back_array.setting.has_custom_subsystem_id = true;
+    copy_string(pop_request.request.pop_back_array.setting.custom_subsystem_id,
+                sizeof(pop_request.request.pop_back_array.setting.custom_subsystem_id), "test");
+    pop_request.request.pop_back_array.setting.has_key = true;
+    copy_string(pop_request.request.pop_back_array.setting.key,
+                sizeof(pop_request.request.pop_back_array.setting.key), "array_value");
+    pop_request.request.pop_back_array.setting.has_source = true;
+    pop_request.request.pop_back_array.setting.source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+    pop_request.request.pop_back_array.mode =
+        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
+
+    resp = (zmk_custom_settings_Response)zmk_custom_settings_Response_init_zero;
+    ret = process_relay_request(&pop_request, &resp);
+    if (ret < 0) {
+        LOG_ERR("Split peripheral relay pop_back failed: %d", ret);
+        return ret;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 2) {
+        LOG_ERR("Split peripheral relay pop_back did not shrink array");
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_read(array_tail, &value);
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected split peripheral relay popped element read to fail, got %d", ret);
+        return -EINVAL;
+    }
+    printk("PASS: split_peripheral_relay_pop_back size=2\n");
+
+    struct zmk_custom_settings_relay_request push_request = {
+        .source = 1,
+        .type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK,
+    };
+    push_request.request.push_back_array.setting.has_custom_subsystem_id = true;
+    copy_string(push_request.request.push_back_array.setting.custom_subsystem_id,
+                sizeof(push_request.request.push_back_array.setting.custom_subsystem_id), "test");
+    push_request.request.push_back_array.setting.has_key = true;
+    copy_string(push_request.request.push_back_array.setting.key,
+                sizeof(push_request.request.push_back_array.setting.key), "array_value");
+    push_request.request.push_back_array.setting.has_source = true;
+    push_request.request.push_back_array.setting.source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+    push_request.request.push_back_array.value.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
+    push_request.request.push_back_array.value.int32_value = 44;
+    push_request.request.push_back_array.mode =
+        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
+
+    resp = (zmk_custom_settings_Response)zmk_custom_settings_Response_init_zero;
+    ret = process_relay_request(&push_request, &resp);
+    if (ret < 0) {
+        LOG_ERR("Split peripheral relay push_back failed: %d", ret);
+        return ret;
+    }
+    ret = zmk_custom_setting_read(array_tail, &value);
+    if (ret < 0) {
+        return ret;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 3 ||
+        value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 || value.int32_value != 44) {
+        LOG_ERR("Split peripheral relay push_back did not append array value");
+        return -EINVAL;
+    }
+    printk("PASS: split_peripheral_relay_push_back array[2]=44 size=3\n");
     return 0;
 }
 
