@@ -421,6 +421,13 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
                           zmk_custom_settings_SettingValue *dest) {
     *dest = (zmk_custom_settings_SettingValue)zmk_custom_settings_SettingValue_init_zero;
 
+    struct zmk_custom_setting_value rpc_value;
+    int ret = zmk_custom_setting_serialize_rpc_value(setting, src, &rpc_value);
+    if (ret < 0) {
+        return ret;
+    }
+    src = &rpc_value;
+
     if (zmk_custom_setting_is_array(setting)) {
         dest->which_value_type = zmk_custom_settings_SettingValue_array_value_tag;
         dest->value_type.array_value.index = setting->array_index;
@@ -431,7 +438,7 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
 
     zmk_custom_settings_SettingScalarValue scalar =
         zmk_custom_settings_SettingScalarValue_init_zero;
-    int ret = value_to_scalar_proto(src, &scalar);
+    ret = value_to_scalar_proto(src, &scalar);
     if (ret < 0) {
         return ret;
     }
@@ -985,7 +992,8 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
                                         bool value_is_array, uint32_t array_index,
                                         uint32_t array_size,
                                         zmk_custom_settings_SettingWriteMode write_mode,
-                                        zmk_custom_settings_Response *resp) {
+                                        zmk_custom_settings_Response *resp,
+                                        bool value_uses_rpc_format) {
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1027,9 +1035,18 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    int ret = value_is_array
-                  ? zmk_custom_setting_write_array_element(setting, value, array_size, mode)
-                  : zmk_custom_setting_write(setting, value, mode);
+    struct zmk_custom_setting_value internal_value;
+    int ret = 0;
+    if (value_uses_rpc_format) {
+        ret = zmk_custom_setting_deserialize_rpc_value(setting, value, &internal_value);
+        if (ret < 0) {
+            return ret;
+        }
+        value = &internal_value;
+    }
+
+    ret = value_is_array ? zmk_custom_setting_write_array_element(setting, value, array_size, mode)
+                         : zmk_custom_setting_write(setting, value, mode);
     if (ret < 0) {
         return ret;
     }
@@ -1057,7 +1074,7 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
     }
 
     return handle_private_write_setting(&private_ref, &value, value_is_array, array_index,
-                                        array_size, req->mode, resp);
+                                        array_size, req->mode, resp, true);
 #else
     return -ENOTSUP;
 #endif
@@ -1066,7 +1083,8 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
 static int handle_private_push_back_array(const struct zmk_custom_settings_setting_ref *ref,
                                           const struct zmk_custom_setting_value *value,
                                           zmk_custom_settings_SettingWriteMode write_mode,
-                                          zmk_custom_settings_Response *resp) {
+                                          zmk_custom_settings_Response *resp,
+                                          bool value_uses_rpc_format) {
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1091,7 +1109,17 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    int ret = zmk_custom_setting_array_push_back(setting, value, mode);
+    struct zmk_custom_setting_value internal_value;
+    int ret = 0;
+    if (value_uses_rpc_format) {
+        ret = zmk_custom_setting_deserialize_rpc_value(setting, value, &internal_value);
+        if (ret < 0) {
+            return ret;
+        }
+        value = &internal_value;
+    }
+
+    ret = zmk_custom_setting_array_push_back(setting, value, mode);
     if (ret < 0) {
         return ret;
     }
@@ -1115,7 +1143,7 @@ static int handle_push_back_array(const zmk_custom_settings_PushBackArrayRequest
         return ret;
     }
 
-    return handle_private_push_back_array(&private_ref, &value, req->mode, resp);
+    return handle_private_push_back_array(&private_ref, &value, req->mode, resp, true);
 #else
     return -ENOTSUP;
 #endif
@@ -1536,7 +1564,7 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         return handle_private_write_setting(
             &req->request.write_setting.setting, &value, req->request.write_setting.value_is_array,
             req->request.write_setting.array_index, req->request.write_setting.array_size,
-            (zmk_custom_settings_SettingWriteMode)req->request.write_setting.mode, resp);
+            (zmk_custom_settings_SettingWriteMode)req->request.write_setting.mode, resp, true);
     }
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK: {
         struct zmk_custom_setting_value value;
@@ -1546,7 +1574,7 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         }
         return handle_private_push_back_array(
             &req->request.push_back_array.setting, &value,
-            (zmk_custom_settings_SettingWriteMode)req->request.push_back_array.mode, resp);
+            (zmk_custom_settings_SettingWriteMode)req->request.push_back_array.mode, resp, true);
     }
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK:
         return handle_private_pop_back_array(
@@ -1629,6 +1657,76 @@ static int setting_changed_listener(const zmk_event_t *eh) {
 
 ZMK_LISTENER(custom_settings_studio, setting_changed_listener);
 ZMK_SUBSCRIPTION(custom_settings_studio, zmk_custom_setting_changed);
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+static int custom_settings_rpc_bytes_converter_test_init(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "bytes_value");
+    if (!setting) {
+        LOG_ERR("RPC bytes converter test setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    zmk_custom_settings_Setting proto_setting = zmk_custom_settings_Setting_init_zero;
+    ret = setting_to_proto(setting, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!proto_setting.has_value ||
+        proto_setting.value.which_value_type != zmk_custom_settings_SettingValue_bytes_value_tag ||
+        proto_setting.value.value_type.bytes_value.size != 3 ||
+        proto_setting.value.value_type.bytes_value.bytes[0] != 3 ||
+        proto_setting.value.value_type.bytes_value.bytes[1] != 2 ||
+        proto_setting.value.value_type.bytes_value.bytes[2] != 1) {
+        LOG_ERR("RPC bytes converter test serialization failed");
+        return -EINVAL;
+    }
+
+    struct zmk_custom_settings_setting_ref ref = {
+        .has_custom_subsystem_id = true,
+        .has_key = true,
+        .has_source = true,
+        .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+    };
+    copy_string(ref.custom_subsystem_id, sizeof(ref.custom_subsystem_id), "test");
+    copy_string(ref.key, sizeof(ref.key), "bytes_value");
+
+    struct zmk_custom_setting_value rpc_value = ZMK_CUSTOM_SETTING_VALUE_BYTES(9, 8, 7);
+    zmk_custom_settings_Response resp = zmk_custom_settings_Response_init_zero;
+    ret = handle_private_write_setting(
+        &ref, &rpc_value, false, 0, 0,
+        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp, true);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value internal_value;
+    ret = zmk_custom_setting_read(setting, &internal_value);
+    if (ret < 0) {
+        return ret;
+    }
+    if (internal_value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES || internal_value.size != 3 ||
+        internal_value.bytes_value[0] != 7 || internal_value.bytes_value[1] != 8 ||
+        internal_value.bytes_value[2] != 9) {
+        LOG_ERR("RPC bytes converter test deserialization failed");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809");
+    return 0;
+}
+
+SYS_INIT(custom_settings_rpc_bytes_converter_test_init, APPLICATION, 99);
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
 static int relay_request_listener(const zmk_event_t *eh) {

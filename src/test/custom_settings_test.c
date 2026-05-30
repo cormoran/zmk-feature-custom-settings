@@ -153,12 +153,34 @@ static bool test_custom_settings_handle_request(const zmk_custom_CallRequest *re
 ZMK_RPC_CUSTOM_SUBSYSTEM(test, &test_custom_settings_meta, test_custom_settings_handle_request);
 #endif
 
+int test_bytes_rpc_reverse(const struct zmk_custom_setting *setting, const uint8_t *src,
+                           size_t src_size, uint8_t *dest, size_t *dest_size,
+                           size_t dest_capacity) {
+    ARG_UNUSED(setting);
+
+    if (src_size > dest_capacity) {
+        return -EMSGSIZE;
+    }
+
+    for (size_t i = 0; i < src_size; i++) {
+        dest[i] = src[src_size - i - 1];
+    }
+    *dest_size = src_size;
+    return 0;
+}
+
 ZMK_CUSTOM_SETTING_DEFINE(test_int_setting, "test", "int_value",
                           ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(10),
                           ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
+    test_bytes_setting, "test", "bytes_value", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(1, 2, 3), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    test_bytes_rpc_reverse, test_bytes_rpc_reverse, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_value", 0, 3,
                                         ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
@@ -255,6 +277,17 @@ static int expect_array_int_value_by_key(const char *custom_subsystem_id, const 
     return 0;
 }
 
+static int expect_bytes_value(const struct zmk_custom_setting_value *value, const uint8_t *expected,
+                              size_t expected_size) {
+    if (value->type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES || value->size != expected_size ||
+        memcmp(value->bytes_value, expected, expected_size) != 0) {
+        LOG_ERR("Unexpected custom bytes setting value");
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
 static int test_constraint_validation(void) {
     const struct zmk_custom_setting *hid_usage = zmk_custom_setting_find("test", "hid_usage");
     if (!hid_usage) {
@@ -324,6 +357,52 @@ static int test_constraint_validation(void) {
     LOG_INF("PASS: custom_settings_validate_behavior_id");
 #endif
 
+    return 0;
+}
+
+static int test_bytes_rpc_converters(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "bytes_value");
+    if (!setting) {
+        LOG_ERR("Test custom bytes setting not registered");
+        return -ENOENT;
+    }
+
+    struct zmk_custom_setting_value internal_value;
+    int ret = zmk_custom_setting_read(setting, &internal_value);
+    if (ret < 0) {
+        return ret;
+    }
+    const uint8_t expected_internal_default[] = {1, 2, 3};
+    ret = expect_bytes_value(&internal_value, expected_internal_default,
+                             sizeof(expected_internal_default));
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value rpc_value;
+    ret = zmk_custom_setting_serialize_rpc_value(setting, &internal_value, &rpc_value);
+    if (ret < 0) {
+        return ret;
+    }
+    const uint8_t expected_rpc_default[] = {3, 2, 1};
+    ret = expect_bytes_value(&rpc_value, expected_rpc_default, sizeof(expected_rpc_default));
+    if (ret < 0) {
+        return ret;
+    }
+
+    const struct zmk_custom_setting_value rpc_write = ZMK_CUSTOM_SETTING_VALUE_BYTES(9, 8, 7);
+    ret = zmk_custom_setting_deserialize_rpc_value(setting, &rpc_write, &internal_value);
+    if (ret < 0) {
+        return ret;
+    }
+    const uint8_t expected_internal_write[] = {7, 8, 9};
+    ret = expect_bytes_value(&internal_value, expected_internal_write,
+                             sizeof(expected_internal_write));
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_bytes_rpc_convert rpc=030201 internal=070809");
     return 0;
 }
 
@@ -631,6 +710,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_constraint_validation();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_bytes_rpc_converters();
     if (ret < 0) {
         return ret;
     }

@@ -1,5 +1,6 @@
 PASS: custom_settings_validate_hid_usage
 PASS: custom_settings_validate_layer_id
+PASS: custom_settings_bytes_rpc_convert rpc=030201 internal=070809
 PASS: custom_settings_update_read scalar=25
 PASS: custom_settings_discard scalar=10
 PASS: custom_settings_save scalar=30

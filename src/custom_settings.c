@@ -582,6 +582,51 @@ int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *
     return zmk_custom_setting_read(setting, value);
 }
 
+static int convert_rpc_bytes_value(const struct zmk_custom_setting *setting,
+                                   const struct zmk_custom_setting_value *src,
+                                   struct zmk_custom_setting_value *dest,
+                                   zmk_custom_setting_rpc_bytes_converter_t converter) {
+    if (!setting || !src || !dest) {
+        return -EINVAL;
+    }
+
+    if (setting->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+        src->type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES || converter == NULL) {
+        copy_value(dest, src);
+        return 0;
+    }
+
+    *dest = (struct zmk_custom_setting_value){
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    };
+    size_t dest_size = 0;
+    int ret = converter(setting, src->bytes_value, src->size, dest->bytes_value, &dest_size,
+                        sizeof(dest->bytes_value));
+    if (ret < 0) {
+        return ret;
+    }
+    if (dest_size > sizeof(dest->bytes_value)) {
+        return -EMSGSIZE;
+    }
+
+    dest->size = dest_size;
+    return 0;
+}
+
+int zmk_custom_setting_serialize_rpc_value(const struct zmk_custom_setting *setting,
+                                           const struct zmk_custom_setting_value *internal_value,
+                                           struct zmk_custom_setting_value *rpc_value) {
+    return convert_rpc_bytes_value(setting, internal_value, rpc_value,
+                                   setting ? setting->rpc_serializer : NULL);
+}
+
+int zmk_custom_setting_deserialize_rpc_value(const struct zmk_custom_setting *setting,
+                                             const struct zmk_custom_setting_value *rpc_value,
+                                             struct zmk_custom_setting_value *internal_value) {
+    return convert_rpc_bytes_value(setting, rpc_value, internal_value,
+                                   setting ? setting->rpc_deserializer : NULL);
+}
+
 int zmk_custom_setting_read_array_by_key(const char *custom_subsystem_id, const char *key,
                                          uint32_t index, struct zmk_custom_setting_value *value) {
     const struct zmk_custom_setting *setting =

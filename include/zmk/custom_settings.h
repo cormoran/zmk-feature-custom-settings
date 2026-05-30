@@ -73,6 +73,13 @@ struct zmk_custom_setting_value {
     };
 };
 
+struct zmk_custom_setting;
+
+typedef int (*zmk_custom_setting_rpc_bytes_converter_t)(const struct zmk_custom_setting *setting,
+                                                        const uint8_t *src, size_t src_size,
+                                                        uint8_t *dest, size_t *dest_size,
+                                                        size_t dest_capacity);
+
 struct zmk_custom_setting_range {
     struct zmk_custom_setting_value min;
     struct zmk_custom_setting_value max;
@@ -115,6 +122,8 @@ struct zmk_custom_setting {
     const struct zmk_custom_setting_constraint *constraints;
     size_t constraints_count;
     struct zmk_custom_setting_value default_value;
+    zmk_custom_setting_rpc_bytes_converter_t rpc_serializer;
+    zmk_custom_setting_rpc_bytes_converter_t rpc_deserializer;
 
     bool initialized;
     bool has_persistent_value;
@@ -184,10 +193,25 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
                                                _default_value, _confidentiality, _read_permission, \
                                                _write_permission, _constraint)
 
+/* Register one custom setting with custom bytes RPC conversion hooks. */
+#define ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(                                             \
+    _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,              \
+    _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, _constraint)          \
+    ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                                 \
+        _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
+        _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, _constraint)
+
 /* Register one custom setting with zero or more constraints. */
 #define ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(_name, _custom_subsystem_id, _key, _value_type, \
                                                    _default_value, _confidentiality,               \
                                                    _read_permission, _write_permission, ...)       \
+    ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                                 \
+        _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
+        _read_permission, _write_permission, NULL, NULL, __VA_ARGS__)
+
+#define ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                             \
+    _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,              \
+    _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, ...)                  \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -210,6 +234,8 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .constraints = _name##_constraints,                                                        \
         .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
         .default_value = _default_value,                                                           \
+        .rpc_serializer = _rpc_serializer,                                                         \
+        .rpc_deserializer = _rpc_deserializer,                                                     \
     }
 
 /* Register one element of an array setting. _array_size is the maximum length. */
@@ -220,9 +246,27 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,       \
         _confidentiality, _read_permission, _write_permission, _constraint)
 
+/* Register one array element with custom bytes RPC conversion hooks. */
+#define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_RPC_CONVERTERS(                               \
+    _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
+    _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
+    _constraint)                                                                                   \
+    ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                   \
+        _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,       \
+        _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, \
+        _constraint)
+
 #define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_CONSTRAINTS(                                  \
     _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
     _confidentiality, _read_permission, _write_permission, ...)                                    \
+    ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                   \
+        _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,       \
+        _confidentiality, _read_permission, _write_permission, NULL, NULL, __VA_ARGS__)
+
+#define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(               \
+    _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
+    _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
+    ...)                                                                                           \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -247,6 +291,8 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .constraints = _name##_constraints,                                                        \
         .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
         .default_value = _default_value,                                                           \
+        .rpc_serializer = _rpc_serializer,                                                         \
+        .rpc_deserializer = _rpc_deserializer,                                                     \
     }
 
 #define ZMK_CUSTOM_SETTING_FOREACH(_var) STRUCT_SECTION_FOREACH(zmk_custom_setting, _var)
@@ -280,6 +326,14 @@ int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *
 /* Read one array setting element by its public base key and element index. */
 int zmk_custom_setting_read_array_by_key(const char *custom_subsystem_id, const char *key,
                                          uint32_t index, struct zmk_custom_setting_value *value);
+/* Convert an internal bytes value into its RPC bytes representation. */
+int zmk_custom_setting_serialize_rpc_value(const struct zmk_custom_setting *setting,
+                                           const struct zmk_custom_setting_value *internal_value,
+                                           struct zmk_custom_setting_value *rpc_value);
+/* Convert an RPC bytes value into its internal firmware representation. */
+int zmk_custom_setting_deserialize_rpc_value(const struct zmk_custom_setting *setting,
+                                             const struct zmk_custom_setting_value *rpc_value,
+                                             struct zmk_custom_setting_value *internal_value);
 
 /* Write a value using the selected memory, persist, or temporary mode. */
 int zmk_custom_setting_write(const struct zmk_custom_setting *setting,

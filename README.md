@@ -75,6 +75,51 @@ ZMK_CUSTOM_SETTING_DEFINE(my_speed_setting, "my_module", "speed",
                           ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 ```
 
+Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
+flash storage keep the internal byte format; RPC read/write uses the converted
+byte format. When hooks are omitted, bytes are copied as-is.
+
+```c
+static int my_blob_to_rpc(const struct zmk_custom_setting *setting,
+                          const uint8_t *src, size_t src_size,
+                          uint8_t *dest, size_t *dest_size,
+                          size_t dest_capacity) {
+    ARG_UNUSED(setting);
+
+    /* Encode an internal C struct into RPC bytes, for example with nanopb. */
+    if (src_size > dest_capacity) {
+        return -EMSGSIZE;
+    }
+    memcpy(dest, src, src_size);
+    *dest_size = src_size;
+    return 0;
+}
+
+static int my_blob_from_rpc(const struct zmk_custom_setting *setting,
+                            const uint8_t *src, size_t src_size,
+                            uint8_t *dest, size_t *dest_size,
+                            size_t dest_capacity) {
+    ARG_UNUSED(setting);
+
+    /* Decode RPC bytes back into the firmware's internal C struct layout. */
+    if (src_size > dest_capacity) {
+        return -EMSGSIZE;
+    }
+    memcpy(dest, src, src_size);
+    *dest_size = src_size;
+    return 0;
+}
+
+ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
+    my_blob_setting, "my_module", "blob", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(0, 0, 0, 0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    my_blob_to_rpc, my_blob_from_rpc,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+```
+
 For RPC access, the setting namespace should match a Studio custom subsystem
 identifier registered by the module that owns the setting. The web UI obtains
 that subsystem's index from ZMK Studio and sends the index in setting requests.

@@ -3,6 +3,7 @@ zmk__custom_settings, Security: Unsecured
 PASS: custom_settings_validate_hid_usage
 PASS: custom_settings_validate_layer_id
 PASS: custom_settings_validate_behavior_id
+PASS: custom_settings_bytes_rpc_convert rpc=030201 internal=070809
 PASS: custom_settings_update_read scalar=25
 PASS: custom_settings_discard scalar=10
 PASS: custom_settings_save scalar=30
@@ -18,3 +19,4 @@ PASS: custom_settings_reset array[1]=2 size=3
 PASS: custom_settings_pop_back array[2]=3 size=2
 PASS: custom_settings_push_back array[2]=88 size=3
 PASS: custom_settings_push_back_full size=3
+PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809
