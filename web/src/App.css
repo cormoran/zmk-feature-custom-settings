@@ -50,7 +50,8 @@
   margin: 1rem 0;
 }
 
-.form-grid label {
+.form-grid label,
+.form-label {
   align-self: center;
   font-weight: 600;
 }
@@ -59,6 +60,12 @@
 .form-grid select {
   min-width: 0;
   padding: 0.45rem 0.5rem;
+}
+
+.form-value {
+  min-width: 0;
+  align-self: center;
+  overflow-wrap: anywhere;
 }
 
 .settings-panel {

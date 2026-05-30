@@ -102,10 +102,9 @@ describe("RPCTestSection Component", () => {
       expect(
         screen.getByRole("heading", { name: "Update Value" })
       ).toBeInTheDocument();
-      expect(screen.getByLabelText(/Setting Subsystem/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/Setting Key/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
+      expect(screen.getByText("int32")).toBeInTheDocument();
+      expect(screen.queryByText("Array Index")).not.toBeInTheDocument();
+      expect(screen.queryByText("Array Size")).not.toBeInTheDocument();
       const input = screen.getByLabelText(/Value/i) as HTMLInputElement;
       expect(input.value).toBe("42");
       expect(
@@ -113,6 +112,11 @@ describe("RPCTestSection Component", () => {
       ).not.toBeInTheDocument();
       expect(
         screen.queryByRole("button", { name: "Pop Back" })
+      ).not.toBeInTheDocument();
+
+      await userEvent.click(settingButton);
+      expect(
+        screen.queryByRole("heading", { name: "Update Value" })
       ).not.toBeInTheDocument();
     });
 
@@ -147,6 +151,8 @@ describe("RPCTestSection Component", () => {
       );
       await userEvent.click(settingButton);
 
+      expect(screen.getByText("Array Index")).toBeInTheDocument();
+      expect(screen.getByText("Array Size")).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Push Back" })
       ).toBeInTheDocument();

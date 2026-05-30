@@ -512,6 +512,11 @@ export function RPCTestSection() {
     sendRequest(Request.create({ resetSettings: { scope: settingScope } }));
 
   const selectSettingForEdit = (nextSetting: Setting) => {
+    if (setting && settingsMatch(setting, nextSetting)) {
+      setSetting(null);
+      return;
+    }
+
     setSetting(nextSetting);
     setEditorCustomSubsystemId(
       subsystemIdentifierForIndex(nextSetting.customSubsystemIndex) ??
@@ -603,65 +608,49 @@ export function RPCTestSection() {
   }
 
   const selectedSettingIsArray = setting?.value?.arrayValue !== undefined;
+  const selectedSettingDisplayName = setting
+    ? settingDisplayName(setting, subsystemIdentifierForIndex)
+    : "";
+  const selectedSettingValueType = setting
+    ? settingValueTypeLabel(setting.value)
+    : undefined;
   const updateValuePanel = setting ? (
     <section className="settings-panel settings-editor-panel">
       <h3>Update Value</h3>
       <div className="form-grid">
-        <label htmlFor="editor-custom-subsystem-input">Setting Subsystem</label>
-        <input
-          id="editor-custom-subsystem-input"
-          value={editorCustomSubsystemId}
-          onChange={(e) => setEditorCustomSubsystemId(e.target.value)}
-        />
+        <span className="form-label">Setting</span>
+        <span className="form-value">{selectedSettingDisplayName}</span>
 
-        <label htmlFor="editor-key-input">Setting Key</label>
-        <input
-          id="editor-key-input"
-          value={editorSettingKey}
-          onChange={(e) => setEditorSettingKey(e.target.value)}
-        />
+        {selectedSettingValueType ? (
+          <>
+            <span className="form-label">Type</span>
+            <span className="form-value">{selectedSettingValueType}</span>
+          </>
+        ) : (
+          <>
+            <label htmlFor="type-input">Type</label>
+            <select
+              id="type-input"
+              value={valueType}
+              onChange={(e) => setValueType(e.target.value as EditorValueType)}
+            >
+              <option value={EditorValueType.Int32}>int32</option>
+              <option value={EditorValueType.Bool}>bool</option>
+              <option value={EditorValueType.String}>string</option>
+              <option value={EditorValueType.Bytes}>bytes</option>
+            </select>
+          </>
+        )}
 
-        <label htmlFor="type-input">Type</label>
-        <select
-          id="type-input"
-          value={valueType}
-          onChange={(e) => setValueType(e.target.value as EditorValueType)}
-        >
-          <option value={EditorValueType.Int32}>int32</option>
-          <option value={EditorValueType.Bool}>bool</option>
-          <option value={EditorValueType.String}>string</option>
-          <option value={EditorValueType.Bytes}>bytes</option>
-        </select>
+        {selectedSettingIsArray && (
+          <>
+            <span className="form-label">Array Index</span>
+            <span className="form-value">{arrayIndex}</span>
 
-        <label htmlFor="array-input">Array</label>
-        <input
-          id="array-input"
-          type="checkbox"
-          checked={isArray}
-          onChange={(e) => setIsArray(e.target.checked)}
-        />
-
-        <label htmlFor="array-index-input">Array Index</label>
-        <input
-          id="array-index-input"
-          type="number"
-          min={0}
-          value={arrayIndex}
-          onChange={(e) =>
-            setArrayIndex(Number.parseInt(e.target.value, 10) || 0)
-          }
-        />
-
-        <label htmlFor="array-size-input">Array Size</label>
-        <input
-          id="array-size-input"
-          type="number"
-          min={1}
-          value={arraySize}
-          onChange={(e) =>
-            setArraySize(Number.parseInt(e.target.value, 10) || 1)
-          }
-        />
+            <span className="form-label">Array Size</span>
+            <span className="form-value">{arraySize}</span>
+          </>
+        )}
 
         <label htmlFor="value-input">Value</label>
         <input
@@ -906,6 +895,18 @@ function formatValue(value: SettingValue): string {
   }
 
   return formatScalarValue(value);
+}
+
+function settingValueTypeLabel(
+  value: SettingValue | undefined
+): string | undefined {
+  const scalarValue = value?.arrayValue?.value ?? value;
+  if (!scalarValue) return undefined;
+  if (scalarValue.int32Value !== undefined) return "int32";
+  if (scalarValue.boolValue !== undefined) return "bool";
+  if (scalarValue.stringValue !== undefined) return "string";
+  if (scalarValue.bytesValue !== undefined) return "bytes";
+  return undefined;
 }
 
 function formatScalarValue(value: SettingScalarValue): string {
