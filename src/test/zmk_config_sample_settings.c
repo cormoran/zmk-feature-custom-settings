@@ -13,7 +13,7 @@
 
 #include <dt-bindings/zmk/hid_usage.h>
 #include <dt-bindings/zmk/hid_usage_pages.h>
-#include <zmk/cormoran/custom_settings.h>
+#include <cormoran/zmk/custom_settings.h>
 
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
 #include <zmk/studio/custom.h>

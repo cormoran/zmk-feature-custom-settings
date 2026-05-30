@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { setupZMKMocks } from "@cormoran/zmk-studio-react-hook/testing";
 import { call_rpc } from "@zmkfirmware/zmk-studio-ts-client";
 import App from "../src/App";
-import { Response } from "../src/proto/zmk/cormoran/custom_settings/custom_settings";
+import { Response } from "../src/proto/cormoran/zmk/custom_settings/custom_settings";
 
 // Mock the ZMK client
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
@@ -49,7 +49,7 @@ describe("App Component", () => {
     it("should connect to device when connect button is clicked", async () => {
       mocks.mockSuccessfulConnection({
         deviceName: "Test Keyboard",
-        subsystems: ["zmk__custom_settings"],
+        subsystems: ["cormoran_custom_settings"],
       });
 
       const { connect: serial_connect } =

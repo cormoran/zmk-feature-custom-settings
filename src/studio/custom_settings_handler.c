@@ -16,8 +16,8 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
-#include <zmk/cormoran/custom_settings.h>
-#include <zmk/cormoran/custom_settings/custom_settings.pb.h>
+#include <cormoran/zmk/custom_settings.h>
+#include <cormoran/zmk/custom_settings/custom_settings.pb.h>
 #include <zmk/studio/core.h>
 #include <zmk/workqueue.h>
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
@@ -34,7 +34,7 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#define SUBSYSTEM_IDENTIFIER_STRING "zmk__custom_settings"
+#define SUBSYSTEM_IDENTIFIER_STRING "cormoran_custom_settings"
 #define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
 #define LIST_SETTINGS_RELAY_DELAY K_MSEC(20)
 
@@ -44,10 +44,11 @@ static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
     .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
 };
 
-ZMK_RPC_CUSTOM_SUBSYSTEM(zmk__custom_settings, &custom_settings_meta,
+ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran_custom_settings, &custom_settings_meta,
                          custom_settings_rpc_handle_request);
 
-ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(zmk__custom_settings, zmk_custom_settings_Response);
+ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(cormoran_custom_settings,
+                                         cormoran_zmk_custom_settings_Response);
 #endif
 
 static bool studio_is_unlocked(void) {
@@ -171,7 +172,7 @@ ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(zmk_custom_settings_relay_notification, cs
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static uint32_t ref_source(const zmk_custom_settings_SettingRef *ref) {
+static uint32_t ref_source(const cormoran_zmk_custom_settings_SettingRef *ref) {
     return ref->has_source ? ref->source : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
 }
 #endif
@@ -182,7 +183,7 @@ static uint32_t setting_ref_source(const struct zmk_custom_settings_setting_ref 
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static uint32_t scope_source(const zmk_custom_settings_SettingScope *scope) {
+static uint32_t scope_source(const cormoran_zmk_custom_settings_SettingScope *scope) {
     return scope->has_source ? scope->source : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
 }
 #endif
@@ -258,45 +259,47 @@ static void copy_string(char *dest, size_t dest_size, const char *src) {
     dest[len] = '\0';
 }
 
-static void set_error(zmk_custom_settings_Response *resp, const char *message) {
-    zmk_custom_settings_ErrorResponse err = zmk_custom_settings_ErrorResponse_init_zero;
+static void set_error(cormoran_zmk_custom_settings_Response *resp, const char *message) {
+    cormoran_zmk_custom_settings_ErrorResponse err =
+        cormoran_zmk_custom_settings_ErrorResponse_init_zero;
     snprintf(err.message, sizeof(err.message), "%s", message);
-    resp->which_response_type = zmk_custom_settings_Response_error_tag;
+    resp->which_response_type = cormoran_zmk_custom_settings_Response_error_tag;
     resp->response_type.error = err;
 }
 
-static void set_status(zmk_custom_settings_Response *resp, uint32_t affected_count,
+static void set_status(cormoran_zmk_custom_settings_Response *resp, uint32_t affected_count,
                        const char *message) {
-    zmk_custom_settings_StatusResponse status = zmk_custom_settings_StatusResponse_init_zero;
+    cormoran_zmk_custom_settings_StatusResponse status =
+        cormoran_zmk_custom_settings_StatusResponse_init_zero;
     status.affected_count = affected_count;
     snprintf(status.message, sizeof(status.message), "%s", message);
-    resp->which_response_type = zmk_custom_settings_Response_status_tag;
+    resp->which_response_type = cormoran_zmk_custom_settings_Response_status_tag;
     resp->response_type.status = status;
 }
 
-static zmk_custom_settings_SettingConfidentiality
+static cormoran_zmk_custom_settings_SettingConfidentiality
 proto_confidentiality(enum zmk_custom_setting_confidentiality confidentiality) {
-    return (zmk_custom_settings_SettingConfidentiality)confidentiality;
+    return (cormoran_zmk_custom_settings_SettingConfidentiality)confidentiality;
 }
 
-static zmk_custom_settings_SettingPermission
+static cormoran_zmk_custom_settings_SettingPermission
 proto_permission(enum zmk_custom_setting_permission permission) {
-    return (zmk_custom_settings_SettingPermission)permission;
+    return (cormoran_zmk_custom_settings_SettingPermission)permission;
 }
 
-static zmk_custom_settings_SettingNotificationKind
+static cormoran_zmk_custom_settings_SettingNotificationKind
 proto_notification_kind(enum zmk_custom_setting_changed_kind kind) {
     switch (kind) {
     case ZMK_CUSTOM_SETTING_CHANGED_VALUE_UPDATED:
-        return zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
+        return cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
     case ZMK_CUSTOM_SETTING_CHANGED_SAVED:
-        return zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_SAVED;
+        return cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_SAVED;
     case ZMK_CUSTOM_SETTING_CHANGED_DISCARDED:
-        return zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_DISCARDED;
+        return cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_DISCARDED;
     case ZMK_CUSTOM_SETTING_CHANGED_RESET:
-        return zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_RESET;
+        return cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_RESET;
     default:
-        return zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
+        return cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
     }
 }
 
@@ -305,12 +308,12 @@ static int custom_subsystem_index_for_identifier(const char *identifier, uint32_
 static const char *custom_subsystem_identifier_for_index(uint32_t index);
 #endif
 
-static int scalar_proto_to_value(const zmk_custom_settings_SettingScalarValue *src,
+static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScalarValue *src,
                                  struct zmk_custom_setting_value *dest) {
     *dest = (struct zmk_custom_setting_value){0};
 
     switch (src->which_value_type) {
-    case zmk_custom_settings_SettingScalarValue_bytes_value_tag:
+    case cormoran_zmk_custom_settings_SettingScalarValue_bytes_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES;
         dest->size = src->value_type.bytes_value.size;
         if (dest->size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
@@ -318,15 +321,15 @@ static int scalar_proto_to_value(const zmk_custom_settings_SettingScalarValue *s
         }
         memcpy(dest->bytes_value, src->value_type.bytes_value.bytes, dest->size);
         return 0;
-    case zmk_custom_settings_SettingScalarValue_int32_value_tag:
+    case cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
         dest->int32_value = src->value_type.int32_value;
         return 0;
-    case zmk_custom_settings_SettingScalarValue_bool_value_tag:
+    case cormoran_zmk_custom_settings_SettingScalarValue_bool_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL;
         dest->bool_value = src->value_type.bool_value;
         return 0;
-    case zmk_custom_settings_SettingScalarValue_string_value_tag:
+    case cormoran_zmk_custom_settings_SettingScalarValue_string_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
         dest->size =
             bounded_strlen(src->value_type.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
@@ -337,35 +340,39 @@ static int scalar_proto_to_value(const zmk_custom_settings_SettingScalarValue *s
     }
 }
 
-static int proto_to_value(const zmk_custom_settings_SettingValue *src,
+static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
                           struct zmk_custom_setting_value *dest, bool *is_array,
                           uint32_t *array_index, uint32_t *array_size) {
     *is_array = false;
 
     switch (src->which_value_type) {
-    case zmk_custom_settings_SettingValue_bytes_value_tag:
-    case zmk_custom_settings_SettingValue_int32_value_tag:
-    case zmk_custom_settings_SettingValue_bool_value_tag:
-    case zmk_custom_settings_SettingValue_string_value_tag: {
-        zmk_custom_settings_SettingScalarValue scalar =
-            zmk_custom_settings_SettingScalarValue_init_zero;
+    case cormoran_zmk_custom_settings_SettingValue_bytes_value_tag:
+    case cormoran_zmk_custom_settings_SettingValue_int32_value_tag:
+    case cormoran_zmk_custom_settings_SettingValue_bool_value_tag:
+    case cormoran_zmk_custom_settings_SettingValue_string_value_tag: {
+        cormoran_zmk_custom_settings_SettingScalarValue scalar =
+            cormoran_zmk_custom_settings_SettingScalarValue_init_zero;
         switch (src->which_value_type) {
-        case zmk_custom_settings_SettingValue_bytes_value_tag:
-            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_bytes_value_tag;
+        case cormoran_zmk_custom_settings_SettingValue_bytes_value_tag:
+            scalar.which_value_type =
+                cormoran_zmk_custom_settings_SettingScalarValue_bytes_value_tag;
             scalar.value_type.bytes_value.size = src->value_type.bytes_value.size;
             memcpy(scalar.value_type.bytes_value.bytes, src->value_type.bytes_value.bytes,
                    scalar.value_type.bytes_value.size);
             break;
-        case zmk_custom_settings_SettingValue_int32_value_tag:
-            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_int32_value_tag;
+        case cormoran_zmk_custom_settings_SettingValue_int32_value_tag:
+            scalar.which_value_type =
+                cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag;
             scalar.value_type.int32_value = src->value_type.int32_value;
             break;
-        case zmk_custom_settings_SettingValue_bool_value_tag:
-            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_bool_value_tag;
+        case cormoran_zmk_custom_settings_SettingValue_bool_value_tag:
+            scalar.which_value_type =
+                cormoran_zmk_custom_settings_SettingScalarValue_bool_value_tag;
             scalar.value_type.bool_value = src->value_type.bool_value;
             break;
-        case zmk_custom_settings_SettingValue_string_value_tag:
-            scalar.which_value_type = zmk_custom_settings_SettingScalarValue_string_value_tag;
+        case cormoran_zmk_custom_settings_SettingValue_string_value_tag:
+            scalar.which_value_type =
+                cormoran_zmk_custom_settings_SettingScalarValue_string_value_tag;
             copy_string(scalar.value_type.string_value, sizeof(scalar.value_type.string_value),
                         src->value_type.string_value);
             break;
@@ -374,7 +381,7 @@ static int proto_to_value(const zmk_custom_settings_SettingValue *src,
         }
         return scalar_proto_to_value(&scalar, dest);
     }
-    case zmk_custom_settings_SettingValue_array_value_tag:
+    case cormoran_zmk_custom_settings_SettingValue_array_value_tag:
         if (!src->value_type.array_value.has_value) {
             return -EINVAL;
         }
@@ -388,13 +395,13 @@ static int proto_to_value(const zmk_custom_settings_SettingValue *src,
 }
 
 static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
-                                 zmk_custom_settings_SettingScalarValue *dest) {
-    *dest =
-        (zmk_custom_settings_SettingScalarValue)zmk_custom_settings_SettingScalarValue_init_zero;
+                                 cormoran_zmk_custom_settings_SettingScalarValue *dest) {
+    *dest = (cormoran_zmk_custom_settings_SettingScalarValue)
+        cormoran_zmk_custom_settings_SettingScalarValue_init_zero;
 
     switch (src->type) {
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
-        dest->which_value_type = zmk_custom_settings_SettingScalarValue_bytes_value_tag;
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_bytes_value_tag;
         dest->value_type.bytes_value.size = src->size;
         if (src->size > sizeof(dest->value_type.bytes_value.bytes)) {
             return -EMSGSIZE;
@@ -402,15 +409,15 @@ static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
         memcpy(dest->value_type.bytes_value.bytes, src->bytes_value, src->size);
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
-        dest->which_value_type = zmk_custom_settings_SettingScalarValue_int32_value_tag;
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag;
         dest->value_type.int32_value = src->int32_value;
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
-        dest->which_value_type = zmk_custom_settings_SettingScalarValue_bool_value_tag;
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_bool_value_tag;
         dest->value_type.bool_value = src->bool_value;
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
-        dest->which_value_type = zmk_custom_settings_SettingScalarValue_string_value_tag;
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_string_value_tag;
         copy_string(dest->value_type.string_value, sizeof(dest->value_type.string_value),
                     src->string_value);
         return 0;
@@ -421,8 +428,9 @@ static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
 
 static int value_to_proto(const struct zmk_custom_setting *setting,
                           const struct zmk_custom_setting_value *src,
-                          zmk_custom_settings_SettingValue *dest) {
-    *dest = (zmk_custom_settings_SettingValue)zmk_custom_settings_SettingValue_init_zero;
+                          cormoran_zmk_custom_settings_SettingValue *dest) {
+    *dest = (cormoran_zmk_custom_settings_SettingValue)
+        cormoran_zmk_custom_settings_SettingValue_init_zero;
 
     struct zmk_custom_setting_value rpc_value;
     int ret = zmk_custom_setting_serialize_rpc_value(setting, src, &rpc_value);
@@ -432,37 +440,37 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
     src = &rpc_value;
 
     if (zmk_custom_setting_is_array(setting)) {
-        dest->which_value_type = zmk_custom_settings_SettingValue_array_value_tag;
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_array_value_tag;
         dest->value_type.array_value.index = setting->array_index;
         dest->value_type.array_value.size = zmk_custom_setting_array_size(setting);
         dest->value_type.array_value.has_value = true;
         return value_to_scalar_proto(src, &dest->value_type.array_value.value);
     }
 
-    zmk_custom_settings_SettingScalarValue scalar =
-        zmk_custom_settings_SettingScalarValue_init_zero;
+    cormoran_zmk_custom_settings_SettingScalarValue scalar =
+        cormoran_zmk_custom_settings_SettingScalarValue_init_zero;
     ret = value_to_scalar_proto(src, &scalar);
     if (ret < 0) {
         return ret;
     }
 
     switch (scalar.which_value_type) {
-    case zmk_custom_settings_SettingScalarValue_bytes_value_tag:
-        dest->which_value_type = zmk_custom_settings_SettingValue_bytes_value_tag;
+    case cormoran_zmk_custom_settings_SettingScalarValue_bytes_value_tag:
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_bytes_value_tag;
         dest->value_type.bytes_value.size = scalar.value_type.bytes_value.size;
         memcpy(dest->value_type.bytes_value.bytes, scalar.value_type.bytes_value.bytes,
                dest->value_type.bytes_value.size);
         return 0;
-    case zmk_custom_settings_SettingScalarValue_int32_value_tag:
-        dest->which_value_type = zmk_custom_settings_SettingValue_int32_value_tag;
+    case cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag:
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
         dest->value_type.int32_value = scalar.value_type.int32_value;
         return 0;
-    case zmk_custom_settings_SettingScalarValue_bool_value_tag:
-        dest->which_value_type = zmk_custom_settings_SettingValue_bool_value_tag;
+    case cormoran_zmk_custom_settings_SettingScalarValue_bool_value_tag:
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_bool_value_tag;
         dest->value_type.bool_value = scalar.value_type.bool_value;
         return 0;
-    case zmk_custom_settings_SettingScalarValue_string_value_tag:
-        dest->which_value_type = zmk_custom_settings_SettingValue_string_value_tag;
+    case cormoran_zmk_custom_settings_SettingScalarValue_string_value_tag:
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_string_value_tag;
         copy_string(dest->value_type.string_value, sizeof(dest->value_type.string_value),
                     scalar.value_type.string_value);
         return 0;
@@ -472,14 +480,15 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
 }
 
 static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
-                               zmk_custom_settings_SettingConstraint *dest) {
-    *dest = (zmk_custom_settings_SettingConstraint)zmk_custom_settings_SettingConstraint_init_zero;
+                               cormoran_zmk_custom_settings_SettingConstraint *dest) {
+    *dest = (cormoran_zmk_custom_settings_SettingConstraint)
+        cormoran_zmk_custom_settings_SettingConstraint_init_zero;
 
     switch (src->type) {
     case ZMK_CUSTOM_SETTING_CONSTRAINT_NONE:
         return -ENOENT;
     case ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE: {
-        dest->which_constraint_type = zmk_custom_settings_SettingConstraint_range_tag;
+        dest->which_constraint_type = cormoran_zmk_custom_settings_SettingConstraint_range_tag;
         dest->constraint_type.range.has_min = true;
         dest->constraint_type.range.has_max = true;
         int ret = value_to_scalar_proto(&src->range.min, &dest->constraint_type.range.min);
@@ -489,7 +498,7 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
         return value_to_scalar_proto(&src->range.max, &dest->constraint_type.range.max);
     }
     case ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS:
-        dest->which_constraint_type = zmk_custom_settings_SettingConstraint_options_tag;
+        dest->which_constraint_type = cormoran_zmk_custom_settings_SettingConstraint_options_tag;
         dest->constraint_type.options.values_count =
             MIN(src->options.count, ARRAY_SIZE(dest->constraint_type.options.values));
         dest->constraint_type.options.labels_count =
@@ -508,16 +517,17 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
         }
         return 0;
     case ZMK_CUSTOM_SETTING_CONSTRAINT_HID_USAGE:
-        dest->which_constraint_type = zmk_custom_settings_SettingConstraint_hid_usage_tag;
+        dest->which_constraint_type = cormoran_zmk_custom_settings_SettingConstraint_hid_usage_tag;
         dest->constraint_type.hid_usage.usage_page = src->hid_usage.usage_page;
         dest->constraint_type.hid_usage.usage_min = src->hid_usage.usage_min;
         dest->constraint_type.hid_usage.usage_max = src->hid_usage.usage_max;
         return 0;
     case ZMK_CUSTOM_SETTING_CONSTRAINT_LAYER_ID:
-        dest->which_constraint_type = zmk_custom_settings_SettingConstraint_layer_id_tag;
+        dest->which_constraint_type = cormoran_zmk_custom_settings_SettingConstraint_layer_id_tag;
         return 0;
     case ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID:
-        dest->which_constraint_type = zmk_custom_settings_SettingConstraint_behavior_id_tag;
+        dest->which_constraint_type =
+            cormoran_zmk_custom_settings_SettingConstraint_behavior_id_tag;
         return 0;
     default:
         return -EINVAL;
@@ -525,8 +535,9 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
 }
 
 static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
-                                 zmk_custom_settings_SettingMeta *dest) {
-    *dest = (zmk_custom_settings_SettingMeta)zmk_custom_settings_SettingMeta_init_zero;
+                                 cormoran_zmk_custom_settings_SettingMeta *dest) {
+    *dest = (cormoran_zmk_custom_settings_SettingMeta)
+        cormoran_zmk_custom_settings_SettingMeta_init_zero;
 
     dest->confidentiality = proto_confidentiality(setting->confidentiality);
     dest->read_permission = proto_permission(setting->read_permission);
@@ -551,7 +562,7 @@ static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
 }
 
 static int setting_value_to_proto(const struct zmk_custom_setting *setting,
-                                  zmk_custom_settings_SettingValue *dest) {
+                                  cormoran_zmk_custom_settings_SettingValue *dest) {
     struct zmk_custom_setting_value value;
     int ret = zmk_custom_setting_read(setting, &value);
     if (ret < 0) {
@@ -562,9 +573,9 @@ static int setting_value_to_proto(const struct zmk_custom_setting *setting,
 }
 
 static int setting_to_proto(const struct zmk_custom_setting *setting,
-                            zmk_custom_settings_Setting *dest, bool include_value,
+                            cormoran_zmk_custom_settings_Setting *dest, bool include_value,
                             bool include_meta, uint32_t source) {
-    *dest = (zmk_custom_settings_Setting)zmk_custom_settings_Setting_init_zero;
+    *dest = (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
 
     int ret;
     LOG_INF("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
@@ -670,27 +681,28 @@ static int custom_subsystem_index(void) {
 
 static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *field,
                                         void *const *arg) {
-    const zmk_custom_settings_Notification *notification =
-        (const zmk_custom_settings_Notification *)*arg;
+    const cormoran_zmk_custom_settings_Notification *notification =
+        (const cormoran_zmk_custom_settings_Notification *)*arg;
     return zmk_rpc_custom_subsystem_encode_response_payload(
-        stream, field, zmk_custom_settings_Notification_fields, notification);
+        stream, field, cormoran_zmk_custom_settings_Notification_fields, notification);
 }
 #endif
 
 static K_MUTEX_DEFINE(notification_buffer_lock);
-static zmk_custom_settings_Notification notification_buffer;
+static cormoran_zmk_custom_settings_Notification notification_buffer;
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
-                                          zmk_custom_settings_Notification *notification) {
+                                          cormoran_zmk_custom_settings_Notification *notification) {
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
-    if (!pb_decode(&stream, zmk_custom_settings_Notification_fields, notification)) {
+    if (!pb_decode(&stream, cormoran_zmk_custom_settings_Notification_fields, notification)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
         return -EIO;
     }
 
-    if (notification->which_notification_type != zmk_custom_settings_Notification_setting_tag ||
+    if (notification->which_notification_type !=
+            cormoran_zmk_custom_settings_Notification_setting_tag ||
         !notification->notification_type.setting.has_setting) {
         return 0;
     }
@@ -708,7 +720,8 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     return 0;
 }
 
-static int raise_encoded_studio_notification(const zmk_custom_settings_Notification *notification) {
+static int
+raise_encoded_studio_notification(const cormoran_zmk_custom_settings_Notification *notification) {
     int index = custom_subsystem_index();
     if (index < 0) {
         return index;
@@ -727,13 +740,14 @@ static int raise_encoded_studio_notification(const zmk_custom_settings_Notificat
 #endif
 
 static int raise_setting_notification(const struct zmk_custom_setting *setting,
-                                      zmk_custom_settings_SettingNotificationKind kind,
+                                      cormoran_zmk_custom_settings_SettingNotificationKind kind,
                                       bool include_value, bool include_meta, uint32_t source) {
     k_mutex_lock(&notification_buffer_lock, K_FOREVER);
 
-    zmk_custom_settings_Notification *notification = &notification_buffer;
-    *notification = (zmk_custom_settings_Notification)zmk_custom_settings_Notification_init_zero;
-    notification->which_notification_type = zmk_custom_settings_Notification_setting_tag;
+    cormoran_zmk_custom_settings_Notification *notification = &notification_buffer;
+    *notification = (cormoran_zmk_custom_settings_Notification)
+        cormoran_zmk_custom_settings_Notification_init_zero;
+    notification->which_notification_type = cormoran_zmk_custom_settings_Notification_setting_tag;
     notification->notification_type.setting.kind = kind;
     notification->notification_type.setting.has_setting = true;
     int ret = setting_to_proto(setting, &notification->notification_type.setting.setting,
@@ -752,7 +766,7 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
                 sizeof(relay_notification.custom_subsystem_id), setting->custom_subsystem_id);
     pb_ostream_t stream =
         pb_ostream_from_buffer(relay_notification.payload, sizeof(relay_notification.payload));
-    if (!pb_encode(&stream, zmk_custom_settings_Notification_fields, notification)) {
+    if (!pb_encode(&stream, cormoran_zmk_custom_settings_Notification_fields, notification)) {
         LOG_WRN("Failed to encode custom settings relay notification: %s", PB_GET_ERROR(&stream));
         k_mutex_unlock(&notification_buffer_lock);
         return -EIO;
@@ -846,7 +860,7 @@ static void list_settings_work_handler(struct k_work *work) {
                 can_include_value(setting), include_meta);
         int ret = raise_setting_notification(
             setting,
-            zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
+            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
             can_include_value(setting), include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
         if (ret < 0) {
             LOG_WRN("Failed to raise custom settings list notification: %d", ret);
@@ -883,7 +897,7 @@ static void schedule_list_settings(const struct zmk_custom_settings_setting_scop
 }
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static int setting_ref_to_private(const zmk_custom_settings_SettingRef *src,
+static int setting_ref_to_private(const cormoran_zmk_custom_settings_SettingRef *src,
                                   struct zmk_custom_settings_setting_ref *dest) {
     *dest = (struct zmk_custom_settings_setting_ref){0};
 
@@ -911,7 +925,7 @@ static int setting_ref_to_private(const zmk_custom_settings_SettingRef *src,
     return 0;
 }
 
-static int setting_scope_to_private(const zmk_custom_settings_SettingScope *src,
+static int setting_scope_to_private(const cormoran_zmk_custom_settings_SettingScope *src,
                                     struct zmk_custom_settings_setting_scope *dest) {
     *dest = (struct zmk_custom_settings_setting_scope){0};
 
@@ -941,7 +955,8 @@ static int setting_scope_to_private(const zmk_custom_settings_SettingScope *src,
 #endif
 
 static int handle_private_list_settings(const struct zmk_custom_settings_setting_scope *scope,
-                                        bool require_meta, zmk_custom_settings_Response *resp) {
+                                        bool require_meta,
+                                        cormoran_zmk_custom_settings_Response *resp) {
     uint32_t count = 0;
 
     if (!source_targets_local(setting_scope_source(scope))) {
@@ -973,8 +988,8 @@ static int handle_private_list_settings(const struct zmk_custom_settings_setting
     return 0;
 }
 
-static int handle_list_settings(const zmk_custom_settings_ListSettingsRequest *req,
-                                zmk_custom_settings_Response *resp) {
+static int handle_list_settings(const cormoran_zmk_custom_settings_ListSettingsRequest *req,
+                                cormoran_zmk_custom_settings_Response *resp) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_scope scope;
     int ret = setting_scope_to_private(&req->scope, &scope);
@@ -989,7 +1004,8 @@ static int handle_list_settings(const zmk_custom_settings_ListSettingsRequest *r
 }
 
 static int handle_private_get_setting(const struct zmk_custom_settings_setting_ref *ref,
-                                      zmk_custom_settings_Response *resp, bool include_meta) {
+                                      cormoran_zmk_custom_settings_Response *resp,
+                                      bool include_meta) {
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1008,9 +1024,9 @@ static int handle_private_get_setting(const struct zmk_custom_settings_setting_r
         return 0;
     }
 
-    resp->which_response_type = zmk_custom_settings_Response_get_setting_tag;
-    resp->response_type.get_setting =
-        (zmk_custom_settings_GetSettingResponse)zmk_custom_settings_GetSettingResponse_init_zero;
+    resp->which_response_type = cormoran_zmk_custom_settings_Response_get_setting_tag;
+    resp->response_type.get_setting = (cormoran_zmk_custom_settings_GetSettingResponse)
+        cormoran_zmk_custom_settings_GetSettingResponse_init_zero;
     resp->response_type.get_setting.has_setting = true;
     int ret = setting_to_proto(setting, &resp->response_type.get_setting.setting, true,
                                include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
@@ -1022,8 +1038,8 @@ static int handle_private_get_setting(const struct zmk_custom_settings_setting_r
     return 0;
 }
 
-static int handle_get_setting(const zmk_custom_settings_GetSettingRequest *req,
-                              zmk_custom_settings_Response *resp) {
+static int handle_get_setting(const cormoran_zmk_custom_settings_GetSettingRequest *req,
+                              cormoran_zmk_custom_settings_Response *resp) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_ref private_ref;
     int ret = setting_ref_to_private(&req->setting, &private_ref);
@@ -1041,8 +1057,8 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
                                         const struct zmk_custom_setting_value *value,
                                         bool value_is_array, uint32_t array_index,
                                         uint32_t array_size,
-                                        zmk_custom_settings_SettingWriteMode write_mode,
-                                        zmk_custom_settings_Response *resp,
+                                        cormoran_zmk_custom_settings_SettingWriteMode write_mode,
+                                        cormoran_zmk_custom_settings_Response *resp,
                                         bool value_uses_rpc_format) {
     if (!ref->has_key) {
         return -EINVAL;
@@ -1081,7 +1097,7 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
     }
 
     enum zmk_custom_setting_write_mode mode =
-        write_mode == zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+        write_mode == cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
@@ -1105,8 +1121,8 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
     return 0;
 }
 
-static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *req,
-                                zmk_custom_settings_Response *resp) {
+static int handle_write_setting(const cormoran_zmk_custom_settings_WriteSettingRequest *req,
+                                cormoran_zmk_custom_settings_Response *resp) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_ref private_ref;
     int ret = setting_ref_to_private(&req->setting, &private_ref);
@@ -1132,8 +1148,8 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
 
 static int handle_private_push_back_array(const struct zmk_custom_settings_setting_ref *ref,
                                           const struct zmk_custom_setting_value *value,
-                                          zmk_custom_settings_SettingWriteMode write_mode,
-                                          zmk_custom_settings_Response *resp,
+                                          cormoran_zmk_custom_settings_SettingWriteMode write_mode,
+                                          cormoran_zmk_custom_settings_Response *resp,
                                           bool value_uses_rpc_format) {
     if (!ref->has_key) {
         return -EINVAL;
@@ -1155,7 +1171,7 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
     }
 
     enum zmk_custom_setting_write_mode mode =
-        write_mode == zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+        write_mode == cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
@@ -1178,8 +1194,8 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
     return 0;
 }
 
-static int handle_push_back_array(const zmk_custom_settings_PushBackArrayRequest *req,
-                                  zmk_custom_settings_Response *resp) {
+static int handle_push_back_array(const cormoran_zmk_custom_settings_PushBackArrayRequest *req,
+                                  cormoran_zmk_custom_settings_Response *resp) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_ref private_ref;
     int ret = setting_ref_to_private(&req->setting, &private_ref);
@@ -1200,8 +1216,8 @@ static int handle_push_back_array(const zmk_custom_settings_PushBackArrayRequest
 }
 
 static int handle_private_pop_back_array(const struct zmk_custom_settings_setting_ref *ref,
-                                         zmk_custom_settings_SettingWriteMode write_mode,
-                                         zmk_custom_settings_Response *resp) {
+                                         cormoran_zmk_custom_settings_SettingWriteMode write_mode,
+                                         cormoran_zmk_custom_settings_Response *resp) {
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1222,7 +1238,7 @@ static int handle_private_pop_back_array(const struct zmk_custom_settings_settin
     }
 
     enum zmk_custom_setting_write_mode mode =
-        write_mode == zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+        write_mode == cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
@@ -1235,8 +1251,8 @@ static int handle_private_pop_back_array(const struct zmk_custom_settings_settin
     return 0;
 }
 
-static int handle_pop_back_array(const zmk_custom_settings_PopBackArrayRequest *req,
-                                 zmk_custom_settings_Response *resp) {
+static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArrayRequest *req,
+                                 cormoran_zmk_custom_settings_Response *resp) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_ref private_ref;
     int ret = setting_ref_to_private(&req->setting, &private_ref);
@@ -1270,7 +1286,8 @@ static bool scope_write_unlock_required(const struct zmk_custom_settings_setting
 }
 
 static int handle_private_scope_mutation(const struct zmk_custom_settings_setting_scope *scope,
-                                         zmk_custom_settings_Response *resp, const char *message,
+                                         cormoran_zmk_custom_settings_Response *resp,
+                                         const char *message,
                                          int (*callback)(const char *, const char *, const char *,
                                                          uint32_t *)) {
     if (!source_targets_local(setting_scope_source(scope))) {
@@ -1294,8 +1311,8 @@ static int handle_private_scope_mutation(const struct zmk_custom_settings_settin
     return 0;
 }
 
-static int handle_scope_mutation(const zmk_custom_settings_SettingScope *scope,
-                                 zmk_custom_settings_Response *resp, const char *message,
+static int handle_scope_mutation(const cormoran_zmk_custom_settings_SettingScope *scope,
+                                 cormoran_zmk_custom_settings_Response *resp, const char *message,
                                  int (*callback)(const char *, const char *, const char *,
                                                  uint32_t *)) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
@@ -1313,27 +1330,27 @@ static int handle_scope_mutation(const zmk_custom_settings_SettingScope *scope,
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static bool should_relay_to_peripherals(const zmk_custom_settings_Request *req) {
+static bool should_relay_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
     switch (req->which_request_type) {
-    case zmk_custom_settings_Request_list_settings_tag:
+    case cormoran_zmk_custom_settings_Request_list_settings_tag:
         return scope_source(&req->request_type.list_settings.scope) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
-    case zmk_custom_settings_Request_save_settings_tag:
+    case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return scope_source(&req->request_type.save_settings.scope) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
-    case zmk_custom_settings_Request_discard_settings_tag:
+    case cormoran_zmk_custom_settings_Request_discard_settings_tag:
         return scope_source(&req->request_type.discard_settings.scope) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
-    case zmk_custom_settings_Request_reset_settings_tag:
+    case cormoran_zmk_custom_settings_Request_reset_settings_tag:
         return scope_source(&req->request_type.reset_settings.scope) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
-    case zmk_custom_settings_Request_write_setting_tag:
+    case cormoran_zmk_custom_settings_Request_write_setting_tag:
         return ref_source(&req->request_type.write_setting.setting) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
-    case zmk_custom_settings_Request_push_back_array_tag:
+    case cormoran_zmk_custom_settings_Request_push_back_array_tag:
         return ref_source(&req->request_type.push_back_array.setting) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
-    case zmk_custom_settings_Request_pop_back_array_tag:
+    case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
         return ref_source(&req->request_type.pop_back_array.setting) ==
                ZMK_CUSTOM_SETTING_SOURCE_ALL;
     default:
@@ -1341,13 +1358,13 @@ static bool should_relay_to_peripherals(const zmk_custom_settings_Request *req) 
     }
 }
 
-static bool relay_request_unlock_required(const zmk_custom_settings_Request *req) {
+static bool relay_request_unlock_required(const cormoran_zmk_custom_settings_Request *req) {
     if (studio_is_unlocked()) {
         return false;
     }
 
     switch (req->which_request_type) {
-    case zmk_custom_settings_Request_list_settings_tag: {
+    case cormoran_zmk_custom_settings_Request_list_settings_tag: {
         struct zmk_custom_settings_setting_scope scope;
         if (setting_scope_to_private(&req->request_type.list_settings.scope, &scope) < 0) {
             return false;
@@ -1355,7 +1372,7 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
 
         return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, true);
     }
-    case zmk_custom_settings_Request_write_setting_tag: {
+    case cormoran_zmk_custom_settings_Request_write_setting_tag: {
         struct zmk_custom_settings_setting_ref ref;
         if (setting_ref_to_private(&req->request_type.write_setting.setting, &ref) < 0) {
             return false;
@@ -1377,7 +1394,7 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
         const struct zmk_custom_setting *setting = setting_for_ref(&ref);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
-    case zmk_custom_settings_Request_push_back_array_tag: {
+    case cormoran_zmk_custom_settings_Request_push_back_array_tag: {
         struct zmk_custom_settings_setting_ref ref;
         if (setting_ref_to_private(&req->request_type.push_back_array.setting, &ref) < 0) {
             return false;
@@ -1386,7 +1403,7 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
         const struct zmk_custom_setting *setting = array_for_ref(&ref);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
-    case zmk_custom_settings_Request_pop_back_array_tag: {
+    case cormoran_zmk_custom_settings_Request_pop_back_array_tag: {
         struct zmk_custom_settings_setting_ref ref;
         if (setting_ref_to_private(&req->request_type.pop_back_array.setting, &ref) < 0) {
             return false;
@@ -1395,7 +1412,7 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
         const struct zmk_custom_setting *setting = array_for_ref(&ref);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
-    case zmk_custom_settings_Request_save_settings_tag: {
+    case cormoran_zmk_custom_settings_Request_save_settings_tag: {
         struct zmk_custom_settings_setting_scope scope;
         if (setting_scope_to_private(&req->request_type.save_settings.scope, &scope) < 0) {
             return false;
@@ -1403,7 +1420,7 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
 
         return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, false);
     }
-    case zmk_custom_settings_Request_discard_settings_tag: {
+    case cormoran_zmk_custom_settings_Request_discard_settings_tag: {
         struct zmk_custom_settings_setting_scope scope;
         if (setting_scope_to_private(&req->request_type.discard_settings.scope, &scope) < 0) {
             return false;
@@ -1411,7 +1428,7 @@ static bool relay_request_unlock_required(const zmk_custom_settings_Request *req
 
         return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, false);
     }
-    case zmk_custom_settings_Request_reset_settings_tag: {
+    case cormoran_zmk_custom_settings_Request_reset_settings_tag: {
         struct zmk_custom_settings_setting_scope scope;
         if (setting_scope_to_private(&req->request_type.reset_settings.scope, &scope) < 0) {
             return false;
@@ -1454,7 +1471,7 @@ static int value_to_relay_value(const struct zmk_custom_setting_value *src,
     }
 }
 
-static int request_to_relay_request(const zmk_custom_settings_Request *src,
+static int request_to_relay_request(const cormoran_zmk_custom_settings_Request *src,
                                     struct zmk_custom_settings_relay_request *dest) {
     uint8_t source = dest->source;
     *dest = (struct zmk_custom_settings_relay_request){
@@ -1462,12 +1479,12 @@ static int request_to_relay_request(const zmk_custom_settings_Request *src,
     };
 
     switch (src->which_request_type) {
-    case zmk_custom_settings_Request_list_settings_tag:
+    case cormoran_zmk_custom_settings_Request_list_settings_tag:
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_LIST;
         dest->request.list_settings.require_meta = src->request_type.list_settings.require_meta;
         return setting_scope_to_private(&src->request_type.list_settings.scope,
                                         &dest->request.list_settings.scope);
-    case zmk_custom_settings_Request_write_setting_tag: {
+    case cormoran_zmk_custom_settings_Request_write_setting_tag: {
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_WRITE;
         dest->request.write_setting.mode = src->request_type.write_setting.mode;
         int ret = setting_ref_to_private(&src->request_type.write_setting.setting,
@@ -1490,7 +1507,7 @@ static int request_to_relay_request(const zmk_custom_settings_Request *src,
         dest->request.write_setting.array_size = array_size;
         return value_to_relay_value(&value, &dest->request.write_setting.value);
     }
-    case zmk_custom_settings_Request_push_back_array_tag: {
+    case cormoran_zmk_custom_settings_Request_push_back_array_tag: {
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK;
         dest->request.push_back_array.mode = src->request_type.push_back_array.mode;
         int ret = setting_ref_to_private(&src->request_type.push_back_array.setting,
@@ -1507,20 +1524,20 @@ static int request_to_relay_request(const zmk_custom_settings_Request *src,
 
         return value_to_relay_value(&value, &dest->request.push_back_array.value);
     }
-    case zmk_custom_settings_Request_pop_back_array_tag:
+    case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK;
         dest->request.pop_back_array.mode = src->request_type.pop_back_array.mode;
         return setting_ref_to_private(&src->request_type.pop_back_array.setting,
                                       &dest->request.pop_back_array.setting);
-    case zmk_custom_settings_Request_save_settings_tag:
+    case cormoran_zmk_custom_settings_Request_save_settings_tag:
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE;
         return setting_scope_to_private(&src->request_type.save_settings.scope,
                                         &dest->request.scope_mutation.scope);
-    case zmk_custom_settings_Request_discard_settings_tag:
+    case cormoran_zmk_custom_settings_Request_discard_settings_tag:
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_DISCARD;
         return setting_scope_to_private(&src->request_type.discard_settings.scope,
                                         &dest->request.scope_mutation.scope);
-    case zmk_custom_settings_Request_reset_settings_tag:
+    case cormoran_zmk_custom_settings_Request_reset_settings_tag:
         dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_RESET;
         return setting_scope_to_private(&src->request_type.reset_settings.scope,
                                         &dest->request.scope_mutation.scope);
@@ -1529,7 +1546,7 @@ static int request_to_relay_request(const zmk_custom_settings_Request *src,
     }
 }
 
-static int relay_request_to_peripherals(const zmk_custom_settings_Request *req) {
+static int relay_request_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
     struct zmk_custom_settings_relay_request relay_request = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
     };
@@ -1568,7 +1585,8 @@ static void list_settings_relay_work_handler(struct k_work *work) {
     }
 }
 
-static int schedule_list_settings_relay_to_peripherals(const zmk_custom_settings_Request *req) {
+static int
+schedule_list_settings_relay_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
     struct zmk_custom_settings_relay_request relay_request = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
     };
@@ -1590,26 +1608,26 @@ static int schedule_list_settings_relay_to_peripherals(const zmk_custom_settings
 }
 #endif
 
-static int process_request(const zmk_custom_settings_Request *req,
-                           zmk_custom_settings_Response *resp) {
+static int process_request(const cormoran_zmk_custom_settings_Request *req,
+                           cormoran_zmk_custom_settings_Response *resp) {
     switch (req->which_request_type) {
-    case zmk_custom_settings_Request_list_settings_tag:
+    case cormoran_zmk_custom_settings_Request_list_settings_tag:
         return handle_list_settings(&req->request_type.list_settings, resp);
-    case zmk_custom_settings_Request_get_setting_tag:
+    case cormoran_zmk_custom_settings_Request_get_setting_tag:
         return handle_get_setting(&req->request_type.get_setting, resp);
-    case zmk_custom_settings_Request_write_setting_tag:
+    case cormoran_zmk_custom_settings_Request_write_setting_tag:
         return handle_write_setting(&req->request_type.write_setting, resp);
-    case zmk_custom_settings_Request_push_back_array_tag:
+    case cormoran_zmk_custom_settings_Request_push_back_array_tag:
         return handle_push_back_array(&req->request_type.push_back_array, resp);
-    case zmk_custom_settings_Request_pop_back_array_tag:
+    case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
         return handle_pop_back_array(&req->request_type.pop_back_array, resp);
-    case zmk_custom_settings_Request_save_settings_tag:
+    case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);
-    case zmk_custom_settings_Request_discard_settings_tag:
+    case cormoran_zmk_custom_settings_Request_discard_settings_tag:
         return handle_scope_mutation(&req->request_type.discard_settings.scope, resp,
                                      "Settings discarded", zmk_custom_settings_discard_scope);
-    case zmk_custom_settings_Request_reset_settings_tag:
+    case cormoran_zmk_custom_settings_Request_reset_settings_tag:
         return handle_scope_mutation(&req->request_type.reset_settings.scope, resp,
                                      "Settings reset", zmk_custom_settings_reset_scope);
     default:
@@ -1647,7 +1665,7 @@ static int relay_value_to_value(const struct zmk_custom_settings_relay_value *sr
 }
 
 static int process_relay_request(const struct zmk_custom_settings_relay_request *req,
-                                 zmk_custom_settings_Response *resp) {
+                                 cormoran_zmk_custom_settings_Response *resp) {
     switch (req->type) {
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_LIST:
         return handle_private_list_settings(&req->request.list_settings.scope,
@@ -1661,7 +1679,8 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         return handle_private_write_setting(
             &req->request.write_setting.setting, &value, req->request.write_setting.value_is_array,
             req->request.write_setting.array_index, req->request.write_setting.array_size,
-            (zmk_custom_settings_SettingWriteMode)req->request.write_setting.mode, resp, true);
+            (cormoran_zmk_custom_settings_SettingWriteMode)req->request.write_setting.mode, resp,
+            true);
     }
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK: {
         struct zmk_custom_setting_value value;
@@ -1671,12 +1690,13 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         }
         return handle_private_push_back_array(
             &req->request.push_back_array.setting, &value,
-            (zmk_custom_settings_SettingWriteMode)req->request.push_back_array.mode, resp, true);
+            (cormoran_zmk_custom_settings_SettingWriteMode)req->request.push_back_array.mode, resp,
+            true);
     }
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK:
         return handle_private_pop_back_array(
             &req->request.pop_back_array.setting,
-            (zmk_custom_settings_SettingWriteMode)req->request.pop_back_array.mode, resp);
+            (cormoran_zmk_custom_settings_SettingWriteMode)req->request.pop_back_array.mode, resp);
     case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE:
         return handle_private_scope_mutation(&req->request.scope_mutation.scope, resp,
                                              "Settings saved", zmk_custom_settings_save_scope);
@@ -1696,13 +1716,13 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
                                                pb_callback_t *encode_response) {
-    zmk_custom_settings_Response *resp =
-        ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER_ALLOCATE(zmk__custom_settings, encode_response);
+    cormoran_zmk_custom_settings_Response *resp = ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER_ALLOCATE(
+        cormoran_custom_settings, encode_response);
 
-    zmk_custom_settings_Request req = zmk_custom_settings_Request_init_zero;
+    cormoran_zmk_custom_settings_Request req = cormoran_zmk_custom_settings_Request_init_zero;
     pb_istream_t req_stream =
         pb_istream_from_buffer(raw_request->payload.bytes, raw_request->payload.size);
-    if (!pb_decode(&req_stream, zmk_custom_settings_Request_fields, &req)) {
+    if (!pb_decode(&req_stream, cormoran_zmk_custom_settings_Request_fields, &req)) {
         LOG_WRN("Failed to decode custom settings request: %s", PB_GET_ERROR(&req_stream));
         set_error(resp, "Failed to decode request");
         return true;
@@ -1715,7 +1735,7 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     if (ret == 0 && should_relay_to_peripherals(&req)) {
         if (!relay_request_unlock_required(&req)) {
-            if (req.which_request_type == zmk_custom_settings_Request_list_settings_tag) {
+            if (req.which_request_type == cormoran_zmk_custom_settings_Request_list_settings_tag) {
                 ret = schedule_list_settings_relay_to_peripherals(&req);
             } else {
                 ret = relay_request_to_peripherals(&req);
@@ -1778,14 +1798,16 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
         return ret;
     }
 
-    static zmk_custom_settings_Setting proto_setting;
-    proto_setting = (zmk_custom_settings_Setting)zmk_custom_settings_Setting_init_zero;
+    static cormoran_zmk_custom_settings_Setting proto_setting;
+    proto_setting =
+        (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
     ret = setting_to_proto(setting, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         return ret;
     }
     if (!proto_setting.has_value ||
-        proto_setting.value.which_value_type != zmk_custom_settings_SettingValue_bytes_value_tag ||
+        proto_setting.value.which_value_type !=
+            cormoran_zmk_custom_settings_SettingValue_bytes_value_tag ||
         proto_setting.value.value_type.bytes_value.size != 3 ||
         proto_setting.value.value_type.bytes_value.bytes[0] != 3 ||
         proto_setting.value.value_type.bytes_value.bytes[1] != 2 ||
@@ -1804,10 +1826,10 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
     copy_string(ref.key, sizeof(ref.key), "bytes_value");
 
     struct zmk_custom_setting_value rpc_value = ZMK_CUSTOM_SETTING_VALUE_BYTES(9, 8, 7);
-    zmk_custom_settings_Response resp = zmk_custom_settings_Response_init_zero;
+    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
     ret = handle_private_write_setting(
         &ref, &rpc_value, false, 0, 0,
-        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp, true);
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp, true);
     if (ret < 0) {
         return ret;
     }
@@ -1846,7 +1868,7 @@ static int relay_request_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    zmk_custom_settings_Response resp = zmk_custom_settings_Response_init_zero;
+    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
     int ret = process_relay_request(ev, &resp);
     if (ret < 0) {
         LOG_WRN("Relayed custom settings request failed: %d", ret);
@@ -1867,8 +1889,8 @@ static int relay_notification_listener(const zmk_event_t *eh) {
     }
 
     k_mutex_lock(&notification_buffer_lock, K_FOREVER);
-    notification_buffer =
-        (zmk_custom_settings_Notification)zmk_custom_settings_Notification_init_zero;
+    notification_buffer = (cormoran_zmk_custom_settings_Notification)
+        cormoran_zmk_custom_settings_Notification_init_zero;
     int ret = relayed_notification_to_public(ev, &notification_buffer);
     if (ret < 0) {
         LOG_WRN("Failed to convert relayed custom settings notification: %d", ret);
@@ -1923,9 +1945,9 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
     request.request.write_setting.value.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
     request.request.write_setting.value.int32_value = 66;
     request.request.write_setting.mode =
-        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
 
-    zmk_custom_settings_Response resp = zmk_custom_settings_Response_init_zero;
+    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
     int ret = process_relay_request(&request, &resp);
     if (ret < 0) {
         LOG_ERR("Split peripheral relay request failed: %d", ret);
@@ -1963,9 +1985,9 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
     pop_request.request.pop_back_array.setting.has_source = true;
     pop_request.request.pop_back_array.setting.source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
     pop_request.request.pop_back_array.mode =
-        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
 
-    resp = (zmk_custom_settings_Response)zmk_custom_settings_Response_init_zero;
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
     ret = process_relay_request(&pop_request, &resp);
     if (ret < 0) {
         LOG_ERR("Split peripheral relay pop_back failed: %d", ret);
@@ -1997,9 +2019,9 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
     push_request.request.push_back_array.value.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
     push_request.request.push_back_array.value.int32_value = 44;
     push_request.request.push_back_array.mode =
-        zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
 
-    resp = (zmk_custom_settings_Response)zmk_custom_settings_Response_init_zero;
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
     ret = process_relay_request(&push_request, &resp);
     if (ret < 0) {
         LOG_ERR("Split peripheral relay push_back failed: %d", ret);

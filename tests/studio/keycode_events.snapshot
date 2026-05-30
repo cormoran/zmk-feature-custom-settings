@@ -1,5 +1,5 @@
+cormoran_custom_settings, Security: Unsecured
 test, Security: Unsecured
-zmk__custom_settings, Security: Unsecured
 PASS: custom_settings_validate_hid_usage
 PASS: custom_settings_validate_layer_id
 PASS: custom_settings_validate_behavior_id

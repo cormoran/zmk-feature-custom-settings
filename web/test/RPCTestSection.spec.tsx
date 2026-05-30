@@ -18,7 +18,7 @@ import {
   Response,
   Setting,
   SettingNotificationKind,
-} from "../src/proto/zmk/cormoran/custom_settings/custom_settings";
+} from "../src/proto/cormoran/zmk/custom_settings/custom_settings";
 
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
   call_rpc: jest.fn(),
@@ -233,7 +233,7 @@ describe("RPCTestSection Component", () => {
       );
 
       expect(
-        screen.getByText(/Subsystem "zmk__custom_settings" not found/i)
+        screen.getByText(/Subsystem "cormoran_custom_settings" not found/i)
       ).toBeInTheDocument();
       expect(
         screen.getByText(

@@ -1,0 +1,19 @@
+# Nanopb options for custom_settings.proto.
+
+cormoran.zmk.custom_settings.SettingScalarValue.bytes_value max_size:64
+cormoran.zmk.custom_settings.SettingScalarValue.string_value max_size:64
+cormoran.zmk.custom_settings.SettingValue.bytes_value max_size:64
+cormoran.zmk.custom_settings.SettingValue.string_value max_size:64
+
+cormoran.zmk.custom_settings.SettingConstraintOptions.values max_count:8
+cormoran.zmk.custom_settings.SettingConstraintOptions.labels max_count:8
+cormoran.zmk.custom_settings.SettingConstraintOptions.labels max_size:32
+
+cormoran.zmk.custom_settings.SettingRef.key max_size:48
+cormoran.zmk.custom_settings.SettingScope.key max_size:48
+cormoran.zmk.custom_settings.SettingScope.key_prefix max_size:48
+cormoran.zmk.custom_settings.SettingMeta.constraints max_count:8
+cormoran.zmk.custom_settings.Setting.key max_size:48
+
+cormoran.zmk.custom_settings.ErrorResponse.message max_size:96
+cormoran.zmk.custom_settings.StatusResponse.message max_size:96
