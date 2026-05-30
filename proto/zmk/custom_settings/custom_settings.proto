@@ -3,13 +3,18 @@ syntax = "proto3";
 package zmk.custom_settings;
 
 enum SettingWriteMode {
+    // Update RAM only. The value can later be saved or discarded.
     SETTING_WRITE_MODE_MEMORY = 0;
+    // Update RAM and save the value to persistent storage.
     SETTING_WRITE_MODE_PERSIST = 1;
 }
 
 enum SettingConfidentiality {
+    // Do not expose the setting value over RPC.
     SETTING_CONFIDENTIALITY_DEVICE_PRIVATE = 0;
+    // RPC may expose the value, but the web UI should treat it as personal data.
     SETTING_CONFIDENTIALITY_RPC_PERSONAL = 1;
+    // RPC may expose the value and the web UI may publish it.
     SETTING_CONFIDENTIALITY_RPC_PUBLIC = 2;
 }
 
@@ -35,12 +40,14 @@ message SettingScalarValue {
     }
 }
 
+// Array values are encoded as one element plus the total array size.
 message SettingArrayValue {
     uint32 index = 1;
     uint32 size = 2;
     SettingScalarValue value = 3;
 }
 
+// One setting value. Array elements wrap a scalar with array metadata.
 message SettingValue {
     oneof value_type {
         bytes bytes_value = 1;
@@ -81,20 +88,26 @@ message SettingConstraint {
     }
 }
 
+// References one setting. custom_subsystem_index is the Studio custom subsystem index.
 message SettingRef {
     optional uint32 custom_subsystem_index = 1;
     optional string key = 2;
+    // Omitted source means local side only. UINT32_MAX means all split sides.
     optional uint32 source = 3;
+    // Optional index for array settings when value.array_value is not used.
     optional uint32 array_index = 4;
 }
 
+// Selects a group of settings for list/save/discard/reset.
 message SettingScope {
     optional uint32 custom_subsystem_index = 1;
     optional string key = 2;
     optional string key_prefix = 3;
+    // Omitted source means local side only. UINT32_MAX means all split sides.
     optional uint32 source = 4;
 }
 
+// Static setting metadata included only when requests set require_meta.
 message SettingMeta {
     SettingConfidentiality confidentiality = 1;
     SettingPermission read_permission = 2;
@@ -105,19 +118,23 @@ message SettingMeta {
 message Setting {
     uint32 custom_subsystem_index = 1;
     string key = 2;
+    // Present only when the request asked for metadata.
     optional SettingMeta meta = 3;
     bool has_unsaved_value = 8;
+    // Omitted for DEVICE_PRIVATE settings and secure settings while locked.
     SettingValue value = 9;
     uint32 source = 10;
 }
 
 message ListSettingsRequest {
     SettingScope scope = 1;
+    // Include static metadata in each list item notification.
     bool require_meta = 2;
 }
 
 message GetSettingRequest {
     SettingRef setting = 1;
+    // Include static metadata in the get response.
     bool require_meta = 2;
 }
 

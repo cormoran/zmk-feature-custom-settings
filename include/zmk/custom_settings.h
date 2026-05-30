@@ -18,6 +18,7 @@
 #define ZMK_CUSTOM_SETTING_SOURCE_ALL UINT32_MAX
 #define ZMK_CUSTOM_SETTING_ARRAY_NONE UINT32_MAX
 
+/* Supported scalar value types for custom settings. */
 enum zmk_custom_setting_value_type {
     ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES = 1,
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 = 2,
@@ -25,18 +26,21 @@ enum zmk_custom_setting_value_type {
     ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING = 4,
 };
 
+/* Write mode controls whether a new value is saved, staged in RAM, or temporary. */
 enum zmk_custom_setting_write_mode {
     ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY,
     ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST,
     ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY,
 };
 
+/* Controls whether RPC may expose the setting value. */
 enum zmk_custom_setting_confidentiality {
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE,
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL,
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
 };
 
+/* Secure settings require Studio unlock before RPC read/write access. */
 enum zmk_custom_setting_permission {
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
@@ -169,6 +173,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_BEHAVIOR_ID                                                             \
     ((struct zmk_custom_setting_constraint){.type = ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID})
 
+/* Register one custom setting in the iterable setting registry. */
 #define ZMK_CUSTOM_SETTING_DEFINE(_name, _custom_subsystem_id, _key, _value_type, _default_value,  \
                                   _confidentiality, _read_permission, _write_permission,           \
                                   _constraint)                                                     \
@@ -176,6 +181,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
                                                _default_value, _confidentiality, _read_permission, \
                                                _write_permission, _constraint)
 
+/* Register one custom setting with zero or more constraints. */
 #define ZMK_CUSTOM_SETTING_DEFINE_WITH_CONSTRAINTS(_name, _custom_subsystem_id, _key, _value_type, \
                                                    _default_value, _confidentiality,               \
                                                    _read_permission, _write_permission, ...)       \
@@ -200,6 +206,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .default_value = _default_value,                                                           \
     }
 
+/* Register one element of an array setting. Elements are stored as key/index. */
 #define ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(                                                   \
     _name, _custom_subsystem_id, _key, _index, _array_size, _value_type, _default_value,           \
     _confidentiality, _read_permission, _write_permission, _constraint)                            \
@@ -237,45 +244,60 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 
 const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subsystem_id,
                                                          const char *key);
+/* Find one element of an array setting by its public base key and element index. */
 const struct zmk_custom_setting *
 zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const char *key,
                                       uint32_t index);
+/* Return the public key exposed by RPC. Array elements return their base key. */
 const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setting);
 bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting);
+/* Match a setting against optional subsystem, exact key, and key-prefix filters. */
 bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting,
                                 const char *custom_subsystem_id, const char *key,
                                 const char *key_prefix);
 
+/* Read the effective value. A temporary override takes precedence over memory value. */
 int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
                             struct zmk_custom_setting_value *value);
 int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *key,
                                    struct zmk_custom_setting_value *value);
+/* Read one array setting element by its public base key and element index. */
 int zmk_custom_setting_read_array_by_key(const char *custom_subsystem_id, const char *key,
                                          uint32_t index, struct zmk_custom_setting_value *value);
 
+/* Write a value using the selected memory, persist, or temporary mode. */
 int zmk_custom_setting_write(const struct zmk_custom_setting *setting,
                              const struct zmk_custom_setting_value *value,
                              enum zmk_custom_setting_write_mode mode);
 int zmk_custom_setting_write_by_key(const char *custom_subsystem_id, const char *key,
                                     const struct zmk_custom_setting_value *value,
                                     enum zmk_custom_setting_write_mode mode);
+/* Write one array setting element by its public base key and element index. */
 int zmk_custom_setting_write_array_by_key(const char *custom_subsystem_id, const char *key,
                                           uint32_t index,
                                           const struct zmk_custom_setting_value *value,
                                           enum zmk_custom_setting_write_mode mode);
 
+/* Save the current memory value to persistent storage. */
 int zmk_custom_setting_save(const struct zmk_custom_setting *setting);
+/* Discard unsaved memory/temporary changes and restore the persistent/default value. */
 int zmk_custom_setting_discard(const struct zmk_custom_setting *setting);
+/* Erase the persistent value and restore the default value. */
 int zmk_custom_setting_reset(const struct zmk_custom_setting *setting);
+/* End a temporary override and reveal the current memory value again. */
 int zmk_custom_setting_rollback_temporary(const struct zmk_custom_setting *setting);
 
+/* Apply save to settings matching the optional subsystem/key/prefix filters. */
 int zmk_custom_settings_save_scope(const char *custom_subsystem_id, const char *key,
                                    const char *key_prefix, uint32_t *affected_count);
+/* Apply discard to settings matching the optional subsystem/key/prefix filters. */
 int zmk_custom_settings_discard_scope(const char *custom_subsystem_id, const char *key,
                                       const char *key_prefix, uint32_t *affected_count);
+/* Apply reset to settings matching the optional subsystem/key/prefix filters. */
 int zmk_custom_settings_reset_scope(const char *custom_subsystem_id, const char *key,
                                     const char *key_prefix, uint32_t *affected_count);
 
 bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setting);
+/* Validate value type and all constraints for a setting without writing it. */
 int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
                                 const struct zmk_custom_setting_value *value);
