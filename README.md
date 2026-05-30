@@ -102,6 +102,34 @@ The subsystem id and key are the stable identifiers used by firmware and RPC
 clients. Pick short, unique names because they are encoded into settings keys
 and Studio custom subsystem requests.
 
+Available value types:
+
+| Value type | Default value helper | Description |
+| --- | --- | --- |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES` | `ZMK_CUSTOM_SETTING_VALUE_BYTES(...)` | Raw bytes. Use this for binary data or for module-defined data that needs custom RPC conversion hooks. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32` | `ZMK_CUSTOM_SETTING_VALUE_INT32(value)` | Signed 32-bit integer. Use this for numeric settings, indexes, and IDs. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL` | `ZMK_CUSTOM_SETTING_VALUE_BOOL(value)` | Boolean setting. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING` | `ZMK_CUSTOM_SETTING_VALUE_STRING(value)` | UTF-8/string setting stored with an explicit byte length. |
+
+Available confidentiality levels:
+
+| Confidentiality | RPC behavior | Typical use |
+| --- | --- | --- |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE` | Value is not exposed over RPC. | Device-local secrets or implementation details that Studio clients should not read. |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL` | Value may be read over RPC, but clients should treat it as personal data and avoid publishing it. | User-specific preferences or values that may identify the user's setup. |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC` | Value may be read over RPC and exported/shared by clients. | Layout, behavior, or tuning settings intended to be portable. |
+
+Available constraints:
+
+| Constraint helper or type | Applies to | Description |
+| --- | --- | --- |
+| `ZMK_CUSTOM_SETTING_NO_CONSTRAINT` | Any type | No validation beyond matching the registered value type. |
+| `ZMK_CUSTOM_SETTING_RANGE_INT32(min, max)` | `INT32` | Requires the integer value to be between `min` and `max`, inclusive. |
+| `ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS` | Any scalar type | Requires the value to match one of the provided `struct zmk_custom_setting_options` entries. Optional labels are exposed in RPC metadata. |
+| `ZMK_CUSTOM_SETTING_HID_USAGE(usage_page, usage_min, usage_max)` | `INT32` | Requires an encoded HID usage whose page matches `usage_page` and whose usage is within the inclusive range. |
+| `ZMK_CUSTOM_SETTING_LAYER_ID` | `INT32` | Requires a valid local ZMK layer ID. |
+| `ZMK_CUSTOM_SETTING_BEHAVIOR_ID` | `INT32` | Requires a valid local ZMK behavior ID when behavior local IDs are enabled. |
+
 Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
 flash storage keep the internal byte format; RPC read/write uses the converted
 byte format. When hooks are omitted, bytes are copied as-is.
