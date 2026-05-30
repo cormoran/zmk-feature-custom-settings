@@ -83,7 +83,7 @@ CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
 Register a setting from another module:
 
 ```c
-#include <zmk/custom_settings.h>
+#include <zmk/cormoran/custom_settings.h>
 
 ZMK_CUSTOM_SETTING_DEFINE(
     // C symbol name for this setting registration.

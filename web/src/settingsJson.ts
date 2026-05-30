@@ -2,7 +2,7 @@ import {
   Setting,
   SettingScalarValue,
   SettingValue,
-} from "./proto/zmk/custom_settings/custom_settings";
+} from "./proto/zmk/cormoran/custom_settings/custom_settings";
 
 const SETTINGS_EXPORT_FORMAT = "zmk-custom-settings";
 const SETTINGS_EXPORT_VERSION = 1;

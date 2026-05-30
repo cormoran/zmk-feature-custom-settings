@@ -17,7 +17,7 @@ import {
   SettingValue,
   SettingNotificationKind,
   SettingWriteMode,
-} from "./proto/zmk/custom_settings/custom_settings";
+} from "./proto/zmk/cormoran/custom_settings/custom_settings";
 import {
   createSettingsExportDocument,
   countExportedSettings,

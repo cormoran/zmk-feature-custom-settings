@@ -33,7 +33,7 @@ src/
 ├── App.tsx
 ├── App.css
 └── proto/
-    └── zmk/custom_settings/custom_settings.ts
+    └── zmk/cormoran/custom_settings/custom_settings.ts
 
 test/
 ├── App.spec.tsx
@@ -41,4 +41,4 @@ test/
 ```
 
 The protobuf schema lives at
-`../proto/zmk/custom_settings/custom_settings.proto`.
+`../proto/zmk/cormoran/custom_settings/custom_settings.proto`.

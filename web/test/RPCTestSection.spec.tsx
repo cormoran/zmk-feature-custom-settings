@@ -18,7 +18,7 @@ import {
   Response,
   Setting,
   SettingNotificationKind,
-} from "../src/proto/zmk/custom_settings/custom_settings";
+} from "../src/proto/zmk/cormoran/custom_settings/custom_settings";
 
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
   call_rpc: jest.fn(),

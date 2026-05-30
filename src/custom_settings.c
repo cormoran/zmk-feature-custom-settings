@@ -18,7 +18,7 @@
 
 #include <dt-bindings/zmk/hid_usage_pages.h>
 #include <zmk/behavior.h>
-#include <zmk/custom_settings.h>
+#include <zmk/cormoran/custom_settings.h>
 #include <zmk/keymap.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
