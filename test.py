@@ -4,7 +4,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 THIS_DIR = Path(__file__).parent.resolve()
 
@@ -29,6 +29,8 @@ class ConfigAndDeviceTree:
     config: list[str | NotFound]
     # Expected rows in devicetree_generated.h
     device: list[str | NotFound]
+    # Expected byte strings in zephyr.elf
+    binary: list[bytes] = field(default_factory=list)
 
 
 class WestCommandsTests(unittest.TestCase):
@@ -56,32 +58,79 @@ class WestCommandsTests(unittest.TestCase):
     def test_zmk_build(self):
         self._test_zmk_build(
             {
-                "module_template_board_feature_disabled": ConfigAndDeviceTree(
+                "custom_settings_board_feature_disabled": ConfigAndDeviceTree(
                     config=[
                         'CONFIG_ZMK_KEYBOARD_NAME="Module Test"',
                         "CONFIG_ZMK_USB=y",
                         "CONFIG_ZMK_BLE=y",
-                        "# CONFIG_ZMK_TEMPLATE_FEATURE is not set",
+                        "# CONFIG_ZMK_CUSTOM_SETTINGS is not set",
                     ],
                     device=[
                         "DT_COMPAT_HAS_OKAY_zmk_keymap",
                     ],
                 ),
-                "module_template_board_with_rpc": ConfigAndDeviceTree(
+                "custom_settings_board_with_rpc": ConfigAndDeviceTree(
                     config=[
                         "CONFIG_ZMK_STUDIO=y",
-                        "CONFIG_ZMK_TEMPLATE_FEATURE=y",
-                        "CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
+                        "CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128",
+                        "CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=96",
+                        "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
                     ],
                     device=[],
+                    binary=[
+                        b"zmk_config_sample",
+                        b"int32_value",
+                        b"bool_value",
+                        b"string_value",
+                        b"bytes_value",
+                        b"bytes_rpc_value",
+                        b"array_value",
+                    ],
                 ),
-                "module_template_board_without_rpc": ConfigAndDeviceTree(
+                "custom_settings_board_without_rpc": ConfigAndDeviceTree(
                     config=[
-                        "CONFIG_ZMK_TEMPLATE_FEATURE=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
                         "# CONFIG_ZMK_STUDIO is not set",
-                        NotFound("CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC"),
+                        NotFound("CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC"),
                     ],
                     device=[],
+                    binary=[
+                        b"zmk_config_sample",
+                        b"int32_value",
+                        b"bool_value",
+                        b"string_value",
+                        b"bytes_value",
+                        b"bytes_rpc_value",
+                        b"array_value",
+                    ],
+                ),
+                "custom_settings_split_peripheral_with_rpc_relay": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_CUSTOM_SETTINGS=y",
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
+                        "CONFIG_ZMK_SPLIT=y",
+                        "CONFIG_ZMK_SPLIT_BLE=y",
+                        "# CONFIG_ZMK_SPLIT_ROLE_CENTRAL is not set",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y",
+                        "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
+                    ],
+                    device=[],
+                    binary=[
+                        b"zmk_config_sample",
+                        b"int32_value",
+                        b"bool_value",
+                        b"string_value",
+                        b"bytes_value",
+                        b"bytes_rpc_value",
+                        b"array_value",
+                    ],
                 ),
             }
         )
@@ -117,6 +166,10 @@ class WestCommandsTests(unittest.TestCase):
                 (artifact_dir / "zmk.uf2").exists(),
                 f"{artifact} zmk.uf2 is missing in {artifact_dir}",
             )
+            if entries.binary:
+                self._test_binary_strings_in_file(
+                    artifact_dir / "zmk.elf", entries.binary, f"{artifact} zmk.elf"
+                )
 
     def _test_strings_in_file(
         self, file_path: Path, expected_strings: list[str | NotFound], hint: str
@@ -133,6 +186,16 @@ class WestCommandsTests(unittest.TestCase):
             else:
                 if expected not in file_text:
                     self.fail(f"{hint}: {expected} not found in {file_path}")
+
+    def _test_binary_strings_in_file(
+        self, file_path: Path, expected_strings: list[bytes], hint: str
+    ):
+        self.assertTrue(file_path.exists(), f"{hint}: {file_path} is missing")
+        file_bytes = file_path.read_bytes()
+
+        for expected in expected_strings:
+            if expected not in file_bytes:
+                self.fail(f"{hint}: {expected!r} not found in {file_path}")
 
 
 if __name__ == "__main__":

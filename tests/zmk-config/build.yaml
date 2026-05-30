@@ -1,15 +1,20 @@
 include:
-  - artifact: module_template_board_feature_disabled
+  - artifact: custom_settings_board_feature_disabled
     board: xiao_ble//zmk
     shield: tester_xiao
 
-  - artifact: module_template_board_with_rpc
+  - artifact: custom_settings_board_with_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_TEMPLATE_FEATURE=y -DCONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y -DCONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128 -DCONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=96
     snippet: studio-rpc-usb-uart
 
-  - artifact: module_template_board_without_rpc
+  - artifact: custom_settings_board_without_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_TEMPLATE_FEATURE=y
+    cmake-args: -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y
+
+  - artifact: custom_settings_split_peripheral_with_rpc_relay
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y -DCONFIG_ZMK_SPLIT=y -DCONFIG_ZMK_SPLIT_BLE=y -DCONFIG_ZMK_SPLIT_RELAY_EVENT=y -DCONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y -DCONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN=4 -DCONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256

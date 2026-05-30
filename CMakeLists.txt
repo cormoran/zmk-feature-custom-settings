@@ -1,10 +1,19 @@
 zephyr_include_directories(include)
-if(CONFIG_ZMK_TEMPLATE_FEATURE)
-    # target_sources(app PRIVATE ...)
+if(CONFIG_ZMK_CUSTOM_SETTINGS)
+    zephyr_linker_sources(DATA_SECTIONS include/linker/zmk-custom-settings.ld)
 
-    if(CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC)
-        file(GLOB_RECURSE C_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)
-        target_sources(app PRIVATE ${C_FILES})
+    target_sources(app PRIVATE src/custom_settings.c)
+
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_TEST)
+        target_sources(app PRIVATE src/test/custom_settings_test.c)
+    endif()
+
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES)
+        target_sources(app PRIVATE src/test/zmk_config_sample_settings.c)
+    endif()
+
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC)
+        target_sources(app PRIVATE src/studio/custom_settings_handler.c)
 
         list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
         include(nanopb)

@@ -1,153 +1,238 @@
-# cormoran's ZMK Module Template for ZMK (with Custom Studio RPC)
+# ZMK Custom Settings
 
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
-[![Test](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml)
 
-This repository contains a template for a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
+This module provides a typed custom settings registry for ZMK modules and an
+unofficial custom ZMK Studio RPC interface for editing those settings from the
+web UI.
 
-It's extended from ZMK official template with [zmk-west-commands](https://github.com/cormoran/zmk-west-commands), test code template, coding agent support, and custom Studio RPC protocol support.
+## Features
 
-## Summary
-
-This template includes:
-
-- **Firmware**: Sample custom Studio RPC handler (`src/studio/template_handler.c`)
-- **Protocol**: Protobuf definition (`proto/zmk/template/template.proto`)
-- **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
-- **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
-
-Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-creation) page for details on how to configure this template.
-
-## More Info
-
-For more info on modules, you can read through through the [Zephyr modules page](https://docs.zephyrproject.org/3.5.0/develop/modules.html) and [ZMK's page on using modules](https://zmk.dev/docs/features/modules). [Zephyr's west manifest page](https://docs.zephyrproject.org/3.5.0/develop/west/manifest.html#west-manifests) may also be of use.
+- Register settings from any module with a custom subsystem namespace and key.
+  RPC clients address the namespace by its ZMK Studio custom subsystem index.
+- Store typed values: bytes, int32, bool, string, and dynamic arrays of
+  those scalar types.
+- Validate writes with optional range, option-list, HID usage, layer ID, or
+  behavior ID constraints.
+- Write values in memory, persist them to flash, discard memory changes, or
+  reset persisted values back to defaults.
+- Mark values as device-private, RPC-personal, or RPC-public.
+- Require Studio unlock independently for reads and writes.
+- Notify Studio clients when values change.
 
 ## Module User Guide
 
-1. Add dependency to your `config/west.yml`. Note: this module requires a patched ZMK with custom Studio RPC support.
+Add the module to `config/west.yml`. This module uses the custom Studio RPC
+support from cormoran's ZMK branch.
 
-   ```yml
-   manifest:
-       remotes:
-           ...
-           - name: cormoran
-           url-base: https://github.com/cormoran
-       projects:
-           ...
-           - name: zmk-module-template
-           remote: cormoran
-           revision: main+custom-studio-protocol # or latest commit hash
-           # import: true # if this module has other dependencies
-           ...
-           # Required: patched ZMK with custom Studio RPC support
-           - name: zmk
-           remote: cormoran
-           revision: main+custom-studio-protocol
-           import:
-               file: app/west.yml
-   ```
+```yml
+manifest:
+  remotes:
+    - name: cormoran
+      url-base: https://github.com/cormoran
+  projects:
+    - name: zmk-feature-custom-settings
+      remote: cormoran
+      revision: main
+    - name: zmk
+      remote: cormoran
+      revision: main+custom-studio-protocol
+      import:
+        file: app/west.yml
+```
 
-2. Enable flags in your `config/<shield>.conf`
+Enable the module in your keyboard config:
 
-   ```conf
-   CONFIG_ZMK_TEMPLATE_FEATURE=y
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS=y
 
-   # Optionally enable custom Studio RPC
-   CONFIG_ZMK_STUDIO=y
-   CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
-   ```
+# Optional: expose settings through the custom Studio RPC subsystem.
+CONFIG_ZMK_STUDIO=y
+CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
+CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
+CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=96
+CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
+```
 
-3. Implement your custom protocol by editing:
-   - `proto/zmk/template/template.proto` — message types
-   - `src/studio/template_handler.c` — firmware RPC handler
-   - `web/src/App.tsx` — web UI
+`CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` must be large enough for custom settings
+RPC requests. `CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES`
+must also be large enough for the encoded custom settings request payload.
+`CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE` should be increased because listing
+settings builds encoded notifications from the low priority workqueue.
 
-### Web UI
+For split keyboards, enable ZMK's relay-event transport on both halves and size
+the relay event buffer for the setting notifications you expect to relay:
 
-See [web/README.md](./web/README.md) for web UI development instructions.
+```conf
+CONFIG_ZMK_SPLIT_RELAY_EVENT=y
+CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN=4
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
+CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
+```
 
-### Publishing Web UI
+Register a setting from another module:
 
-**GitHub Pages**: Visit `Actions > Test and Build Web UI > Run workflow` to deploy to `https://<account>.github.io/<repo>/`.
+```c
+#include <zmk/custom_settings.h>
 
-**Cloudflare Workers (PR previews)**: Configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
+ZMK_CUSTOM_SETTING_DEFINE(my_speed_setting, "my_module", "speed",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                          ZMK_CUSTOM_SETTING_VALUE_INT32(10),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                          ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+```
 
-## Module Development Guide
+Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
+flash storage keep the internal byte format; RPC read/write uses the converted
+byte format. When hooks are omitted, bytes are copied as-is.
 
-### Setup for running test
+```c
+static int my_blob_to_rpc(const struct zmk_custom_setting *setting,
+                          const uint8_t *src, size_t src_size,
+                          uint8_t *dest, size_t *dest_size,
+                          size_t dest_capacity) {
+    ARG_UNUSED(setting);
 
-#### Option0: Dev container (recommended)
+    /* Encode an internal C struct into RPC bytes, for example with nanopb. */
+    if (src_size > dest_capacity) {
+        return -EMSGSIZE;
+    }
+    memcpy(dest, src, src_size);
+    *dest_size = src_size;
+    return 0;
+}
 
-Open this repository in VS Code with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers). The container automatically initializes the west workspace using the isolated layout.
+static int my_blob_from_rpc(const struct zmk_custom_setting *setting,
+                            const uint8_t *src, size_t src_size,
+                            uint8_t *dest, size_t *dest_size,
+                            size_t dest_capacity) {
+    ARG_UNUSED(setting);
 
-#### Option1: west workspace directory layout
+    /* Decode RPC bytes back into the firmware's internal C struct layout. */
+    if (src_size > dest_capacity) {
+        return -EMSGSIZE;
+    }
+    memcpy(dest, src, src_size);
+    *dest_size = src_size;
+    return 0;
+}
 
-Set west topdir as parent of repository root and download dependencies under `../`.
-This layout is useful to reduce disk usage by sharing dependencies with other zephyr modules.
-The build result is located in `../build`.
+ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
+    my_blob_setting, "my_module", "blob", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(0, 0, 0, 0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    my_blob_to_rpc, my_blob_from_rpc,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+```
+
+For RPC access, the setting namespace should match a Studio custom subsystem
+identifier registered by the module that owns the setting. The web UI obtains
+that subsystem's index from ZMK Studio and sends the index in setting requests.
+
+Array settings are registered one element at a time up to the maximum supported
+length. The active array length can be smaller than the maximum. The firmware
+storage key is expanded to `key/index`, but the public API and RPC protocol use
+the base key plus an explicit array index and active length. Flash storage saves
+the active length and only the active array items. RPC does not expose the
+maximum length; appending past it returns an error.
+
+```c
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_0, "my_module", "layers", 0, 3,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_1, "my_module", "layers", 1, 3,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+
+ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_2, "my_module", "layers", 2, 3,
+                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                        ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+```
+
+Read or update it from firmware:
+
+```c
+struct zmk_custom_setting_value value;
+const struct zmk_custom_setting *setting =
+    zmk_custom_setting_find("my_module", "speed");
+
+zmk_custom_setting_read(setting, &value);
+zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(20),
+                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+zmk_custom_setting_save(setting);
+
+zmk_custom_setting_write_array_by_key("my_module", "layers", 1,
+                                      &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                      ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+const struct zmk_custom_setting *layer_1 =
+    zmk_custom_setting_find_array_element("my_module", "layers", 1);
+zmk_custom_setting_write_array_element(layer_1, &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                       2, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+const struct zmk_custom_setting *layers =
+    zmk_custom_setting_find_array("my_module", "layers");
+zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+```
+
+The custom Studio subsystem identifier is `zmk__custom_settings`.
+
+## Web UI
+
+The web UI in `web/` connects to a keyboard over serial, finds the
+`zmk__custom_settings` subsystem, and sends typed read/write/save/discard/reset
+requests. It can also export all RPC-readable setting values as JSON and import
+that JSON back to the device using the selected write mode. Array values can be
+written by index or changed with push-back/pop-back commands.
 
 ```bash
-mkdir west-workspace
-cd west-workspace # this directory becomes west workspace root (topdir)
-git clone <this repository>
-# rm -r .west # if exists to reset workspace
-west init -l . --mf west/west-test-workspace.yml
-west update --narrow
-west zephyr-export
+cd web
+npm install
+npm run dev
 ```
 
-#### Option2: isolated directory layout
+See [web/README.md](./web/README.md) for web development commands.
 
-Set west topdir as repository root and download dependencies under `./dependencies`.
-This layout is useful if you don't want to share dependencies to other zephyr modules.
-Dev container and github actions uses this layout.
-The build result is located in `./build`.
+## Development
 
-```bash
-git clone <this repository>
-cd <cloned directory>
-west init -l west --mf west-test-isolated.yml
-west update --narrow
-west zephyr-export
-```
-
-### Pre-commit
-
-Every commit need to pass pre-commit verification. The verification contains formatting code and running tests.
-
-```
-pip install pre-commit
-pre-commit install
-
-# Run pre-commit manually
-pre-commit run --all-files
-# Run for git staged files
-pre-commit run
-```
-
-### Running Test
+The `tests/zmk-config` build enables `CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES`
+for module-enabled artifacts. Flash `custom_settings_board_with_rpc` to a real
+device to test Studio RPC with the sample custom subsystem `zmk_config_sample`.
+It registers int32, bool, string, bytes, bytes-with-RPC-conversion, array,
+private, secure, HID usage, layer id, and behavior id settings where supported.
 
 ```bash
 # Run unit test + build test and verify the results
 python3 -m unittest
+
 # Run build test directly
 west zmk-build tests/zmk-config
+
 # Run unit test directly
 west zmk-test tests -m .
+
 # Run web tests
 cd web && npm test
+
+# Run lint/test hooks before commit
+pre-commit run --all-files
 ```
-
-### Sync changes from template
-
-Run `Actions > Sync Changes in Template > Run workflow` to get the latest template changes as a pull request.
-
-If the template contains changes in `.github/workflows/*`, register a GitHub personal access token as `GH_TOKEN` repository secret (`repo` + `workflow` scopes).
-
-### Coding agent on actions
-
-Actions for github copilot and claude are available.
-
-- Mention `@copilot`
-- Setup `ANTHROPIC_API_KEY` secret and mention `@claude`
-  - Or fix [claude.yml](./github/workflows/claude.yml) to use `CLAUDE_CODE_OAUTH_TOKEN`
