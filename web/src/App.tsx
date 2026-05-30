@@ -26,6 +26,7 @@ import {
 
 export const SUBSYSTEM_IDENTIFIER = "zmk__custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
+const LIST_REQUEST_TIMEOUT_MS = 5000;
 const SOURCE_ALL = 0xffffffff;
 
 enum EditorValueType {
@@ -243,23 +244,44 @@ export function RPCTestSection() {
       requireMeta: includeMeta,
     });
     const collected: Setting[] = [];
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const waitForQuiet = scopeTargetsAll(requestScope);
+    let expectedCount: number | undefined;
+    let quietTimeout: ReturnType<typeof setTimeout> | undefined;
     let resolveList: () => void = () => {};
+    let isComplete = false;
 
     const listComplete = new Promise<void>((resolve) => {
       resolveList = resolve;
     });
 
-    const scheduleResolve = () => {
-      if (timeout) {
-        clearTimeout(timeout);
+    const completeList = (reason: string) => {
+      if (isComplete) {
+        return;
       }
-      timeout = setTimeout(() => {
+      isComplete = true;
+      if (quietTimeout) {
+        clearTimeout(quietTimeout);
+        quietTimeout = undefined;
+      }
+      console.debug("[custom-settings] list completion resolved", {
+        collected: collected.length,
+        expectedCount,
+        reason,
+      });
+      resolveList();
+    };
+
+    const scheduleQuietResolve = () => {
+      if (quietTimeout) {
+        clearTimeout(quietTimeout);
+      }
+      quietTimeout = setTimeout(() => {
         console.debug("[custom-settings] list quiet timeout", {
           collected: collected.length,
+          expectedCount,
           timeoutMs: LIST_NOTIFICATION_TIMEOUT_MS,
         });
-        resolveList();
+        completeList("quiet-timeout");
       }, LIST_NOTIFICATION_TIMEOUT_MS);
     };
 
@@ -290,37 +312,57 @@ export function RPCTestSection() {
           notification.setting.setting
         ) {
           collected.push(notification.setting.setting);
-          scheduleResolve();
+          if (
+            expectedCount !== undefined &&
+            !waitForQuiet &&
+            collected.length >= expectedCount
+          ) {
+            completeList("expected-count");
+          } else if (waitForQuiet) {
+            scheduleQuietResolve();
+          }
         }
       },
     });
 
     try {
-      const resp = await callCustomRequest(
-        Request.create({
-          listSettings: {
-            scope: requestScope,
-            requireMeta: includeMeta,
-          },
-        })
+      const resp = await withTimeout(
+        callCustomRequest(
+          Request.create({
+            listSettings: {
+              scope: requestScope,
+              requireMeta: includeMeta,
+            },
+          })
+        ),
+        LIST_REQUEST_TIMEOUT_MS,
+        "List request timed out"
       );
       if (resp.error) {
         throw new Error(resp.error.message || "List failed");
       }
+      expectedCount = resp.status?.affectedCount;
 
       console.debug(
         "[custom-settings] list RPC accepted",
         responseSummary(resp)
       );
-      scheduleResolve();
+      if (!waitForQuiet && expectedCount !== undefined) {
+        if (collected.length >= expectedCount) {
+          completeList("expected-count");
+        }
+      } else {
+        scheduleQuietResolve();
+      }
       await listComplete;
     } finally {
       unsubscribe();
-      if (timeout) {
-        clearTimeout(timeout);
+      if (quietTimeout) {
+        clearTimeout(quietTimeout);
       }
       console.debug("[custom-settings] list complete", {
         collected: collected.length,
+        expectedCount,
       });
     }
 
@@ -971,6 +1013,30 @@ function scopeSummary(
     keyPrefix: scope.keyPrefix,
     source: scope.source,
   };
+}
+
+function scopeTargetsAll(scope: SettingScope | undefined): boolean {
+  return scope?.source === SOURCE_ALL;
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function valueKind(value: SettingValue | undefined): string {
