@@ -1,6 +1,7 @@
 config ZMK_CUSTOM_SETTINGS
     bool "Enable custom settings"
     select SETTINGS
+    select ZMK_LOW_PRIORITY_WORK_QUEUE
 
 if ZMK_CUSTOM_SETTINGS
 

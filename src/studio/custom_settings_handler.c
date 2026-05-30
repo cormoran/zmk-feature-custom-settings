@@ -19,6 +19,7 @@
 #include <zmk/custom_settings.h>
 #include <zmk/custom_settings/custom_settings.pb.h>
 #include <zmk/studio/core.h>
+#include <zmk/workqueue.h>
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
 #include <zmk/studio/custom.h>
 #define ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC 1
@@ -782,6 +783,10 @@ static size_t list_settings_next_index;
 static bool list_settings_active;
 static bool list_settings_include_meta;
 
+static int schedule_list_settings_work(k_timeout_t delay) {
+    return k_work_schedule_for_queue(zmk_workqueue_lowprio_work_q(), &list_settings_work, delay);
+}
+
 static bool setting_matches_scope(const struct zmk_custom_setting *setting,
                                   const struct zmk_custom_settings_setting_scope *scope) {
     return zmk_custom_setting_matches(setting, setting_scope_custom_subsystem_id(scope),
@@ -826,7 +831,7 @@ static void list_settings_work_handler(struct k_work *work) {
             LOG_WRN("Failed to raise custom settings list notification: %d", ret);
         }
 
-        k_work_schedule(&list_settings_work, LIST_SETTINGS_NOTIFICATION_DELAY);
+        schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
         return;
     }
 
@@ -853,7 +858,7 @@ static void schedule_list_settings(const struct zmk_custom_settings_setting_scop
         setting_scope_key(scope) ? setting_scope_key(scope) : "",
         setting_scope_key_prefix(scope) ? setting_scope_key_prefix(scope) : "",
         setting_scope_source(scope), include_meta);
-    k_work_schedule(&list_settings_work, LIST_SETTINGS_NOTIFICATION_DELAY);
+    schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
 }
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
