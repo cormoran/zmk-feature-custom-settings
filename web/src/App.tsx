@@ -27,6 +27,7 @@ import {
 export const SUBSYSTEM_IDENTIFIER = "zmk__custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
 const LIST_REQUEST_TIMEOUT_MS = 5000;
+const SOURCE_LOCAL = 0;
 const SOURCE_ALL = 0xffffffff;
 
 enum EditorValueType {
@@ -127,7 +128,7 @@ export function RPCTestSection() {
   const settingRef = {
     customSubsystemIndex: editorSubsystem?.index,
     key: editorSettingKey,
-    source: 0,
+    source: setting?.source ?? SOURCE_LOCAL,
     arrayIndex: isArray ? arrayIndex : undefined,
   };
 
@@ -135,7 +136,7 @@ export function RPCTestSection() {
     customSubsystemIndex: filterSubsystem?.index,
     key: optionalString(filterKey),
     keyPrefix: optionalString(filterKeyPrefix),
-    source: 0,
+    source: SOURCE_ALL,
   };
 
   const listScope = {
@@ -532,6 +533,9 @@ export function RPCTestSection() {
       applyScalarValueToEditor(arrayValue.value ?? {});
     } else if (nextSetting.value) {
       applyScalarValueToEditor(nextSetting.value);
+    } else {
+      setValueType(EditorValueType.Int32);
+      setValue("");
     }
   };
 
@@ -614,6 +618,8 @@ export function RPCTestSection() {
   const selectedSettingValueType = setting
     ? settingValueTypeLabel(setting.value)
     : undefined;
+  const selectedSettingValueHidden =
+    setting !== null && setting.value === undefined;
   const updateValuePanel = setting ? (
     <section className="settings-panel settings-editor-panel">
       <h3>Update Value</h3>
@@ -680,7 +686,7 @@ export function RPCTestSection() {
         </button>
         <button
           className="btn btn-primary"
-          disabled={isLoading}
+          disabled={isLoading || selectedSettingValueHidden}
           onClick={writeSetting}
         >
           Write
@@ -689,7 +695,7 @@ export function RPCTestSection() {
           <>
             <button
               className="btn"
-              disabled={isLoading}
+              disabled={isLoading || selectedSettingValueHidden}
               onClick={pushBackArray}
             >
               Push Back

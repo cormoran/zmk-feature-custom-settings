@@ -8,6 +8,9 @@ if ZMK_CUSTOM_SETTINGS
 config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum custom setting value size"
     default 64
+    range 1 64 if ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    help
+      The Studio RPC protobuf schema currently supports values up to 64 bytes.
 
 config ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN
     int "Maximum custom subsystem id length"
@@ -16,6 +19,9 @@ config ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN
 config ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN
     int "Maximum custom setting key length"
     default 48
+    range 1 48 if ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    help
+      The Studio RPC protobuf schema currently supports keys up to 48 bytes.
 
 config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     bool "Enable custom settings Studio RPC"
@@ -38,6 +44,7 @@ config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
 config ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
     int "Maximum encoded custom settings relay payload size"
     default 192
+    range 1 255
     depends on ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
 
 config ZMK_CUSTOM_SETTINGS_TEST

@@ -14,6 +14,7 @@ import {
 import { RPCTestSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
 import {
   Notification,
+  Request,
   Response,
   Setting,
   SettingNotificationKind,
@@ -160,6 +161,62 @@ describe("RPCTestSection Component", () => {
         screen.getByRole("button", { name: "Pop Back" })
       ).toBeInTheDocument();
     });
+
+    it("should write the selected split source", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        source: 2,
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/int_value" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+      await userEvent.click(screen.getByRole("button", { name: "Write" }));
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+
+      expect(request.writeSetting?.setting).toMatchObject({
+        customSubsystemIndex: 1,
+        key: "int_value",
+        source: 2,
+      });
+    });
+
+    it("should apply scope actions to all listed split sources", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(1));
+      await screen.findByText("Listed 0 settings");
+      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+
+      expect(request.saveSettings?.scope?.source).toBe(0xffffffff);
+    });
   });
 
   describe("Without Subsystem", () => {
@@ -224,6 +281,12 @@ function emitListItem(
       })
     ).finish(),
   });
+}
+
+function lastCustomSettingsRequest(): Request {
+  const calls = (call_rpc as jest.Mock).mock.calls;
+  const request = calls[calls.length - 1][1];
+  return Request.decode(request.custom.call.payload);
 }
 
 describe("settings JSON conversion", () => {

@@ -59,6 +59,8 @@ RPC requests. `CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES`
 must also be large enough for the encoded custom settings request payload.
 `CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE` should be increased because listing
 settings builds encoded notifications from the low priority workqueue.
+When Studio RPC is enabled, setting values are limited to 64 bytes and setting
+keys are limited to 48 bytes by the generated RPC schema.
 
 For split keyboards, enable ZMK's relay-event transport on both halves and size
 the relay event buffer for the setting notifications you expect to relay:
@@ -75,14 +77,30 @@ Register a setting from another module:
 ```c
 #include <zmk/custom_settings.h>
 
-ZMK_CUSTOM_SETTING_DEFINE(my_speed_setting, "my_module", "speed",
-                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                          ZMK_CUSTOM_SETTING_VALUE_INT32(10),
-                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                          ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                          ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+ZMK_CUSTOM_SETTING_DEFINE(
+    /* C symbol name for this setting registration. */
+    my_speed_setting,
+    /* Custom Studio subsystem id owned by your module. */
+    "my_module",
+    /* Setting key within that subsystem. */
+    "speed",
+    /* Value type exposed by the firmware API and RPC. */
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    /* Default value used when nothing is saved in flash. */
+    ZMK_CUSTOM_SETTING_VALUE_INT32(10),
+    /* RPC visibility: public, personal, or device-private. */
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    /* Read permission: secure requires Studio unlock. */
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    /* Write permission: secure requires Studio unlock. */
+    ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+    /* Optional validation rule; use NO_CONSTRAINT when unrestricted. */
+    ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 ```
+
+The subsystem id and key are the stable identifiers used by firmware and RPC
+clients. Pick short, unique names because they are encoded into settings keys
+and Studio custom subsystem requests.
 
 Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
 flash storage keep the internal byte format; RPC read/write uses the converted

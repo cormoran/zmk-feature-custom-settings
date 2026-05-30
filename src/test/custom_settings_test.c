@@ -693,6 +693,18 @@ static int test_array_lifecycle(void) {
     }
     LOG_INF("PASS: custom_settings_push_back array[2]=88 size=3");
 
+    ret = zmk_custom_setting_save(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!test_settings_has_record("custom_settings/test/array_value/0") ||
+        !test_settings_has_record("custom_settings/test/array_value/1") ||
+        !test_settings_has_record("custom_settings/test/array_value/2")) {
+        LOG_ERR("Custom array save did not persist all active values");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_save_all_active_array_items size=3");
+
     ret = zmk_custom_setting_array_push_back(array_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
                                              ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret != -ERANGE) {
