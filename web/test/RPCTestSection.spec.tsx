@@ -294,6 +294,7 @@ describe("settings JSON conversion", () => {
     expect(settingToExportedSetting(baseSetting, () => "test")).toEqual({
       customSubsystemId: "test",
       key: "int_value",
+      source: 0,
       type: "int32",
       value: 42,
     });
@@ -305,6 +306,7 @@ describe("settings JSON conversion", () => {
         {
           ...baseSetting,
           key: "array_value",
+          source: 2,
           value: {
             arrayValue: {
               index: 1,
@@ -318,6 +320,7 @@ describe("settings JSON conversion", () => {
     ).toEqual({
       customSubsystemId: "test",
       key: "array_value",
+      source: 2,
       type: "bool",
       value: true,
       arrayIndex: 1,
@@ -332,7 +335,7 @@ describe("settings JSON conversion", () => {
     expect(parsed.version).toBe(1);
     expect(parsed.customSubsystems).toBeDefined();
     expect(parsed.customSubsystems["test"]).toEqual({
-      int_value: { type: "int32", value: 42 },
+      int_value: { type: "int32", source: 0, value: 42 },
     });
   });
 
@@ -340,6 +343,7 @@ describe("settings JSON conversion", () => {
     const arraySetting = {
       ...baseSetting,
       key: "array_value",
+      source: 2,
       value: {
         arrayValue: { index: 0, size: 2, value: { boolValue: false } },
       },
@@ -347,6 +351,7 @@ describe("settings JSON conversion", () => {
     const arraySetting1 = {
       ...baseSetting,
       key: "array_value",
+      source: 2,
       value: {
         arrayValue: { index: 1, size: 2, value: { boolValue: true } },
       },
@@ -358,7 +363,7 @@ describe("settings JSON conversion", () => {
     const parsed = JSON.parse(json);
 
     expect(parsed.customSubsystems["test"]).toEqual({
-      array_value: { type: "bool", size: 2, value: [false, true] },
+      array_value: { type: "bool", source: 2, size: 2, value: [false, true] },
     });
   });
 
@@ -369,6 +374,7 @@ describe("settings JSON conversion", () => {
     expect(setting).toMatchObject({
       customSubsystemId: "test",
       key: "int_value",
+      source: 0,
       type: "int32",
       value: 42,
     });
@@ -382,7 +388,12 @@ describe("settings JSON conversion", () => {
       exportedAt: new Date().toISOString(),
       customSubsystems: {
         test: {
-          array_value: { type: "bool", size: 2, value: [false, true] },
+          array_value: {
+            type: "bool",
+            source: 2,
+            size: 2,
+            value: [false, true],
+          },
         },
       },
     });
@@ -392,6 +403,7 @@ describe("settings JSON conversion", () => {
     expect(settings[0]).toMatchObject({
       customSubsystemId: "test",
       key: "array_value",
+      source: 2,
       type: "bool",
       value: false,
       arrayIndex: 0,
@@ -399,6 +411,7 @@ describe("settings JSON conversion", () => {
     });
     expect(settings[1]).toMatchObject({
       key: "array_value",
+      source: 2,
       value: true,
       arrayIndex: 1,
       arraySize: 2,

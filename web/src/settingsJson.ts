@@ -12,6 +12,7 @@ type ExportedSettingType = "bytes" | "int32" | "bool" | "string";
 export interface ExportedSetting {
   customSubsystemId: string;
   key: string;
+  source: number;
   type: ExportedSettingType;
   value: boolean | number | string | number[];
   arrayIndex?: number;
@@ -20,6 +21,7 @@ export interface ExportedSetting {
 
 export interface ExportedSettingEntry {
   type: ExportedSettingType;
+  source: number;
   value: ExportedSetting["value"] | ExportedSetting["value"][];
   size?: number;
 }
@@ -70,6 +72,7 @@ export function settingToExportedSetting(
   const exported: ExportedSetting = {
     customSubsystemId,
     key: setting.key,
+    source: setting.source,
     type,
     value,
   };
@@ -120,12 +123,14 @@ export function createSettingsExportDocument(
         }
         customSubsystems[subsystemId][key] = {
           type: first.type,
+          source: first.source,
           size,
           value: valueArray,
         };
       } else {
         customSubsystems[subsystemId][key] = {
           type: first.type,
+          source: first.source,
           value: first.value,
         };
       }
@@ -287,6 +292,7 @@ function parseSettingEntry(
   }
 
   const type = readSettingType(entry.type, label);
+  const source = readNonNegativeInteger(entry.source, "source", label);
 
   if (entry.size !== undefined) {
     const size = readPositiveInteger(entry.size, "size", label);
@@ -297,6 +303,7 @@ function parseSettingEntry(
     return Array.from({ length: size }, (_, i) => ({
       customSubsystemId,
       key,
+      source,
       type,
       value: readSettingValue(valueArr[i], type, `${label}[${i}]`),
       arrayIndex: i,
@@ -308,6 +315,7 @@ function parseSettingEntry(
     {
       customSubsystemId,
       key,
+      source,
       type,
       value: readSettingValue(entry.value, type, label),
     },
@@ -357,6 +365,18 @@ function readSettingValue(
       }
       return value;
   }
+}
+
+function readNonNegativeInteger(
+  value: unknown,
+  field: string,
+  label: string
+): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${label}.${field} must be a non-negative integer`);
+  }
+
+  return value;
 }
 
 function readPositiveInteger(

@@ -417,7 +417,7 @@ export function RPCTestSection() {
               setting: {
                 customSubsystemIndex,
                 key: importedSetting.key,
-                source: SOURCE_ALL,
+                source: importedSetting.source,
                 arrayIndex: importedSetting.arrayIndex,
               },
               value: exportedSettingValueToProto(importedSetting),
