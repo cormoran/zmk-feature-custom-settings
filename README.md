@@ -22,6 +22,8 @@ web UI.
 
 ## Module User Guide
 
+### Add The Module
+
 Add the module to `config/west.yml`. This module uses the custom Studio RPC
 support from cormoran's ZMK branch.
 
@@ -40,6 +42,8 @@ manifest:
       import:
         file: app/west.yml
 ```
+
+### Enable The Module
 
 Enable the module in your keyboard config:
 
@@ -62,6 +66,8 @@ settings builds encoded notifications from the low priority workqueue.
 When Studio RPC is enabled, setting values are limited to 64 bytes and setting
 keys are limited to 48 bytes by the generated RPC schema.
 
+### Split Keyboards
+
 For split keyboards, enable ZMK's relay-event transport on both halves and size
 the relay event buffer for the setting notifications you expect to relay:
 
@@ -71,6 +77,8 @@ CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN=4
 CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
 CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
 ```
+
+### Register Settings
 
 Register a setting from another module:
 
@@ -102,7 +110,9 @@ The subsystem id and key are the stable identifiers used by firmware and RPC
 clients. Pick short, unique names because they are encoded into settings keys
 and Studio custom subsystem requests.
 
-Available value types:
+### Setting Reference
+
+#### Value Types
 
 | Value type | Default value helper | Description |
 | --- | --- | --- |
@@ -111,7 +121,7 @@ Available value types:
 | `ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL` | `ZMK_CUSTOM_SETTING_VALUE_BOOL(value)` | Boolean setting. |
 | `ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING` | `ZMK_CUSTOM_SETTING_VALUE_STRING(value)` | UTF-8/string setting stored with an explicit byte length. |
 
-Available confidentiality levels:
+#### Confidentiality
 
 | Confidentiality | RPC behavior | Typical use |
 | --- | --- | --- |
@@ -119,7 +129,7 @@ Available confidentiality levels:
 | `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL` | Value may be read over RPC, but clients should treat it as personal data and avoid publishing it. | User-specific preferences or values that may identify the user's setup. |
 | `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC` | Value may be read over RPC and exported/shared by clients. | Layout, behavior, or tuning settings intended to be portable. |
 
-Available constraints:
+#### Constraints
 
 | Constraint helper or type | Applies to | Description |
 | --- | --- | --- |
@@ -129,6 +139,8 @@ Available constraints:
 | `ZMK_CUSTOM_SETTING_HID_USAGE(usage_page, usage_min, usage_max)` | `INT32` | Requires an encoded HID usage whose page matches `usage_page` and whose usage is within the inclusive range. |
 | `ZMK_CUSTOM_SETTING_LAYER_ID` | `INT32` | Requires a valid local ZMK layer ID. |
 | `ZMK_CUSTOM_SETTING_BEHAVIOR_ID` | `INT32` | Requires a valid local ZMK behavior ID when behavior local IDs are enabled. |
+
+### Bytes RPC Conversion
 
 Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
 flash storage keep the internal byte format; RPC read/write uses the converted
@@ -175,9 +187,15 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 ```
 
+### Studio RPC Access
+
 For RPC access, the setting namespace should match a Studio custom subsystem
 identifier registered by the module that owns the setting. The web UI obtains
 that subsystem's index from ZMK Studio and sends the index in setting requests.
+The custom Studio subsystem identifier for this module is
+`zmk__custom_settings`.
+
+### Array Settings
 
 Array settings are registered one element at a time up to the maximum supported
 length. The active array length can be smaller than the maximum. The firmware
@@ -212,7 +230,9 @@ ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_2, "my_module", "layers", 2, 3,
                                         ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
 ```
 
-Read or update it from firmware:
+### Firmware API
+
+Read or update settings from firmware:
 
 ```c
 struct zmk_custom_setting_value value;
@@ -239,8 +259,6 @@ zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
-
-The custom Studio subsystem identifier is `zmk__custom_settings`.
 
 ## Web UI
 
