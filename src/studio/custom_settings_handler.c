@@ -47,20 +47,16 @@ ZMK_RPC_CUSTOM_SUBSYSTEM(zmk__custom_settings, &custom_settings_meta,
 ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(zmk__custom_settings, zmk_custom_settings_Response);
 #endif
 
-#if !ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static bool remote_studio_unlocked;
-#endif
-
-static bool is_unlocked(void) {
+static bool studio_is_unlocked(void) {
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     return zmk_studio_core_get_lock_state() == ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED;
 #else
-    return remote_studio_unlocked;
+    return true;
 #endif
 }
 
 static bool needs_unlock(enum zmk_custom_setting_permission permission) {
-    return permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE && !is_unlocked();
+    return permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE && !studio_is_unlocked();
 }
 
 static bool source_targets_local(uint32_t source) {
@@ -112,7 +108,6 @@ struct zmk_custom_settings_relay_value {
 
 struct zmk_custom_settings_relay_request {
     uint8_t source;
-    uint8_t studio_unlocked;
     uint8_t type;
     union {
         struct {
@@ -189,6 +184,19 @@ setting_ref_custom_subsystem_id(const struct zmk_custom_settings_setting_ref *re
 
 static const char *setting_ref_key(const struct zmk_custom_settings_setting_ref *ref) {
     return ref->has_key ? ref->key : NULL;
+}
+
+static const struct zmk_custom_setting *
+setting_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
+    if (!ref->has_key) {
+        return NULL;
+    }
+
+    return ref->has_array_index
+               ? zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
+                                                       setting_ref_key(ref), ref->array_index)
+               : zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref),
+                                         setting_ref_key(ref));
 }
 
 static const char *
@@ -903,11 +911,7 @@ static int handle_private_get_setting(const struct zmk_custom_settings_setting_r
         return -ENOENT;
     }
 
-    const struct zmk_custom_setting *setting =
-        ref->has_array_index
-            ? zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
-                                                    setting_ref_key(ref), ref->array_index)
-            : zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
+    const struct zmk_custom_setting *setting = setting_for_ref(ref);
     if (!setting) {
         return -ENOENT;
     }
@@ -960,27 +964,23 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
         return 0;
     }
 
-    const struct zmk_custom_setting *setting = NULL;
+    struct zmk_custom_settings_setting_ref resolved_ref = *ref;
     if (value_is_array || ref->has_array_index) {
         uint32_t resolved_index = value_is_array ? array_index : ref->array_index;
         if (value_is_array && ref->has_array_index && ref->array_index != array_index) {
             return -EINVAL;
         }
 
-        setting = zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
-                                                        setting_ref_key(ref), resolved_index);
-        if (!setting) {
-            return -ENOENT;
-        }
-        if (value_is_array && array_size != setting->array_size) {
-            return -EINVAL;
-        }
-    } else {
-        setting =
-            zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
-        if (!setting) {
-            return -ENOENT;
-        }
+        resolved_ref.has_array_index = true;
+        resolved_ref.array_index = resolved_index;
+    }
+
+    const struct zmk_custom_setting *setting = setting_for_ref(&resolved_ref);
+    if (!setting) {
+        return -ENOENT;
+    }
+    if (value_is_array && array_size != setting->array_size) {
+        return -EINVAL;
     }
 
     if (needs_unlock(setting->write_permission)) {
@@ -1027,14 +1027,23 @@ static int handle_write_setting(const zmk_custom_settings_WriteSettingRequest *r
 #endif
 }
 
-static bool scope_write_unlock_required(const struct zmk_custom_settings_setting_scope *scope) {
+static bool scope_has_permission(const struct zmk_custom_settings_setting_scope *scope,
+                                 enum zmk_custom_setting_permission permission,
+                                 bool read_permission) {
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (setting_matches_scope(setting, scope) && needs_unlock(setting->write_permission)) {
+        if (setting_matches_scope(setting, scope) &&
+            (read_permission ? setting->read_permission : setting->write_permission) ==
+                permission) {
             return true;
         }
     }
 
     return false;
+}
+
+static bool scope_write_unlock_required(const struct zmk_custom_settings_setting_scope *scope) {
+    return !studio_is_unlocked() &&
+           scope_has_permission(scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, false);
 }
 
 static int handle_private_scope_mutation(const struct zmk_custom_settings_setting_scope *scope,
@@ -1102,6 +1111,71 @@ static bool should_relay_to_peripherals(const zmk_custom_settings_Request *req) 
         return false;
     }
 }
+
+static bool relay_request_unlock_required(const zmk_custom_settings_Request *req) {
+    if (studio_is_unlocked()) {
+        return false;
+    }
+
+    switch (req->which_request_type) {
+    case zmk_custom_settings_Request_list_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        if (setting_scope_to_private(&req->request_type.list_settings.scope, &scope) < 0) {
+            return false;
+        }
+
+        return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, true);
+    }
+    case zmk_custom_settings_Request_write_setting_tag: {
+        struct zmk_custom_settings_setting_ref ref;
+        if (setting_ref_to_private(&req->request_type.write_setting.setting, &ref) < 0) {
+            return false;
+        }
+
+        struct zmk_custom_setting_value value;
+        bool value_is_array = false;
+        uint32_t array_index = 0;
+        uint32_t array_size = 0;
+        if (proto_to_value(&req->request_type.write_setting.value, &value, &value_is_array,
+                           &array_index, &array_size) < 0) {
+            return false;
+        }
+        if (value_is_array) {
+            ref.has_array_index = true;
+            ref.array_index = array_index;
+        }
+
+        const struct zmk_custom_setting *setting = setting_for_ref(&ref);
+        return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
+    }
+    case zmk_custom_settings_Request_save_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        if (setting_scope_to_private(&req->request_type.save_settings.scope, &scope) < 0) {
+            return false;
+        }
+
+        return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, false);
+    }
+    case zmk_custom_settings_Request_discard_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        if (setting_scope_to_private(&req->request_type.discard_settings.scope, &scope) < 0) {
+            return false;
+        }
+
+        return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, false);
+    }
+    case zmk_custom_settings_Request_reset_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        if (setting_scope_to_private(&req->request_type.reset_settings.scope, &scope) < 0) {
+            return false;
+        }
+
+        return scope_has_permission(&scope, ZMK_CUSTOM_SETTING_PERMISSION_SECURE, false);
+    }
+    default:
+        return false;
+    }
+}
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
@@ -1136,10 +1210,8 @@ static int value_to_relay_value(const struct zmk_custom_setting_value *src,
 static int request_to_relay_request(const zmk_custom_settings_Request *src,
                                     struct zmk_custom_settings_relay_request *dest) {
     uint8_t source = dest->source;
-    uint8_t studio_unlocked = dest->studio_unlocked;
     *dest = (struct zmk_custom_settings_relay_request){
         .source = source,
-        .studio_unlocked = studio_unlocked,
     };
 
     switch (src->which_request_type) {
@@ -1191,7 +1263,6 @@ static int request_to_relay_request(const zmk_custom_settings_Request *src,
 static int relay_request_to_peripherals(const zmk_custom_settings_Request *req) {
     struct zmk_custom_settings_relay_request relay_request = {
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-        .studio_unlocked = is_unlocked(),
     };
 
     int ret = request_to_relay_request(req, &relay_request);
@@ -1307,7 +1378,9 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     if (ret == 0 && should_relay_to_peripherals(&req)) {
-        ret = relay_request_to_peripherals(&req);
+        if (!relay_request_unlock_required(&req)) {
+            ret = relay_request_to_peripherals(&req);
+        }
     }
 #endif
 
@@ -1357,10 +1430,6 @@ static int relay_request_listener(const zmk_event_t *eh) {
     if (ev->source == ZMK_RELAY_EVENT_SOURCE_SELF) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-
-#if !ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-    remote_studio_unlocked = ev->studio_unlocked != 0U;
-#endif
 
     zmk_custom_settings_Response resp = zmk_custom_settings_Response_init_zero;
     int ret = process_relay_request(ev, &resp);
@@ -1414,7 +1483,6 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
 
     struct zmk_custom_settings_relay_request request = {
         .source = 1,
-        .studio_unlocked = true,
         .type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_WRITE,
     };
     request.request.write_setting.setting.has_custom_subsystem_id = true;
