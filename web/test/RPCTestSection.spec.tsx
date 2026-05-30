@@ -325,6 +325,17 @@ describe("settings JSON conversion", () => {
     });
   });
 
+  it("exports JSON grouped by customSubsystems", () => {
+    const json = settingsExportToJson([baseSetting], () => "test");
+    const parsed = JSON.parse(json);
+
+    expect(parsed.customSubsystems).toBeDefined();
+    expect(parsed.settings).toBeUndefined();
+    expect(parsed.customSubsystems["test"]).toEqual([
+      { key: "int_value", type: "int32", value: 42 },
+    ]);
+  });
+
   it("parses exported JSON back to write values", () => {
     const json = settingsExportToJson([baseSetting], () => "test");
     const [setting] = parseSettingsExportJson(json);
@@ -336,5 +347,29 @@ describe("settings JSON conversion", () => {
       value: 42,
     });
     expect(exportedSettingValueToProto(setting)).toEqual({ int32Value: 42 });
+  });
+
+  it("parses legacy settings array format", () => {
+    const legacy = JSON.stringify({
+      format: "zmk-custom-settings",
+      version: 1,
+      exportedAt: "2024-01-01T00:00:00.000Z",
+      settings: [
+        {
+          customSubsystemId: "test",
+          key: "int_value",
+          type: "int32",
+          value: 42,
+        },
+      ],
+    });
+    const [setting] = parseSettingsExportJson(legacy);
+
+    expect(setting).toMatchObject({
+      customSubsystemId: "test",
+      key: "int_value",
+      type: "int32",
+      value: 42,
+    });
   });
 });

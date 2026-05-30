@@ -5,7 +5,7 @@ import {
 } from "./proto/zmk/custom_settings/custom_settings";
 
 const SETTINGS_EXPORT_FORMAT = "zmk-custom-settings";
-const SETTINGS_EXPORT_VERSION = 1;
+const SETTINGS_EXPORT_VERSION = 2;
 
 type ExportedSettingType = "bytes" | "int32" | "bool" | "string";
 
@@ -18,11 +18,23 @@ export interface ExportedSetting {
   arraySize?: number;
 }
 
+export type ExportedSubsystemSetting = Omit<
+  ExportedSetting,
+  "customSubsystemId"
+>;
+
 export interface SettingsExportDocument {
   format: typeof SETTINGS_EXPORT_FORMAT;
   version: typeof SETTINGS_EXPORT_VERSION;
   exportedAt: string;
-  settings: ExportedSetting[];
+  customSubsystems: Record<string, ExportedSubsystemSetting[]>;
+}
+
+export function countExportedSettings(doc: SettingsExportDocument): number {
+  return Object.values(doc.customSubsystems).reduce(
+    (sum, settings) => sum + settings.length,
+    0
+  );
 }
 
 export function settingToExportedSetting(
@@ -72,15 +84,27 @@ export function createSettingsExportDocument(
   settings: Setting[],
   subsystemIdentifierForIndex?: (index: number) => string | undefined
 ): SettingsExportDocument {
+  const customSubsystems: Record<string, ExportedSubsystemSetting[]> = {};
+
+  for (const setting of settings) {
+    const exported = settingToExportedSetting(
+      setting,
+      subsystemIdentifierForIndex
+    );
+    if (!exported) continue;
+
+    const { customSubsystemId, ...subsystemSetting } = exported;
+    if (!customSubsystems[customSubsystemId]) {
+      customSubsystems[customSubsystemId] = [];
+    }
+    customSubsystems[customSubsystemId].push(subsystemSetting);
+  }
+
   return {
     format: SETTINGS_EXPORT_FORMAT,
     version: SETTINGS_EXPORT_VERSION,
     exportedAt: new Date().toISOString(),
-    settings: settings
-      .map((setting) =>
-        settingToExportedSetting(setting, subsystemIdentifierForIndex)
-      )
-      .filter((setting): setting is ExportedSetting => setting !== null),
+    customSubsystems,
   };
 }
 
@@ -97,6 +121,28 @@ export function settingsExportToJson(
 
 export function parseSettingsExportJson(json: string): ExportedSetting[] {
   const parsed: unknown = JSON.parse(json);
+
+  // New format: { customSubsystems: { [id]: [...] } }
+  if (isRecord(parsed) && isRecord(parsed.customSubsystems)) {
+    const result: ExportedSetting[] = [];
+    for (const [customSubsystemId, subsystemSettings] of Object.entries(
+      parsed.customSubsystems
+    )) {
+      if (!Array.isArray(subsystemSettings)) {
+        throw new Error(
+          `customSubsystems.${customSubsystemId} must be an array`
+        );
+      }
+      for (let i = 0; i < subsystemSettings.length; i++) {
+        result.push(
+          parseSubsystemSetting(subsystemSettings[i], customSubsystemId, i)
+        );
+      }
+    }
+    return result;
+  }
+
+  // Legacy format: flat array or { settings: [...] }
   const settings = Array.isArray(parsed)
     ? parsed
     : isRecord(parsed) && Array.isArray(parsed.settings)
@@ -104,7 +150,9 @@ export function parseSettingsExportJson(json: string): ExportedSetting[] {
       : null;
 
   if (!settings) {
-    throw new Error("JSON must contain a settings array");
+    throw new Error(
+      "JSON must contain a customSubsystems object or settings array"
+    );
   }
 
   return settings.map((entry, index) => parseExportedSetting(entry, index));
@@ -198,6 +246,20 @@ function parseExportedSetting(entry: unknown, index: number): ExportedSetting {
   }
 
   const customSubsystemId = readString(entry, "customSubsystemId", index);
+  return parseSubsystemSetting(entry, customSubsystemId, index);
+}
+
+function parseSubsystemSetting(
+  entry: unknown,
+  customSubsystemId: string,
+  index: number
+): ExportedSetting {
+  if (!isRecord(entry)) {
+    throw new Error(
+      `customSubsystems.${customSubsystemId}[${index}] must be an object`
+    );
+  }
+
   const key = readString(entry, "key", index);
   const type = readSettingType(entry.type, index);
   const value = readSettingValue(entry.value, type, index);
