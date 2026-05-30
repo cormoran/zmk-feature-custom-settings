@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import {
   createConnectedMockZMKApp,
   ZMKAppProvider,
@@ -12,13 +13,24 @@ import {
 } from "../src/settingsJson";
 import { RPCTestSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
 import {
+  Notification,
   Response,
   Setting,
+  SettingNotificationKind,
 } from "../src/proto/zmk/custom_settings/custom_settings";
 
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
   call_rpc: jest.fn(),
 }));
+
+const baseSetting: Setting = {
+  customSubsystemIndex: 1,
+  key: "int_value",
+  meta: undefined,
+  hasUnsavedValue: false,
+  value: { int32Value: 42 },
+  source: 0,
+};
 
 describe("RPCTestSection Component", () => {
   beforeEach(() => {
@@ -45,15 +57,8 @@ describe("RPCTestSection Component", () => {
       expect(
         screen.getByRole("heading", { name: "Filter" })
       ).toBeInTheDocument();
-      expect(
-        screen.getByRole("heading", { name: "Update Value" })
-      ).toBeInTheDocument();
       expect(screen.getByLabelText(/Filter Subsystem/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/Filter Key/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/Setting Subsystem/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/Setting Key/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
-      expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
       expect(
         screen.getByRole("heading", { name: "Device Settings" })
       ).toBeInTheDocument();
@@ -68,16 +73,12 @@ describe("RPCTestSection Component", () => {
       expect(
         screen.getByRole("button", { name: "Import JSON" })
       ).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Write" })).toBeInTheDocument();
       expect(
-        screen.getByRole("button", { name: "Push Back" })
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Pop Back" })
-      ).toBeInTheDocument();
+        screen.queryByRole("heading", { name: "Update Value" })
+      ).not.toBeInTheDocument();
     });
 
-    it("should show default input value", async () => {
+    it("should show value editor under clicked scalar setting", async () => {
       const mockZMKApp = createConnectedMockZMKApp({
         subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
       });
@@ -88,9 +89,70 @@ describe("RPCTestSection Component", () => {
         </ZMKAppProvider>
       );
 
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, baseSetting);
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/int_value" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+
+      expect(
+        screen.getByRole("heading", { name: "Update Value" })
+      ).toBeInTheDocument();
+      expect(screen.getByLabelText(/Setting Subsystem/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Setting Key/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/^Array$/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Array Index/i)).toBeInTheDocument();
       const input = screen.getByLabelText(/Value/i) as HTMLInputElement;
-      expect(input.value).toBe("10");
-      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(1));
+      expect(input.value).toBe("42");
+      expect(
+        screen.queryByRole("button", { name: "Push Back" })
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Pop Back" })
+      ).not.toBeInTheDocument();
+    });
+
+    it("should show array commands for clicked array setting", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        key: "array_value",
+        value: {
+          arrayValue: {
+            index: 0,
+            size: 1,
+            value: { int32Value: 7 },
+          },
+        },
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/array_value[0]" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+
+      expect(
+        screen.getByRole("button", { name: "Push Back" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Pop Back" })
+      ).toBeInTheDocument();
     });
   });
 
@@ -139,16 +201,26 @@ function emptyStatusResponse() {
   };
 }
 
-describe("settings JSON conversion", () => {
-  const baseSetting: Setting = {
-    customSubsystemIndex: 1,
-    key: "int_value",
-    meta: undefined,
-    hasUnsavedValue: false,
-    value: { int32Value: 42 },
-    source: 0,
-  };
+function emitListItem(
+  mockZMKApp: ReturnType<typeof createConnectedMockZMKApp>,
+  setting: Setting
+) {
+  const subscription = (mockZMKApp.onNotification as jest.Mock).mock
+    .calls[0][0];
+  subscription.callback({
+    subsystemIndex: 0,
+    payload: Notification.encode(
+      Notification.create({
+        setting: {
+          kind: SettingNotificationKind.SETTING_NOTIFICATION_KIND_LIST_ITEM,
+          setting,
+        },
+      })
+    ).finish(),
+  });
+}
 
+describe("settings JSON conversion", () => {
   it("exports scalar settings as typed JSON entries", () => {
     expect(settingToExportedSetting(baseSetting, () => "test")).toEqual({
       customSubsystemId: "test",

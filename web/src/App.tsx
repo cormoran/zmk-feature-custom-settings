@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from "react";
+import { Fragment, useContext, useEffect, useState } from "react";
 import "./App.css";
 import { connect as serial_connect } from "@zmkfirmware/zmk-studio-ts-client/transport/serial";
 import {
@@ -460,9 +460,6 @@ export function RPCTestSection() {
       const settings = await collectListSettings(listScope, requireMeta);
       setListedSettings(settings);
       setResponse(`Listed ${settings.length} settings`);
-      if (settings.length > 0 && !setting) {
-        selectSettingForEdit(settings[0]);
-      }
     } catch (error) {
       console.error("List failed:", error);
       setResponse(
@@ -567,9 +564,6 @@ export function RPCTestSection() {
         }
         setListedSettings(settings);
         setResponse(`Listed ${settings.length} settings`);
-        if (settings.length > 0 && !setting) {
-          selectSettingForEdit(settings[0]);
-        }
       } catch (error) {
         if (!cancelled) {
           console.error("Initial list failed:", error);
@@ -607,6 +601,118 @@ export function RPCTestSection() {
       </section>
     );
   }
+
+  const selectedSettingIsArray = setting?.value?.arrayValue !== undefined;
+  const updateValuePanel = setting ? (
+    <section className="settings-panel settings-editor-panel">
+      <h3>Update Value</h3>
+      <div className="form-grid">
+        <label htmlFor="editor-custom-subsystem-input">Setting Subsystem</label>
+        <input
+          id="editor-custom-subsystem-input"
+          value={editorCustomSubsystemId}
+          onChange={(e) => setEditorCustomSubsystemId(e.target.value)}
+        />
+
+        <label htmlFor="editor-key-input">Setting Key</label>
+        <input
+          id="editor-key-input"
+          value={editorSettingKey}
+          onChange={(e) => setEditorSettingKey(e.target.value)}
+        />
+
+        <label htmlFor="type-input">Type</label>
+        <select
+          id="type-input"
+          value={valueType}
+          onChange={(e) => setValueType(e.target.value as EditorValueType)}
+        >
+          <option value={EditorValueType.Int32}>int32</option>
+          <option value={EditorValueType.Bool}>bool</option>
+          <option value={EditorValueType.String}>string</option>
+          <option value={EditorValueType.Bytes}>bytes</option>
+        </select>
+
+        <label htmlFor="array-input">Array</label>
+        <input
+          id="array-input"
+          type="checkbox"
+          checked={isArray}
+          onChange={(e) => setIsArray(e.target.checked)}
+        />
+
+        <label htmlFor="array-index-input">Array Index</label>
+        <input
+          id="array-index-input"
+          type="number"
+          min={0}
+          value={arrayIndex}
+          onChange={(e) =>
+            setArrayIndex(Number.parseInt(e.target.value, 10) || 0)
+          }
+        />
+
+        <label htmlFor="array-size-input">Array Size</label>
+        <input
+          id="array-size-input"
+          type="number"
+          min={1}
+          value={arraySize}
+          onChange={(e) =>
+            setArraySize(Number.parseInt(e.target.value, 10) || 1)
+          }
+        />
+
+        <label htmlFor="value-input">Value</label>
+        <input
+          id="value-input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+
+        <label htmlFor="mode-input">Write Mode</label>
+        <select
+          id="mode-input"
+          value={writeMode}
+          onChange={(e) => setWriteMode(Number(e.target.value))}
+        >
+          <option value={SettingWriteMode.SETTING_WRITE_MODE_MEMORY}>
+            memory
+          </option>
+          <option value={SettingWriteMode.SETTING_WRITE_MODE_PERSIST}>
+            persist
+          </option>
+        </select>
+      </div>
+
+      <div className="toolbar">
+        <button className="btn" disabled={isLoading} onClick={getSetting}>
+          Read
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={isLoading}
+          onClick={writeSetting}
+        >
+          Write
+        </button>
+        {selectedSettingIsArray && (
+          <>
+            <button
+              className="btn"
+              disabled={isLoading}
+              onClick={pushBackArray}
+            >
+              Push Back
+            </button>
+            <button className="btn" disabled={isLoading} onClick={popBackArray}>
+              Pop Back
+            </button>
+          </>
+        )}
+      </div>
+    </section>
+  ) : null;
 
   return (
     <section className="card">
@@ -671,109 +777,6 @@ export function RPCTestSection() {
         </div>
       </section>
 
-      <section className="settings-panel">
-        <h3>Update Value</h3>
-        <div className="form-grid">
-          <label htmlFor="editor-custom-subsystem-input">
-            Setting Subsystem
-          </label>
-          <input
-            id="editor-custom-subsystem-input"
-            value={editorCustomSubsystemId}
-            onChange={(e) => setEditorCustomSubsystemId(e.target.value)}
-          />
-
-          <label htmlFor="editor-key-input">Setting Key</label>
-          <input
-            id="editor-key-input"
-            value={editorSettingKey}
-            onChange={(e) => setEditorSettingKey(e.target.value)}
-          />
-
-          <label htmlFor="type-input">Type</label>
-          <select
-            id="type-input"
-            value={valueType}
-            onChange={(e) => setValueType(e.target.value as EditorValueType)}
-          >
-            <option value={EditorValueType.Int32}>int32</option>
-            <option value={EditorValueType.Bool}>bool</option>
-            <option value={EditorValueType.String}>string</option>
-            <option value={EditorValueType.Bytes}>bytes</option>
-          </select>
-
-          <label htmlFor="array-input">Array</label>
-          <input
-            id="array-input"
-            type="checkbox"
-            checked={isArray}
-            onChange={(e) => setIsArray(e.target.checked)}
-          />
-
-          <label htmlFor="array-index-input">Array Index</label>
-          <input
-            id="array-index-input"
-            type="number"
-            min={0}
-            value={arrayIndex}
-            onChange={(e) =>
-              setArrayIndex(Number.parseInt(e.target.value, 10) || 0)
-            }
-          />
-
-          <label htmlFor="array-size-input">Array Size</label>
-          <input
-            id="array-size-input"
-            type="number"
-            min={1}
-            value={arraySize}
-            onChange={(e) =>
-              setArraySize(Number.parseInt(e.target.value, 10) || 1)
-            }
-          />
-
-          <label htmlFor="value-input">Value</label>
-          <input
-            id="value-input"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-          />
-
-          <label htmlFor="mode-input">Write Mode</label>
-          <select
-            id="mode-input"
-            value={writeMode}
-            onChange={(e) => setWriteMode(Number(e.target.value))}
-          >
-            <option value={SettingWriteMode.SETTING_WRITE_MODE_MEMORY}>
-              memory
-            </option>
-            <option value={SettingWriteMode.SETTING_WRITE_MODE_PERSIST}>
-              persist
-            </option>
-          </select>
-        </div>
-
-        <div className="toolbar">
-          <button className="btn" disabled={isLoading} onClick={getSetting}>
-            Read
-          </button>
-          <button
-            className="btn btn-primary"
-            disabled={isLoading}
-            onClick={writeSetting}
-          >
-            Write
-          </button>
-          <button className="btn" disabled={isLoading} onClick={pushBackArray}>
-            Push Back
-          </button>
-          <button className="btn" disabled={isLoading} onClick={popBackArray}>
-            Pop Back
-          </button>
-        </div>
-      </section>
-
       <div className="settings-list">
         <div className="settings-list-header">
           <h3>Device Settings</h3>
@@ -791,29 +794,40 @@ export function RPCTestSection() {
                 </tr>
               </thead>
               <tbody>
-                {listedSettings.map((listedSetting, index) => (
-                  <tr key={settingRowKey(listedSetting, index)}>
-                    <td>
-                      <button
-                        className="link-button"
-                        type="button"
-                        onClick={() => selectSettingForEdit(listedSetting)}
-                      >
-                        {settingDisplayName(
-                          listedSetting,
-                          subsystemIdentifierForIndex
-                        )}
-                      </button>
-                    </td>
-                    <td>
-                      {listedSetting.value
-                        ? formatValue(listedSetting.value)
-                        : "(hidden)"}
-                    </td>
-                    <td>{listedSetting.hasUnsavedValue ? "yes" : "no"}</td>
-                    <td>{formatSource(listedSetting.source)}</td>
-                  </tr>
-                ))}
+                {listedSettings.map((listedSetting, index) => {
+                  const isSelected =
+                    setting !== null && settingsMatch(setting, listedSetting);
+                  return (
+                    <Fragment key={settingRowKey(listedSetting, index)}>
+                      <tr className={isSelected ? "selected-setting-row" : ""}>
+                        <td>
+                          <button
+                            className="link-button"
+                            type="button"
+                            onClick={() => selectSettingForEdit(listedSetting)}
+                          >
+                            {settingDisplayName(
+                              listedSetting,
+                              subsystemIdentifierForIndex
+                            )}
+                          </button>
+                        </td>
+                        <td>
+                          {listedSetting.value
+                            ? formatValue(listedSetting.value)
+                            : "(hidden)"}
+                        </td>
+                        <td>{listedSetting.hasUnsavedValue ? "yes" : "no"}</td>
+                        <td>{formatSource(listedSetting.source)}</td>
+                      </tr>
+                      {isSelected && (
+                        <tr className="settings-editor-row">
+                          <td colSpan={4}>{updateValuePanel}</td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -928,6 +942,16 @@ function formatBytesValue(value: Uint8Array): string {
 function settingRowKey(setting: Setting, index: number): string {
   const arrayIndex = setting.value?.arrayValue?.index ?? "scalar";
   return `${setting.source}:${setting.customSubsystemIndex}:${setting.key}:${arrayIndex}:${index}`;
+}
+
+function settingsMatch(a: Setting, b: Setting): boolean {
+  return (
+    a.source === b.source &&
+    a.customSubsystemIndex === b.customSubsystemIndex &&
+    a.key === b.key &&
+    (a.value?.arrayValue?.index ?? undefined) ===
+      (b.value?.arrayValue?.index ?? undefined)
+  );
 }
 
 function settingDisplayName(

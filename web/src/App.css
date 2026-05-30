@@ -121,6 +121,20 @@
   background: #f6f8fa;
 }
 
+.selected-setting-row td {
+  background: #f6f8fa;
+}
+
+.settings-editor-row td {
+  padding: 0;
+  background: #fbfbfb;
+}
+
+.settings-editor-panel {
+  padding: 1rem;
+  border-top: 0;
+}
+
 .link-button {
   padding: 0;
   border: 0;
