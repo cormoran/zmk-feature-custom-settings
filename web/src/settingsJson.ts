@@ -241,45 +241,46 @@ function exportedScalarValueToProto(setting: ExportedSetting): SettingValue {
 }
 
 function parseExportedSetting(entry: unknown, index: number): ExportedSetting {
+  const label = `settings[${index}]`;
   if (!isRecord(entry)) {
-    throw new Error(`settings[${index}] must be an object`);
+    throw new Error(`${label} must be an object`);
   }
 
-  const customSubsystemId = readString(entry, "customSubsystemId", index);
-  return parseSubsystemSetting(entry, customSubsystemId, index);
+  const customSubsystemId = readString(entry, "customSubsystemId", label);
+  return parseSubsystemSetting(entry, customSubsystemId, label);
 }
 
 function parseSubsystemSetting(
   entry: unknown,
   customSubsystemId: string,
-  index: number
+  index: number | string
 ): ExportedSetting {
+  const label =
+    typeof index === "string"
+      ? index
+      : `customSubsystems.${customSubsystemId}[${index}]`;
   if (!isRecord(entry)) {
-    throw new Error(
-      `customSubsystems.${customSubsystemId}[${index}] must be an object`
-    );
+    throw new Error(`${label} must be an object`);
   }
 
-  const key = readString(entry, "key", index);
-  const type = readSettingType(entry.type, index);
-  const value = readSettingValue(entry.value, type, index);
+  const key = readString(entry, "key", label);
+  const type = readSettingType(entry.type, label);
+  const value = readSettingValue(entry.value, type, label);
   const exported: ExportedSetting = { customSubsystemId, key, type, value };
 
   if (entry.arrayIndex !== undefined) {
     exported.arrayIndex = readNonNegativeInteger(
       entry.arrayIndex,
       "arrayIndex",
-      index
+      label
     );
     exported.arraySize = readPositiveInteger(
       entry.arraySize,
       "arraySize",
-      index
+      label
     );
     if (exported.arrayIndex >= exported.arraySize) {
-      throw new Error(
-        `settings[${index}].arrayIndex must be smaller than arraySize`
-      );
+      throw new Error(`${label}.arrayIndex must be smaller than arraySize`);
     }
   }
 
@@ -289,17 +290,17 @@ function parseSubsystemSetting(
 function readString(
   entry: Record<string, unknown>,
   field: string,
-  index: number
+  label: string
 ): string {
   const value = entry[field];
   if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`settings[${index}].${field} must be a non-empty string`);
+    throw new Error(`${label}.${field} must be a non-empty string`);
   }
 
   return value;
 }
 
-function readSettingType(value: unknown, index: number): ExportedSettingType {
+function readSettingType(value: unknown, label: string): ExportedSettingType {
   if (
     value === "bytes" ||
     value === "int32" ||
@@ -309,13 +310,13 @@ function readSettingType(value: unknown, index: number): ExportedSettingType {
     return value;
   }
 
-  throw new Error(`settings[${index}].type is not supported`);
+  throw new Error(`${label}.type is not supported`);
 }
 
 function readSettingValue(
   value: unknown,
   type: ExportedSettingType,
-  index: number
+  label: string
 ): ExportedSetting["value"] {
   switch (type) {
     case "bytes":
@@ -323,22 +324,22 @@ function readSettingValue(
         !Array.isArray(value) ||
         value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)
       ) {
-        throw new Error(`settings[${index}].value must be a byte array`);
+        throw new Error(`${label}.value must be a byte array`);
       }
       return value as number[];
     case "int32":
       if (!Number.isInteger(value)) {
-        throw new Error(`settings[${index}].value must be an integer`);
+        throw new Error(`${label}.value must be an integer`);
       }
       return value as number;
     case "bool":
       if (typeof value !== "boolean") {
-        throw new Error(`settings[${index}].value must be a boolean`);
+        throw new Error(`${label}.value must be a boolean`);
       }
       return value;
     case "string":
       if (typeof value !== "string") {
-        throw new Error(`settings[${index}].value must be a string`);
+        throw new Error(`${label}.value must be a string`);
       }
       return value;
   }
@@ -347,12 +348,10 @@ function readSettingValue(
 function readNonNegativeInteger(
   value: unknown,
   field: string,
-  index: number
+  label: string
 ): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new Error(
-      `settings[${index}].${field} must be a non-negative integer`
-    );
+    throw new Error(`${label}.${field} must be a non-negative integer`);
   }
 
   return value;
@@ -361,10 +360,10 @@ function readNonNegativeInteger(
 function readPositiveInteger(
   value: unknown,
   field: string,
-  index: number
+  label: string
 ): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`settings[${index}].${field} must be a positive integer`);
+    throw new Error(`${label}.${field} must be a positive integer`);
   }
 
   return value;
