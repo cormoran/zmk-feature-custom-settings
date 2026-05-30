@@ -75,6 +75,9 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_CUSTOM_SETTINGS=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
+                        "CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128",
+                        "CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=96",
+                        "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
                     ],
                     device=[],
                     binary=[
@@ -116,6 +119,7 @@ class WestCommandsTests(unittest.TestCase):
                         "# CONFIG_ZMK_SPLIT_ROLE_CENTRAL is not set",
                         "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y",
+                        "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
                     ],
                     device=[],
                     binary=[
