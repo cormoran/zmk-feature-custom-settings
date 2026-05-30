@@ -35,6 +35,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define SUBSYSTEM_IDENTIFIER_STRING "zmk__custom_settings"
 #define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
+#define LIST_SETTINGS_RELAY_DELAY K_MSEC(20)
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
@@ -814,8 +815,8 @@ static void list_settings_work_handler(struct k_work *work) {
         LOG_INF("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
                 "include_meta=%d",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
-                zmk_custom_setting_is_array(setting) ? setting->array_index
-                                                     : ZMK_CUSTOM_SETTING_ARRAY_NONE,
+                (uint32_t)(zmk_custom_setting_is_array(setting) ? setting->array_index
+                                                                : ZMK_CUSTOM_SETTING_ARRAY_NONE),
                 can_include_value(setting), include_meta);
         int ret = raise_setting_notification(
             setting,
@@ -1513,6 +1514,53 @@ static int relay_request_to_peripherals(const zmk_custom_settings_Request *req) 
 
     return raise_zmk_custom_settings_relay_request(relay_request);
 }
+
+static void list_settings_relay_work_handler(struct k_work *work);
+
+K_WORK_DELAYABLE_DEFINE(list_settings_relay_work, list_settings_relay_work_handler);
+static K_MUTEX_DEFINE(list_settings_relay_lock);
+static struct zmk_custom_settings_relay_request list_settings_relay_request;
+static bool list_settings_relay_active;
+
+static void list_settings_relay_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    k_mutex_lock(&list_settings_relay_lock, K_FOREVER);
+    if (!list_settings_relay_active) {
+        k_mutex_unlock(&list_settings_relay_lock);
+        return;
+    }
+    struct zmk_custom_settings_relay_request relay_request = list_settings_relay_request;
+    list_settings_relay_active = false;
+    k_mutex_unlock(&list_settings_relay_lock);
+
+    LOG_INF("Custom settings relaying list request to peripherals");
+    int ret = raise_zmk_custom_settings_relay_request(relay_request);
+    if (ret < 0) {
+        LOG_WRN("Failed to relay custom settings list request: %d", ret);
+    }
+}
+
+static int schedule_list_settings_relay_to_peripherals(const zmk_custom_settings_Request *req) {
+    struct zmk_custom_settings_relay_request relay_request = {
+        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
+    };
+
+    int ret = request_to_relay_request(req, &relay_request);
+    if (ret < 0) {
+        return ret;
+    }
+
+    k_work_cancel_delayable(&list_settings_relay_work);
+    k_mutex_lock(&list_settings_relay_lock, K_FOREVER);
+    list_settings_relay_request = relay_request;
+    list_settings_relay_active = true;
+    k_mutex_unlock(&list_settings_relay_lock);
+
+    LOG_INF("Custom settings scheduled list relay to peripherals");
+    k_work_schedule(&list_settings_relay_work, LIST_SETTINGS_RELAY_DELAY);
+    return 0;
+}
 #endif
 
 static int process_request(const zmk_custom_settings_Request *req,
@@ -1632,16 +1680,26 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
         set_error(resp, "Failed to decode request");
         return true;
     }
+    LOG_INF("Custom settings RPC request: type=%u payload_size=%u", req.which_request_type,
+            (uint32_t)raw_request->payload.size);
 
     int ret = process_request(&req, resp);
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     if (ret == 0 && should_relay_to_peripherals(&req)) {
         if (!relay_request_unlock_required(&req)) {
-            ret = relay_request_to_peripherals(&req);
+            if (req.which_request_type == zmk_custom_settings_Request_list_settings_tag) {
+                ret = schedule_list_settings_relay_to_peripherals(&req);
+            } else {
+                ret = relay_request_to_peripherals(&req);
+            }
+        } else {
+            LOG_INF("Custom settings skipped peripheral relay because unlock is required");
         }
     }
 #endif
+    LOG_INF("Custom settings RPC request processed: ret=%d response_type=%u", ret,
+            resp->which_response_type);
 
     if (ret < 0) {
         LOG_WRN("Custom settings request failed: %d", ret);
