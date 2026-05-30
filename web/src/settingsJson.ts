@@ -18,11 +18,25 @@ export interface ExportedSetting {
   arraySize?: number;
 }
 
+export interface ExportedSettingEntry {
+  type: ExportedSettingType;
+  value: ExportedSetting["value"] | ExportedSetting["value"][];
+  size?: number;
+}
+
 export interface SettingsExportDocument {
   format: typeof SETTINGS_EXPORT_FORMAT;
   version: typeof SETTINGS_EXPORT_VERSION;
   exportedAt: string;
-  settings: ExportedSetting[];
+  customSubsystems: Record<string, Record<string, ExportedSettingEntry>>;
+}
+
+export function countExportedSettings(doc: SettingsExportDocument): number {
+  return Object.values(doc.customSubsystems).reduce(
+    (sum, settings) =>
+      sum + Object.values(settings).reduce((s, e) => s + (e.size ?? 1), 0),
+    0
+  );
 }
 
 export function settingToExportedSetting(
@@ -72,15 +86,57 @@ export function createSettingsExportDocument(
   settings: Setting[],
   subsystemIdentifierForIndex?: (index: number) => string | undefined
 ): SettingsExportDocument {
+  const allExported: ExportedSetting[] = [];
+  for (const setting of settings) {
+    const exported = settingToExportedSetting(
+      setting,
+      subsystemIdentifierForIndex
+    );
+    if (exported) allExported.push(exported);
+  }
+
+  const bySubsystem: Record<string, Record<string, ExportedSetting[]>> = {};
+  for (const s of allExported) {
+    if (!bySubsystem[s.customSubsystemId])
+      bySubsystem[s.customSubsystemId] = {};
+    if (!bySubsystem[s.customSubsystemId][s.key])
+      bySubsystem[s.customSubsystemId][s.key] = [];
+    bySubsystem[s.customSubsystemId][s.key].push(s);
+  }
+
+  const customSubsystems: Record<
+    string,
+    Record<string, ExportedSettingEntry>
+  > = {};
+  for (const [subsystemId, byKey] of Object.entries(bySubsystem)) {
+    customSubsystems[subsystemId] = {};
+    for (const [key, entries] of Object.entries(byKey)) {
+      const first = entries[0];
+      if (first.arrayIndex !== undefined) {
+        const size = first.arraySize!;
+        const valueArray: ExportedSetting["value"][] = new Array(size);
+        for (const entry of entries) {
+          valueArray[entry.arrayIndex!] = entry.value;
+        }
+        customSubsystems[subsystemId][key] = {
+          type: first.type,
+          size,
+          value: valueArray,
+        };
+      } else {
+        customSubsystems[subsystemId][key] = {
+          type: first.type,
+          value: first.value,
+        };
+      }
+    }
+  }
+
   return {
     format: SETTINGS_EXPORT_FORMAT,
     version: SETTINGS_EXPORT_VERSION,
     exportedAt: new Date().toISOString(),
-    settings: settings
-      .map((setting) =>
-        settingToExportedSetting(setting, subsystemIdentifierForIndex)
-      )
-      .filter((setting): setting is ExportedSetting => setting !== null),
+    customSubsystems,
   };
 }
 
@@ -97,17 +153,45 @@ export function settingsExportToJson(
 
 export function parseSettingsExportJson(json: string): ExportedSetting[] {
   const parsed: unknown = JSON.parse(json);
-  const settings = Array.isArray(parsed)
-    ? parsed
-    : isRecord(parsed) && Array.isArray(parsed.settings)
-      ? parsed.settings
-      : null;
 
-  if (!settings) {
-    throw new Error("JSON must contain a settings array");
+  if (!isRecord(parsed)) {
+    throw new Error("Invalid JSON: expected an object");
+  }
+  if (parsed.format !== SETTINGS_EXPORT_FORMAT) {
+    throw new Error(`Invalid format: expected "${SETTINGS_EXPORT_FORMAT}"`);
+  }
+  if (parsed.version !== SETTINGS_EXPORT_VERSION) {
+    throw new Error(
+      `Unsupported version ${parsed.version}, expected ${SETTINGS_EXPORT_VERSION}`
+    );
+  }
+  if (!isRecord(parsed.customSubsystems)) {
+    throw new Error("JSON must contain a customSubsystems object");
   }
 
-  return settings.map((entry, index) => parseExportedSetting(entry, index));
+  const result: ExportedSetting[] = [];
+  for (const [customSubsystemId, subsystemEntries] of Object.entries(
+    parsed.customSubsystems
+  )) {
+    if (customSubsystemId.length === 0) {
+      throw new Error("customSubsystems contains an empty key");
+    }
+    if (!isRecord(subsystemEntries)) {
+      throw new Error(
+        `customSubsystems.${customSubsystemId} must be an object`
+      );
+    }
+    for (const [key, entry] of Object.entries(subsystemEntries)) {
+      if (key.length === 0) {
+        throw new Error(
+          `customSubsystems.${customSubsystemId} contains an empty key`
+        );
+      }
+      const label = `customSubsystems.${customSubsystemId}.${key}`;
+      result.push(...parseSettingEntry(entry, customSubsystemId, key, label));
+    }
+  }
+  return result;
 }
 
 export function exportedSettingValueToProto(
@@ -192,52 +276,45 @@ function exportedScalarValueToProto(setting: ExportedSetting): SettingValue {
   }
 }
 
-function parseExportedSetting(entry: unknown, index: number): ExportedSetting {
+function parseSettingEntry(
+  entry: unknown,
+  customSubsystemId: string,
+  key: string,
+  label: string
+): ExportedSetting[] {
   if (!isRecord(entry)) {
-    throw new Error(`settings[${index}] must be an object`);
+    throw new Error(`${label} must be an object`);
   }
 
-  const customSubsystemId = readString(entry, "customSubsystemId", index);
-  const key = readString(entry, "key", index);
-  const type = readSettingType(entry.type, index);
-  const value = readSettingValue(entry.value, type, index);
-  const exported: ExportedSetting = { customSubsystemId, key, type, value };
+  const type = readSettingType(entry.type, label);
 
-  if (entry.arrayIndex !== undefined) {
-    exported.arrayIndex = readNonNegativeInteger(
-      entry.arrayIndex,
-      "arrayIndex",
-      index
-    );
-    exported.arraySize = readPositiveInteger(
-      entry.arraySize,
-      "arraySize",
-      index
-    );
-    if (exported.arrayIndex >= exported.arraySize) {
-      throw new Error(
-        `settings[${index}].arrayIndex must be smaller than arraySize`
-      );
+  if (entry.size !== undefined) {
+    const size = readPositiveInteger(entry.size, "size", label);
+    if (!Array.isArray(entry.value) || entry.value.length !== size) {
+      throw new Error(`${label}.value must be an array of length ${size}`);
     }
+    const valueArr = entry.value as unknown[];
+    return Array.from({ length: size }, (_, i) => ({
+      customSubsystemId,
+      key,
+      type,
+      value: readSettingValue(valueArr[i], type, `${label}[${i}]`),
+      arrayIndex: i,
+      arraySize: size,
+    }));
   }
 
-  return exported;
+  return [
+    {
+      customSubsystemId,
+      key,
+      type,
+      value: readSettingValue(entry.value, type, label),
+    },
+  ];
 }
 
-function readString(
-  entry: Record<string, unknown>,
-  field: string,
-  index: number
-): string {
-  const value = entry[field];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`settings[${index}].${field} must be a non-empty string`);
-  }
-
-  return value;
-}
-
-function readSettingType(value: unknown, index: number): ExportedSettingType {
+function readSettingType(value: unknown, label: string): ExportedSettingType {
   if (
     value === "bytes" ||
     value === "int32" ||
@@ -247,13 +324,13 @@ function readSettingType(value: unknown, index: number): ExportedSettingType {
     return value;
   }
 
-  throw new Error(`settings[${index}].type is not supported`);
+  throw new Error(`${label}.type is not supported`);
 }
 
 function readSettingValue(
   value: unknown,
   type: ExportedSettingType,
-  index: number
+  label: string
 ): ExportedSetting["value"] {
   switch (type) {
     case "bytes":
@@ -261,48 +338,34 @@ function readSettingValue(
         !Array.isArray(value) ||
         value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)
       ) {
-        throw new Error(`settings[${index}].value must be a byte array`);
+        throw new Error(`${label}.value must be a byte array`);
       }
       return value as number[];
     case "int32":
       if (!Number.isInteger(value)) {
-        throw new Error(`settings[${index}].value must be an integer`);
+        throw new Error(`${label}.value must be an integer`);
       }
       return value as number;
     case "bool":
       if (typeof value !== "boolean") {
-        throw new Error(`settings[${index}].value must be a boolean`);
+        throw new Error(`${label}.value must be a boolean`);
       }
       return value;
     case "string":
       if (typeof value !== "string") {
-        throw new Error(`settings[${index}].value must be a string`);
+        throw new Error(`${label}.value must be a string`);
       }
       return value;
   }
-}
-
-function readNonNegativeInteger(
-  value: unknown,
-  field: string,
-  index: number
-): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    throw new Error(
-      `settings[${index}].${field} must be a non-negative integer`
-    );
-  }
-
-  return value;
 }
 
 function readPositiveInteger(
   value: unknown,
   field: string,
-  index: number
+  label: string
 ): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`settings[${index}].${field} must be a positive integer`);
+    throw new Error(`${label}.${field} must be a positive integer`);
   }
 
   return value;

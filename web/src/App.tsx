@@ -20,6 +20,7 @@ import {
 } from "./proto/zmk/custom_settings/custom_settings";
 import {
   createSettingsExportDocument,
+  countExportedSettings,
   exportedSettingValueToProto,
   parseSettingsExportJson,
 } from "./settingsJson";
@@ -383,7 +384,7 @@ export function RPCTestSection() {
         subsystemIdentifierForIndex
       );
       setJsonText(JSON.stringify(exported, null, 2));
-      setResponse(`Exported ${exported.settings.length} setting values`);
+      setResponse(`Exported ${countExportedSettings(exported)} setting values`);
     } catch (error) {
       console.error("Export failed:", error);
       setResponse(

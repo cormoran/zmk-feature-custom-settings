@@ -325,6 +325,43 @@ describe("settings JSON conversion", () => {
     });
   });
 
+  it("exports JSON grouped by customSubsystems as keyed object", () => {
+    const json = settingsExportToJson([baseSetting], () => "test");
+    const parsed = JSON.parse(json);
+
+    expect(parsed.version).toBe(1);
+    expect(parsed.customSubsystems).toBeDefined();
+    expect(parsed.customSubsystems["test"]).toEqual({
+      int_value: { type: "int32", value: 42 },
+    });
+  });
+
+  it("exports array settings grouped by key with size and value array", () => {
+    const arraySetting = {
+      ...baseSetting,
+      key: "array_value",
+      value: {
+        arrayValue: { index: 0, size: 2, value: { boolValue: false } },
+      },
+    };
+    const arraySetting1 = {
+      ...baseSetting,
+      key: "array_value",
+      value: {
+        arrayValue: { index: 1, size: 2, value: { boolValue: true } },
+      },
+    };
+    const json = settingsExportToJson(
+      [arraySetting, arraySetting1],
+      () => "test"
+    );
+    const parsed = JSON.parse(json);
+
+    expect(parsed.customSubsystems["test"]).toEqual({
+      array_value: { type: "bool", size: 2, value: [false, true] },
+    });
+  });
+
   it("parses exported JSON back to write values", () => {
     const json = settingsExportToJson([baseSetting], () => "test");
     const [setting] = parseSettingsExportJson(json);
@@ -336,5 +373,45 @@ describe("settings JSON conversion", () => {
       value: 42,
     });
     expect(exportedSettingValueToProto(setting)).toEqual({ int32Value: 42 });
+  });
+
+  it("parses array settings from new format back to write values", () => {
+    const doc = JSON.stringify({
+      format: "zmk-custom-settings",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      customSubsystems: {
+        test: {
+          array_value: { type: "bool", size: 2, value: [false, true] },
+        },
+      },
+    });
+    const settings = parseSettingsExportJson(doc);
+
+    expect(settings).toHaveLength(2);
+    expect(settings[0]).toMatchObject({
+      customSubsystemId: "test",
+      key: "array_value",
+      type: "bool",
+      value: false,
+      arrayIndex: 0,
+      arraySize: 2,
+    });
+    expect(settings[1]).toMatchObject({
+      key: "array_value",
+      value: true,
+      arrayIndex: 1,
+      arraySize: 2,
+    });
+  });
+
+  it("rejects JSON with wrong version", () => {
+    const old = JSON.stringify({
+      format: "zmk-custom-settings",
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      customSubsystems: { test: [{ key: "x", type: "int32", value: 1 }] },
+    });
+    expect(() => parseSettingsExportJson(old)).toThrow("Unsupported version 2");
   });
 });
