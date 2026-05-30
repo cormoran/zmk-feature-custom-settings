@@ -329,7 +329,7 @@ describe("settings JSON conversion", () => {
     const json = settingsExportToJson([baseSetting], () => "test");
     const parsed = JSON.parse(json);
 
-    expect(parsed.version).toBe(3);
+    expect(parsed.version).toBe(1);
     expect(parsed.customSubsystems).toBeDefined();
     expect(parsed.customSubsystems["test"]).toEqual({
       int_value: { type: "int32", value: 42 },
@@ -378,7 +378,7 @@ describe("settings JSON conversion", () => {
   it("parses array settings from new format back to write values", () => {
     const doc = JSON.stringify({
       format: "zmk-custom-settings",
-      version: 3,
+      version: 1,
       exportedAt: new Date().toISOString(),
       customSubsystems: {
         test: {

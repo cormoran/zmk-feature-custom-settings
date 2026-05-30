@@ -5,7 +5,7 @@ import {
 } from "./proto/zmk/custom_settings/custom_settings";
 
 const SETTINGS_EXPORT_FORMAT = "zmk-custom-settings";
-const SETTINGS_EXPORT_VERSION = 3;
+const SETTINGS_EXPORT_VERSION = 1;
 
 type ExportedSettingType = "bytes" | "int32" | "bool" | "string";
 
