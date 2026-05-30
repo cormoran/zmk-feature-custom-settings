@@ -703,6 +703,7 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     }
 
     notification->notification_type.setting.setting.custom_subsystem_index = custom_subsystem_index;
+    notification->notification_type.setting.setting.source = ev->source;
 
     return 0;
 }

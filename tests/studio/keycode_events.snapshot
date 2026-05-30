@@ -18,5 +18,6 @@ PASS: custom_settings_grow_array array[2]=77 size=3
 PASS: custom_settings_reset array[1]=2 size=3
 PASS: custom_settings_pop_back array[2]=3 size=2
 PASS: custom_settings_push_back array[2]=88 size=3
+PASS: custom_settings_save_all_active_array_items size=3
 PASS: custom_settings_push_back_full size=3
 PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809

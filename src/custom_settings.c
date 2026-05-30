@@ -496,6 +496,51 @@ static int delete_inactive_array_values_locked(const struct zmk_custom_setting *
     return 0;
 }
 
+static int save_array_locked(const struct zmk_custom_setting *array_element) {
+    char size_name[SETTINGS_MAX_NAME_LEN];
+    int ret = array_size_storage_name(array_element, size_name, sizeof(size_name));
+    if (ret < 0) {
+        return ret;
+    }
+
+    uint32_t array_size = array_element->array_size;
+    ret = settings_save_one(size_name, &array_size, sizeof(array_size));
+    if (ret < 0) {
+        return ret;
+    }
+
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (!same_array(setting, array_element) || setting->array_index >= array_size) {
+            continue;
+        }
+
+        char name[SETTINGS_MAX_NAME_LEN];
+        ret = setting_storage_name(setting, name, sizeof(name));
+        if (ret < 0) {
+            return ret;
+        }
+
+        const void *data;
+        size_t len;
+        ret = value_to_storage(&setting->memory_value, &data, &len);
+        if (ret < 0) {
+            return ret;
+        }
+
+        ret = settings_save_one(name, data, len);
+        if (ret < 0) {
+            return ret;
+        }
+
+        struct zmk_custom_setting *mutable_setting = (struct zmk_custom_setting *)setting;
+        copy_value(&mutable_setting->persistent_value, &mutable_setting->memory_value);
+        mutable_setting->has_persistent_value = true;
+    }
+
+    set_array_persistent_size_locked(array_element, array_size);
+    return delete_inactive_array_values_locked(array_element, array_size);
+}
+
 static int save_setting_locked(struct zmk_custom_setting *setting) {
     char name[SETTINGS_MAX_NAME_LEN];
     int ret = setting_storage_name(setting, name, sizeof(name));
@@ -504,30 +549,7 @@ static int save_setting_locked(struct zmk_custom_setting *setting) {
     }
 
     if (zmk_custom_setting_is_array(setting)) {
-        char size_name[SETTINGS_MAX_NAME_LEN];
-        ret = array_size_storage_name(setting, size_name, sizeof(size_name));
-        if (ret < 0) {
-            return ret;
-        }
-
-        ret = settings_save_one(size_name, &setting->array_size, sizeof(setting->array_size));
-        if (ret < 0) {
-            return ret;
-        }
-
-        if (setting->array_index >= setting->array_size) {
-            ret = settings_delete(name);
-            if (ret == -ENOENT) {
-                ret = 0;
-            }
-            if (ret < 0) {
-                return ret;
-            }
-
-            copy_value(&setting->persistent_value, &setting->memory_value);
-            set_array_persistent_size_locked(setting, setting->array_size);
-            return delete_inactive_array_values_locked(setting, setting->array_size);
-        }
+        return save_array_locked(setting);
     }
 
     const void *data;
@@ -544,13 +566,6 @@ static int save_setting_locked(struct zmk_custom_setting *setting) {
 
     copy_value(&setting->persistent_value, &setting->memory_value);
     setting->has_persistent_value = true;
-    if (zmk_custom_setting_is_array(setting)) {
-        set_array_persistent_size_locked(setting, setting->array_size);
-        ret = delete_inactive_array_values_locked(setting, setting->array_size);
-        if (ret < 0) {
-            return ret;
-        }
-    }
     return 0;
 }
 
@@ -1135,7 +1150,10 @@ static int custom_settings_handle_set(const char *name, size_t len, settings_rea
             return read;
         }
 
-        return array_size_from_storage(setting, &array_size, read);
+        k_mutex_lock(&settings_lock, K_FOREVER);
+        int ret = array_size_from_storage(setting, &array_size, read);
+        k_mutex_unlock(&settings_lock);
+        return ret;
     }
 
     struct zmk_custom_setting *setting =
@@ -1160,7 +1178,10 @@ static int custom_settings_handle_set(const char *name, size_t len, settings_rea
         return read;
     }
 
-    return value_from_storage(setting, data, read);
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    int ret = value_from_storage(setting, data, read);
+    k_mutex_unlock(&settings_lock);
+    return ret;
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(custom_settings, SETTINGS_SUBTREE, NULL, custom_settings_handle_set,
