@@ -262,6 +262,7 @@ static int test_constraint_validation(void) {
         LOG_ERR("Expected HID usage validation failure, got %d", ret);
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_validate_hid_usage");
 
     const struct zmk_custom_setting *layer_id = zmk_custom_setting_find("test", "layer_id");
     if (!layer_id) {
@@ -281,6 +282,7 @@ static int test_constraint_validation(void) {
         LOG_ERR("Expected layer ID validation failure, got %d", ret);
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_validate_layer_id");
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
     const struct zmk_custom_setting *behavior_id = zmk_custom_setting_find("test", "behavior_id");
@@ -307,6 +309,7 @@ static int test_constraint_validation(void) {
         LOG_ERR("Expected behavior ID validation failure, got %d", ret);
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_validate_behavior_id");
 #endif
 
     return 0;
@@ -349,6 +352,7 @@ static int test_scalar_lifecycle(void) {
         LOG_ERR("Memory-updated custom setting should have unsaved value");
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_update_read scalar=25");
 
     ret = zmk_custom_setting_discard(setting);
     if (ret < 0) {
@@ -364,6 +368,7 @@ static int test_scalar_lifecycle(void) {
         LOG_ERR("Discarded custom setting unexpectedly has unsaved value");
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_discard scalar=10");
 
     ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(30),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
@@ -385,6 +390,7 @@ static int test_scalar_lifecycle(void) {
         LOG_ERR("Saved custom setting unexpectedly has unsaved value");
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_save scalar=30");
 
     ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(40),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
@@ -401,6 +407,7 @@ static int test_scalar_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
+    LOG_INF("PASS: custom_settings_load scalar=30");
 
     ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(41),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
@@ -417,6 +424,7 @@ static int test_scalar_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
+    LOG_INF("PASS: custom_settings_discard_persistent scalar=30");
 
     ret = zmk_custom_setting_reset(setting);
     if (ret < 0) {
@@ -427,6 +435,7 @@ static int test_scalar_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
+    LOG_INF("PASS: custom_settings_reset scalar=10");
 
     ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(101),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
@@ -434,6 +443,7 @@ static int test_scalar_lifecycle(void) {
         LOG_ERR("Expected range validation failure, got %d", ret);
         return -EINVAL;
     }
+    LOG_INF("PASS: custom_settings_validate_range");
 
     return 0;
 }
@@ -467,6 +477,7 @@ static int test_array_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
+    LOG_INF("PASS: custom_settings_update_read array[1]=55");
 
     ret = zmk_custom_setting_save(array_setting);
     if (ret < 0) {
@@ -489,13 +500,20 @@ static int test_array_lifecycle(void) {
     if (ret < 0) {
         return ret;
     }
+    LOG_INF("PASS: custom_settings_save_discard array[1]=55");
 
     ret = zmk_custom_setting_reset(array_setting);
     if (ret < 0) {
         return ret;
     }
 
-    return expect_array_int_value_by_key("test", "array_value", 1, 2);
+    ret = expect_array_int_value_by_key("test", "array_value", 1, 2);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_reset array[1]=2");
+    return 0;
 }
 
 static int custom_settings_test_init(void) {

@@ -1,3 +1,15 @@
+PASS: custom_settings_validate_hid_usage
+PASS: custom_settings_validate_layer_id
+PASS: custom_settings_update_read scalar=25
+PASS: custom_settings_discard scalar=10
+PASS: custom_settings_save scalar=30
+PASS: custom_settings_load scalar=30
+PASS: custom_settings_discard_persistent scalar=30
+PASS: custom_settings_reset scalar=10
+PASS: custom_settings_validate_range
+PASS: custom_settings_update_read array[1]=55
+PASS: custom_settings_save_discard array[1]=55
+PASS: custom_settings_reset array[1]=2
 zmk: Welcome to ZMK!
 pressed: position 0 keycode 0x70004
 released: position 0 keycode 0x70004
