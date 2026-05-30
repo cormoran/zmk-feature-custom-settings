@@ -348,28 +348,4 @@ describe("settings JSON conversion", () => {
     });
     expect(exportedSettingValueToProto(setting)).toEqual({ int32Value: 42 });
   });
-
-  it("parses legacy settings array format", () => {
-    const legacy = JSON.stringify({
-      format: "zmk-custom-settings",
-      version: 1,
-      exportedAt: "2024-01-01T00:00:00.000Z",
-      settings: [
-        {
-          customSubsystemId: "test",
-          key: "int_value",
-          type: "int32",
-          value: 42,
-        },
-      ],
-    });
-    const [setting] = parseSettingsExportJson(legacy);
-
-    expect(setting).toMatchObject({
-      customSubsystemId: "test",
-      key: "int_value",
-      type: "int32",
-      value: 42,
-    });
-  });
 });

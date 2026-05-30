@@ -122,40 +122,24 @@ export function settingsExportToJson(
 export function parseSettingsExportJson(json: string): ExportedSetting[] {
   const parsed: unknown = JSON.parse(json);
 
-  // New format: { customSubsystems: { [id]: [...] } }
-  if (isRecord(parsed) && isRecord(parsed.customSubsystems)) {
-    const result: ExportedSetting[] = [];
-    for (const [customSubsystemId, subsystemSettings] of Object.entries(
-      parsed.customSubsystems
-    )) {
-      if (!Array.isArray(subsystemSettings)) {
-        throw new Error(
-          `customSubsystems.${customSubsystemId} must be an array`
-        );
-      }
-      for (let i = 0; i < subsystemSettings.length; i++) {
-        result.push(
-          parseSubsystemSetting(subsystemSettings[i], customSubsystemId, i)
-        );
-      }
+  if (!isRecord(parsed) || !isRecord(parsed.customSubsystems)) {
+    throw new Error("JSON must contain a customSubsystems object");
+  }
+
+  const result: ExportedSetting[] = [];
+  for (const [customSubsystemId, subsystemSettings] of Object.entries(
+    parsed.customSubsystems
+  )) {
+    if (!Array.isArray(subsystemSettings)) {
+      throw new Error(`customSubsystems.${customSubsystemId} must be an array`);
     }
-    return result;
+    for (let i = 0; i < subsystemSettings.length; i++) {
+      result.push(
+        parseSubsystemSetting(subsystemSettings[i], customSubsystemId, i)
+      );
+    }
   }
-
-  // Legacy format: flat array or { settings: [...] }
-  const settings = Array.isArray(parsed)
-    ? parsed
-    : isRecord(parsed) && Array.isArray(parsed.settings)
-      ? parsed.settings
-      : null;
-
-  if (!settings) {
-    throw new Error(
-      "JSON must contain a customSubsystems object or settings array"
-    );
-  }
-
-  return settings.map((entry, index) => parseExportedSetting(entry, index));
+  return result;
 }
 
 export function exportedSettingValueToProto(
@@ -238,16 +222,6 @@ function exportedScalarValueToProto(setting: ExportedSetting): SettingValue {
       }
       return { stringValue: setting.value };
   }
-}
-
-function parseExportedSetting(entry: unknown, index: number): ExportedSetting {
-  const label = `settings[${index}]`;
-  if (!isRecord(entry)) {
-    throw new Error(`${label} must be an object`);
-  }
-
-  const customSubsystemId = readString(entry, "customSubsystemId", label);
-  return parseSubsystemSetting(entry, customSubsystemId, label);
 }
 
 function parseSubsystemSetting(
