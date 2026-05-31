@@ -281,8 +281,11 @@ See [web/README.md](./web/README.md) for web development commands.
 The `tests/zmk-config` build enables `CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES`
 for module-enabled artifacts. Flash `custom_settings_board_with_rpc` to a real
 device to test Studio RPC with the sample custom subsystem `zmk_config_sample`.
-It registers int32, bool, string, bytes, bytes-with-RPC-conversion, array,
-private, secure, HID usage, layer id, and behavior id settings where supported.
+For split testing, flash `custom_settings_split_central_with_rpc_relay` to the
+central half and `custom_settings_split_peripheral_with_rpc_relay` to the
+peripheral half. The sample subsystem registers int32, bool, string, bytes,
+bytes-with-RPC-conversion, array, private, secure, HID usage, layer id, and
+behavior id settings where supported.
 
 ```bash
 # Run unit test + build test and verify the results

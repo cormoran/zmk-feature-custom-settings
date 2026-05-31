@@ -132,6 +132,33 @@ class WestCommandsTests(unittest.TestCase):
                         b"array_value",
                     ],
                 ),
+                "custom_settings_split_central_with_rpc_relay": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_CUSTOM_SETTINGS=y",
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
+                        "CONFIG_ZMK_SPLIT=y",
+                        "CONFIG_ZMK_SPLIT_BLE=y",
+                        "CONFIG_ZMK_SPLIT_ROLE_CENTRAL=y",
+                        "CONFIG_ZMK_SPLIT_BLE_CENTRAL_PERIPHERALS=1",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y",
+                        "CONFIG_ZMK_STUDIO_TRANSPORT_UART=y",
+                        "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
+                    ],
+                    device=[],
+                    binary=[
+                        b"zmk_config_sample",
+                        b"int32_value",
+                        b"bool_value",
+                        b"string_value",
+                        b"bytes_value",
+                        b"bytes_rpc_value",
+                        b"array_value",
+                    ],
+                ),
             }
         )
 
