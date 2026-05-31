@@ -43,9 +43,15 @@ config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
 
 config ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
     int "Maximum encoded custom settings relay payload size"
-    default 192
+    default 12
     range 1 255
     depends on ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
+    help
+      ZMK's default split relay event payload is 14 bytes. The custom settings
+      relay event reserves one byte for the source and one byte for the encoded
+      payload size, leaving 12 bytes for the encoded custom settings payload.
+      Increase this together with CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN for
+      larger relayed requests or notifications.
 
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
