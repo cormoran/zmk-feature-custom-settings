@@ -76,6 +76,11 @@ CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=57
 CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
 ```
 
+Only the central half needs `CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y`. Split
+peripherals can leave Studio and custom settings Studio RPC disabled; enabling
+`CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY` is enough to build the protobuf
+relay handler.
+
 The custom settings relay payload defaults to 55 bytes, so the split relay event
 data length must be at least 57 bytes. Larger keys, setting values, or
 metadata-heavy list responses may need a larger BLE MTU and matching relay

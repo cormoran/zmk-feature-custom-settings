@@ -8,7 +8,7 @@ if ZMK_CUSTOM_SETTINGS
 config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum custom setting value size"
     default 64
-    range 1 64 if ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       The Studio RPC protobuf schema currently supports values up to 64 bytes.
 
@@ -19,22 +19,26 @@ config ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN
 config ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN
     int "Maximum custom setting key length"
     default 48
-    range 1 48 if ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    range 1 48 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       The Studio RPC protobuf schema currently supports keys up to 48 bytes.
 
-config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
-    bool "Enable custom settings Studio RPC"
-    depends on ZMK_STUDIO
+config ZMK_CUSTOM_SETTINGS_PROTOBUF
+    bool
     select NANOPB
     imply NANOPB_NO_ERRMSG
     imply NANOPB_WITHOUT_64BIT
     imply NANOPB_NO_ENCODE_SIZE_CHECK
 
+config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    bool "Enable custom settings Studio RPC"
+    depends on ZMK_STUDIO
+    select ZMK_CUSTOM_SETTINGS_PROTOBUF
+
 config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
     bool "Relay custom settings RPC across split halves"
-    depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     depends on ZMK_SPLIT_RELAY_EVENT
+    select ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       Relays custom settings RPC requests to split peripherals and encoded
       setting notifications back to the central side. Increase

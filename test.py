@@ -73,6 +73,7 @@ class WestCommandsTests(unittest.TestCase):
                     config=[
                         "CONFIG_ZMK_STUDIO=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
                         "CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128",
@@ -95,6 +96,7 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_CUSTOM_SETTINGS=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
                         "# CONFIG_ZMK_STUDIO is not set",
+                        NotFound("CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF"),
                         NotFound("CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC"),
                     ],
                     device=[],
@@ -111,8 +113,9 @@ class WestCommandsTests(unittest.TestCase):
                 "custom_settings_split_peripheral_with_rpc_relay": ConfigAndDeviceTree(
                     config=[
                         "CONFIG_ZMK_CUSTOM_SETTINGS=y",
-                        "CONFIG_ZMK_STUDIO=y",
-                        "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
+                        "# CONFIG_ZMK_STUDIO is not set",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF=y",
+                        NotFound("CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC"),
                         "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
                         "CONFIG_ZMK_SPLIT=y",
                         "CONFIG_ZMK_SPLIT_BLE=y",
@@ -137,6 +140,7 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_CUSTOM_SETTINGS=y",
                         "CONFIG_ZMK_STUDIO=y",
                         "CONFIG_ZMK_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
                         "CONFIG_ZMK_SPLIT=y",

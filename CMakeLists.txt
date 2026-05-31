@@ -12,7 +12,7 @@ if(CONFIG_ZMK_CUSTOM_SETTINGS)
         target_sources(app PRIVATE src/test/zmk_config_sample_settings.c)
     endif()
 
-    if(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC)
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF)
         target_sources(app PRIVATE src/studio/custom_settings_handler.c)
 
         list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)

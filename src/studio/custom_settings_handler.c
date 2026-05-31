@@ -19,9 +19,9 @@
 #include <cormoran/zmk/custom_settings.h>
 #include <cormoran/zmk/custom_settings/custom_settings.pb.h>
 #include <cormoran/zmk/custom_settings/custom_settings_relay.pb.h>
-#include <zmk/studio/core.h>
 #include <zmk/workqueue.h>
-#if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC) && IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
+#include <zmk/studio/core.h>
 #include <zmk/studio/custom.h>
 #define ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC 1
 #else
