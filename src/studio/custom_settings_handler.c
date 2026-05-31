@@ -18,6 +18,7 @@
 #include <zephyr/sys/util.h>
 #include <cormoran/zmk/custom_settings.h>
 #include <cormoran/zmk/custom_settings/custom_settings.pb.h>
+#include <cormoran/zmk/custom_settings/custom_settings_relay.pb.h>
 #include <zmk/studio/core.h>
 #include <zmk/workqueue.h>
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
