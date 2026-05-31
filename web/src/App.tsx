@@ -31,6 +31,12 @@ const LIST_REQUEST_TIMEOUT_MS = 5000;
 const SOURCE_LOCAL = 0;
 const SOURCE_ALL = 0xffffffff;
 
+type SettingGroup = {
+  key: string;
+  setting: Setting;
+  settings: Setting[];
+};
+
 enum EditorValueType {
   Int32 = "int32",
   Bool = "bool",
@@ -106,6 +112,7 @@ export function RPCTestSection() {
   const [isArray, setIsArray] = useState(false);
   const [arrayIndex, setArrayIndex] = useState(0);
   const [arraySize, setArraySize] = useState(1);
+  const [editorSource, setEditorSource] = useState(SOURCE_LOCAL);
   const [requireMeta, setRequireMeta] = useState(false);
   const [writeMode, setWriteMode] = useState<SettingWriteMode>(
     SettingWriteMode.SETTING_WRITE_MODE_MEMORY
@@ -129,7 +136,7 @@ export function RPCTestSection() {
   const settingRef = {
     customSubsystemIndex: editorSubsystem?.index,
     key: editorSettingKey,
-    source: setting?.source ?? SOURCE_LOCAL,
+    source: editorSource,
     arrayIndex: isArray ? arrayIndex : undefined,
   };
 
@@ -513,13 +520,12 @@ export function RPCTestSection() {
   const resetSettings = () =>
     sendRequest(Request.create({ resetSettings: { scope: settingScope } }));
 
-  const selectSettingForEdit = (nextSetting: Setting) => {
-    if (setting && settingsMatch(setting, nextSetting)) {
-      setSetting(null);
-      return;
-    }
-
+  const applySettingToEditor = (
+    nextSetting: Setting,
+    nextSource = nextSetting.source
+  ) => {
     setSetting(nextSetting);
+    setEditorSource(nextSource);
     setEditorCustomSubsystemId(
       subsystemIdentifierForIndex(nextSetting.customSubsystemIndex) ??
         `${nextSetting.customSubsystemIndex}`
@@ -537,6 +543,33 @@ export function RPCTestSection() {
     } else {
       setValueType(EditorValueType.Int32);
       setValue("");
+    }
+  };
+
+  const selectSettingForEdit = (nextSetting: Setting) => {
+    if (setting && sameSettingIdentity(setting, nextSetting)) {
+      setSetting(null);
+      return;
+    }
+
+    applySettingToEditor(nextSetting);
+  };
+
+  const handleEditorSourceChange = (nextSource: number) => {
+    if (!setting) {
+      setEditorSource(nextSource);
+      return;
+    }
+
+    const matchingSetting = listedSettings.find(
+      (listedSetting) =>
+        sameSettingIdentity(setting, listedSetting) &&
+        listedSetting.source === nextSource
+    );
+    if (matchingSetting) {
+      applySettingToEditor(matchingSetting, nextSource);
+    } else {
+      setEditorSource(nextSource);
     }
   };
 
@@ -621,12 +654,29 @@ export function RPCTestSection() {
     : undefined;
   const selectedSettingValueHidden =
     setting !== null && setting.value === undefined;
+  const selectedSourceOptions = setting
+    ? sourceOptionsForSetting(setting, listedSettings)
+    : [];
+  const settingGroups = groupSettings(listedSettings);
   const updateValuePanel = setting ? (
     <section className="settings-panel settings-editor-panel">
       <h3>Update Value</h3>
       <div className="form-grid">
         <span className="form-label">Setting</span>
         <span className="form-value">{selectedSettingDisplayName}</span>
+
+        <label htmlFor="source-input">Source</label>
+        <select
+          id="source-input"
+          value={editorSource}
+          onChange={(e) => handleEditorSourceChange(Number(e.target.value))}
+        >
+          {selectedSourceOptions.map((source) => (
+            <option key={source} value={source}>
+              {formatSource(source)}
+            </option>
+          ))}
+        </select>
 
         {selectedSettingValueType ? (
           <>
@@ -784,38 +834,48 @@ export function RPCTestSection() {
               <thead>
                 <tr>
                   <th>Setting</th>
+                  <th>Source</th>
                   <th>Value</th>
                   <th>Unsaved</th>
-                  <th>Source</th>
                 </tr>
               </thead>
               <tbody>
-                {listedSettings.map((listedSetting, index) => {
+                {settingGroups.map((group) => {
                   const isSelected =
-                    setting !== null && settingsMatch(setting, listedSetting);
+                    setting !== null &&
+                    sameSettingIdentity(setting, group.setting);
                   return (
-                    <Fragment key={settingRowKey(listedSetting, index)}>
-                      <tr className={isSelected ? "selected-setting-row" : ""}>
-                        <td>
-                          <button
-                            className="link-button"
-                            type="button"
-                            onClick={() => selectSettingForEdit(listedSetting)}
-                          >
-                            {settingDisplayName(
-                              listedSetting,
-                              subsystemIdentifierForIndex
-                            )}
-                          </button>
-                        </td>
-                        <td>
-                          {listedSetting.value
-                            ? formatValue(listedSetting.value)
-                            : "(hidden)"}
-                        </td>
-                        <td>{listedSetting.hasUnsavedValue ? "yes" : "no"}</td>
-                        <td>{formatSource(listedSetting.source)}</td>
-                      </tr>
+                    <Fragment key={group.key}>
+                      {group.settings.map((groupSetting, index) => (
+                        <tr
+                          className={isSelected ? "selected-setting-row" : ""}
+                          key={`${groupSetting.source}:${index}`}
+                        >
+                          {index === 0 && (
+                            <td rowSpan={group.settings.length}>
+                              <button
+                                className="link-button"
+                                type="button"
+                                onClick={() =>
+                                  selectSettingForEdit(group.setting)
+                                }
+                              >
+                                {settingDisplayName(
+                                  group.setting,
+                                  subsystemIdentifierForIndex
+                                )}
+                              </button>
+                            </td>
+                          )}
+                          <td>{formatSource(groupSetting.source)}</td>
+                          <td>
+                            {groupSetting.value
+                              ? formatValue(groupSetting.value)
+                              : "(hidden)"}
+                          </td>
+                          <td>{groupSetting.hasUnsavedValue ? "yes" : "no"}</td>
+                        </tr>
+                      ))}
                       {isSelected && (
                         <tr className="settings-editor-row">
                           <td colSpan={4}>{updateValuePanel}</td>
@@ -874,6 +934,10 @@ export function RPCTestSection() {
                 ? `${setting.value.arrayValue.index}/${setting.value.arrayValue.size}`
                 : "no"}
             </dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>{formatSource(editorSource)}</dd>
           </div>
           <div>
             <dt>Unsaved</dt>
@@ -947,14 +1011,64 @@ function formatBytesValue(value: Uint8Array): string {
     .join(" ");
 }
 
-function settingRowKey(setting: Setting, index: number): string {
+function settingGroupKey(setting: Setting): string {
   const arrayIndex = setting.value?.arrayValue?.index ?? "scalar";
-  return `${setting.source}:${setting.customSubsystemIndex}:${setting.key}:${arrayIndex}:${index}`;
+  return `${setting.customSubsystemIndex}:${setting.key}:${arrayIndex}`;
 }
 
-function settingsMatch(a: Setting, b: Setting): boolean {
+function groupSettings(settings: Setting[]): SettingGroup[] {
+  const groups = new Map<string, SettingGroup>();
+
+  for (const setting of settings) {
+    const key = settingGroupKey(setting);
+    const group = groups.get(key);
+    if (group) {
+      group.settings.push(setting);
+    } else {
+      groups.set(key, { key, setting, settings: [setting] });
+    }
+  }
+
+  return Array.from(groups.values()).map((group) => {
+    const sortedSettings = sortSettingsBySource(group.settings);
+    return {
+      ...group,
+      setting: sortedSettings[0],
+      settings: sortedSettings,
+    };
+  });
+}
+
+function sortSettingsBySource(settings: Setting[]): Setting[] {
+  return [...settings].sort(
+    (a, b) => sourceSortValue(a.source) - sourceSortValue(b.source)
+  );
+}
+
+function sourceOptionsForSetting(
+  setting: Setting,
+  listedSettings: Setting[]
+): number[] {
+  const sources = new Set<number>([setting.source, SOURCE_ALL]);
+  for (const listedSetting of listedSettings) {
+    if (sameSettingIdentity(setting, listedSetting)) {
+      sources.add(listedSetting.source);
+    }
+  }
+
+  return Array.from(sources).sort(
+    (a, b) => sourceSortValue(a) - sourceSortValue(b)
+  );
+}
+
+function sourceSortValue(source: number): number {
+  if (source === SOURCE_LOCAL) return -1;
+  if (source === SOURCE_ALL) return Number.MAX_SAFE_INTEGER;
+  return source;
+}
+
+function sameSettingIdentity(a: Setting, b: Setting): boolean {
   return (
-    a.source === b.source &&
     a.customSubsystemIndex === b.customSubsystemIndex &&
     a.key === b.key &&
     (a.value?.arrayValue?.index ?? undefined) ===

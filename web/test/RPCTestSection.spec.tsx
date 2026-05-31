@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   createConnectedMockZMKApp,
@@ -121,6 +121,60 @@ describe("RPCTestSection Component", () => {
       ).not.toBeInTheDocument();
     });
 
+    it("should group listed settings by key across sources", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        source: 0,
+        value: { int32Value: 42 },
+      });
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        source: 2,
+        hasUnsavedValue: true,
+        value: { int32Value: 77 },
+      });
+
+      const settingButtons = await screen.findAllByRole(
+        "button",
+        { name: "test/int_value" },
+        { timeout: 2000 }
+      );
+      expect(settingButtons).toHaveLength(1);
+      expect(
+        (settingButtons[0].closest("td") as HTMLTableCellElement).rowSpan
+      ).toBe(2);
+
+      const table = screen.getByRole("table");
+      expect(
+        within(table).getByRole("columnheader", { name: "Setting" })
+      ).toBeInTheDocument();
+      expect(
+        within(table).getByRole("columnheader", { name: "Source" })
+      ).toBeInTheDocument();
+      expect(
+        within(table).getByRole("columnheader", { name: "Value" })
+      ).toBeInTheDocument();
+      expect(
+        within(table).getByRole("columnheader", { name: "Unsaved" })
+      ).toBeInTheDocument();
+      expect(within(table).getByText("local")).toBeInTheDocument();
+      expect(within(table).getByText("2")).toBeInTheDocument();
+      expect(within(table).getByText("42")).toBeInTheDocument();
+      expect(within(table).getByText("77")).toBeInTheDocument();
+      expect(within(table).getByText("yes")).toBeInTheDocument();
+    });
+
     it("should show array commands for clicked array setting", async () => {
       const mockZMKApp = createConnectedMockZMKApp({
         subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
@@ -185,6 +239,7 @@ describe("RPCTestSection Component", () => {
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
+      expect(screen.getByLabelText(/^Source$/i)).toHaveValue("2");
       await userEvent.click(screen.getByRole("button", { name: "Write" }));
 
       await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
@@ -194,6 +249,45 @@ describe("RPCTestSection Component", () => {
         customSubsystemIndex: 1,
         key: "int_value",
         source: 2,
+      });
+    });
+
+    it("should write all split sources from the editor source selector", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        source: 2,
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/int_value" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+      await userEvent.selectOptions(
+        screen.getByLabelText(/^Source$/i),
+        `${0xffffffff}`
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Write" }));
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+
+      expect(request.writeSetting?.setting).toMatchObject({
+        customSubsystemIndex: 1,
+        key: "int_value",
+        source: 0xffffffff,
       });
     });
 
