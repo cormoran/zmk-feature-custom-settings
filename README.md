@@ -81,10 +81,10 @@ peripherals can leave Studio and custom settings Studio RPC disabled; enabling
 `CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY` is enough to build the protobuf
 relay handler.
 
-The custom settings relay payload defaults to 55 bytes, so the split relay event
-data length must be at least 57 bytes. Larger keys, setting values, or
-metadata-heavy list responses may need a larger BLE MTU and matching relay
-event/custom settings payload sizes.
+The custom settings relay payload size is
+`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN - 2`; the two overhead bytes store the
+source and encoded payload size. Larger keys, setting values, or metadata-heavy
+list responses may need a larger BLE MTU and split relay event data size.
 
 ### Register Settings
 

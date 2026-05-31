@@ -38,6 +38,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define SUBSYSTEM_IDENTIFIER_STRING "cormoran_custom_settings"
 #define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
 #define LIST_SETTINGS_RELAY_DELAY K_MSEC(20)
+#define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD 2
+#define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE                                                 \
+    (CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN - ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD)
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
@@ -91,16 +94,23 @@ struct zmk_custom_settings_setting_scope {
 };
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+BUILD_ASSERT(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN > ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for custom settings relay "
+             "payloads");
+BUILD_ASSERT(ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE <= UINT8_MAX,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too large for custom settings relay "
+             "payload_size");
+
 struct zmk_custom_settings_relay_request {
     uint8_t source;
     uint8_t payload_size;
-    uint8_t payload[CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
+    uint8_t payload[ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
 } __packed;
 
 struct zmk_custom_settings_relay_notification {
     uint8_t source;
     uint8_t payload_size;
-    uint8_t payload[CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
+    uint8_t payload[ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
 } __packed;
 
 BUILD_ASSERT(sizeof(struct zmk_custom_settings_relay_request) <=
