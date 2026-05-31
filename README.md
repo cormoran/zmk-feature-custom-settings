@@ -72,12 +72,13 @@ For split keyboards, enable ZMK's relay-event transport on both halves:
 
 ```conf
 CONFIG_ZMK_SPLIT_RELAY_EVENT=y
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=57
 CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
 ```
 
-By default, this uses ZMK's 14-byte split relay event payload and reserves 12
-bytes for encoded custom settings relay payloads. Larger keys, setting values,
-or metadata-heavy list responses may need a larger BLE MTU and matching relay
+The custom settings relay payload defaults to 55 bytes, so the split relay event
+data length must be at least 57 bytes. Larger keys, setting values, or
+metadata-heavy list responses may need a larger BLE MTU and matching relay
 event/custom settings payload sizes.
 
 ### Register Settings
