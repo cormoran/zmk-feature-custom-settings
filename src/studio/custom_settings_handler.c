@@ -651,28 +651,37 @@ static cormoran_zmk_custom_settings_RelayNotification notification_relay_buffer;
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+static K_MUTEX_DEFINE(relay_notification_decode_lock);
+static cormoran_zmk_custom_settings_RelayNotification relay_notification_decode_buffer;
+
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
                                           cormoran_zmk_custom_settings_Notification *notification) {
-    cormoran_zmk_custom_settings_RelayNotification relay =
+    k_mutex_lock(&relay_notification_decode_lock, K_FOREVER);
+
+    cormoran_zmk_custom_settings_RelayNotification *relay = &relay_notification_decode_buffer;
+    *relay = (cormoran_zmk_custom_settings_RelayNotification)
         cormoran_zmk_custom_settings_RelayNotification_init_zero;
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
-    if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, &relay)) {
+    if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
+        k_mutex_unlock(&relay_notification_decode_lock);
         return -EIO;
     }
 
-    *notification = relay.notification;
+    *notification = relay->notification;
     if (notification->which_notification_type !=
             cormoran_zmk_custom_settings_Notification_setting_tag ||
         !notification->notification_type.setting.has_setting) {
+        k_mutex_unlock(&relay_notification_decode_lock);
         return 0;
     }
 
-    if (relay.has_custom_subsystem_id) {
+    if (relay->has_custom_subsystem_id) {
         uint32_t custom_subsystem_index = 0;
-        int ret = custom_subsystem_index_for_identifier(relay.custom_subsystem_id,
+        int ret = custom_subsystem_index_for_identifier(relay->custom_subsystem_id,
                                                         &custom_subsystem_index);
         if (ret < 0) {
+            k_mutex_unlock(&relay_notification_decode_lock);
             return ret;
         }
         notification->notification_type.setting.setting.custom_subsystem_index =
@@ -680,6 +689,7 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     }
     notification->notification_type.setting.setting.source = ev->source;
 
+    k_mutex_unlock(&relay_notification_decode_lock);
     return 0;
 }
 
@@ -2029,6 +2039,35 @@ static int relay_request_listener(const zmk_event_t *eh) {
 }
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+static void relay_notification_work_handler(struct k_work *work);
+
+K_MSGQ_DEFINE(relay_notification_msgq, sizeof(struct zmk_custom_settings_relay_notification),
+              CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_NOTIFICATION_QUEUE_SIZE, 4);
+K_WORK_DEFINE(relay_notification_work, relay_notification_work_handler);
+
+static void relay_notification_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    struct zmk_custom_settings_relay_notification ev;
+    while (k_msgq_get(&relay_notification_msgq, &ev, K_NO_WAIT) == 0) {
+        k_mutex_lock(&notification_buffer_lock, K_FOREVER);
+        notification_buffer = (cormoran_zmk_custom_settings_Notification)
+            cormoran_zmk_custom_settings_Notification_init_zero;
+        int ret = relayed_notification_to_public(&ev, &notification_buffer);
+        if (ret < 0) {
+            LOG_WRN("Failed to convert relayed custom settings notification: %d", ret);
+            k_mutex_unlock(&notification_buffer_lock);
+            continue;
+        }
+
+        ret = raise_encoded_studio_notification(&notification_buffer);
+        if (ret < 0) {
+            LOG_WRN("Failed to raise relayed custom settings notification: %d", ret);
+        }
+        k_mutex_unlock(&notification_buffer_lock);
+    }
+}
+
 static int relay_notification_listener(const zmk_event_t *eh) {
     const struct zmk_custom_settings_relay_notification *ev =
         as_zmk_custom_settings_relay_notification(eh);
@@ -2039,18 +2078,17 @@ static int relay_notification_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    k_mutex_lock(&notification_buffer_lock, K_FOREVER);
-    notification_buffer = (cormoran_zmk_custom_settings_Notification)
-        cormoran_zmk_custom_settings_Notification_init_zero;
-    int ret = relayed_notification_to_public(ev, &notification_buffer);
+    int ret = k_msgq_put(&relay_notification_msgq, ev, K_NO_WAIT);
     if (ret < 0) {
-        LOG_WRN("Failed to convert relayed custom settings notification: %d", ret);
-        k_mutex_unlock(&notification_buffer_lock);
+        LOG_WRN("Failed to queue relayed custom settings notification: %d", ret);
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    raise_encoded_studio_notification(&notification_buffer);
-    k_mutex_unlock(&notification_buffer_lock);
+    ret = k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &relay_notification_work);
+    if (ret < 0) {
+        LOG_WRN("Failed to submit relayed custom settings notification work: %d", ret);
+    }
+
     return ZMK_EV_EVENT_BUBBLE;
 }
 #endif

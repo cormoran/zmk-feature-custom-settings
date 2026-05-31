@@ -61,6 +61,15 @@ config ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_QUEUE_SIZE
       Maximum number of relayed custom settings requests that can wait for
       low-priority workqueue processing.
 
+config ZMK_CUSTOM_SETTINGS_RELAY_NOTIFICATION_QUEUE_SIZE
+    int "Maximum queued custom settings relay notifications"
+    default 4
+    range 1 16
+    depends on ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
+    help
+      Maximum number of relayed custom settings notifications that can wait for
+      low-priority workqueue processing.
+
 config ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE
     int "Maximum queued custom settings notifications"
     default 8
