@@ -68,15 +68,24 @@ keys are limited to 48 bytes by the generated RPC schema.
 
 ### Split Keyboards
 
-For split keyboards, enable ZMK's relay-event transport on both halves and size
-the relay event buffer for the setting notifications you expect to relay:
+For split keyboards, enable ZMK's relay-event transport on both halves:
 
 ```conf
 CONFIG_ZMK_SPLIT_RELAY_EVENT=y
-CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN=4
-CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
 CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
+# Optionally increase relay event data max length
+# CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
 ```
+
+Only the central half needs `CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y`. Split
+peripherals can leave Studio and custom settings Studio RPC disabled; enabling
+`CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY` is enough to build the protobuf
+relay handler.
+
+The custom settings relay payload size is
+`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN - 2`; the two overhead bytes store the
+source and encoded payload size. Larger keys, setting values, or metadata-heavy
+list responses may need a larger BLE MTU and split relay event data size.
 
 ### Register Settings
 
@@ -114,31 +123,31 @@ and Studio custom subsystem requests.
 
 #### Value Types
 
-| Value type | Default value helper | Description |
-| --- | --- | --- |
-| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES` | `ZMK_CUSTOM_SETTING_VALUE_BYTES(...)` | Raw bytes. Use this for binary data or for module-defined data that needs custom RPC conversion hooks. |
-| `ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32` | `ZMK_CUSTOM_SETTING_VALUE_INT32(value)` | Signed 32-bit integer. Use this for numeric settings, indexes, and IDs. |
-| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL` | `ZMK_CUSTOM_SETTING_VALUE_BOOL(value)` | Boolean setting. |
-| `ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING` | `ZMK_CUSTOM_SETTING_VALUE_STRING(value)` | UTF-8/string setting stored with an explicit byte length. |
+| Value type                             | Default value helper                     | Description                                                                                            |
+| -------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES`  | `ZMK_CUSTOM_SETTING_VALUE_BYTES(...)`    | Raw bytes. Use this for binary data or for module-defined data that needs custom RPC conversion hooks. |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32`  | `ZMK_CUSTOM_SETTING_VALUE_INT32(value)`  | Signed 32-bit integer. Use this for numeric settings, indexes, and IDs.                                |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL`   | `ZMK_CUSTOM_SETTING_VALUE_BOOL(value)`   | Boolean setting.                                                                                       |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING` | `ZMK_CUSTOM_SETTING_VALUE_STRING(value)` | UTF-8/string setting stored with an explicit byte length.                                              |
 
 #### Confidentiality
 
-| Confidentiality | RPC behavior | Typical use |
-| --- | --- | --- |
-| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE` | Value is not exposed over RPC. | Device-local secrets or implementation details that Studio clients should not read. |
-| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL` | Value may be read over RPC, but clients should treat it as personal data and avoid publishing it. | User-specific preferences or values that may identify the user's setup. |
-| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC` | Value may be read over RPC and exported/shared by clients. | Layout, behavior, or tuning settings intended to be portable. |
+| Confidentiality                                     | RPC behavior                                                                                      | Typical use                                                                         |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE` | Value is not exposed over RPC.                                                                    | Device-local secrets or implementation details that Studio clients should not read. |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PERSONAL`   | Value may be read over RPC, but clients should treat it as personal data and avoid publishing it. | User-specific preferences or values that may identify the user's setup.             |
+| `ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC`     | Value may be read over RPC and exported/shared by clients.                                        | Layout, behavior, or tuning settings intended to be portable.                       |
 
 #### Constraints
 
-| Constraint helper or type | Applies to | Description |
-| --- | --- | --- |
-| `ZMK_CUSTOM_SETTING_NO_CONSTRAINT` | Any type | No validation beyond matching the registered value type. |
-| `ZMK_CUSTOM_SETTING_RANGE_INT32(min, max)` | `INT32` | Requires the integer value to be between `min` and `max`, inclusive. |
-| `ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS` | Any scalar type | Requires the value to match one of the provided `struct zmk_custom_setting_options` entries. Optional labels are exposed in RPC metadata. |
-| `ZMK_CUSTOM_SETTING_HID_USAGE(usage_page, usage_min, usage_max)` | `INT32` | Requires an encoded HID usage whose page matches `usage_page` and whose usage is within the inclusive range. |
-| `ZMK_CUSTOM_SETTING_LAYER_ID` | `INT32` | Requires a valid local ZMK layer ID. |
-| `ZMK_CUSTOM_SETTING_BEHAVIOR_ID` | `INT32` | Requires a valid local ZMK behavior ID when behavior local IDs are enabled. |
+| Constraint helper or type                                        | Applies to      | Description                                                                                                                               |
+| ---------------------------------------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `ZMK_CUSTOM_SETTING_NO_CONSTRAINT`                               | Any type        | No validation beyond matching the registered value type.                                                                                  |
+| `ZMK_CUSTOM_SETTING_RANGE_INT32(min, max)`                       | `INT32`         | Requires the integer value to be between `min` and `max`, inclusive.                                                                      |
+| `ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS`                          | Any scalar type | Requires the value to match one of the provided `struct zmk_custom_setting_options` entries. Optional labels are exposed in RPC metadata. |
+| `ZMK_CUSTOM_SETTING_HID_USAGE(usage_page, usage_min, usage_max)` | `INT32`         | Requires an encoded HID usage whose page matches `usage_page` and whose usage is within the inclusive range.                              |
+| `ZMK_CUSTOM_SETTING_LAYER_ID`                                    | `INT32`         | Requires a valid local ZMK layer ID.                                                                                                      |
+| `ZMK_CUSTOM_SETTING_BEHAVIOR_ID`                                 | `INT32`         | Requires a valid local ZMK behavior ID when behavior local IDs are enabled.                                                               |
 
 ### Bytes RPC Conversion
 
@@ -281,8 +290,11 @@ See [web/README.md](./web/README.md) for web development commands.
 The `tests/zmk-config` build enables `CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES`
 for module-enabled artifacts. Flash `custom_settings_board_with_rpc` to a real
 device to test Studio RPC with the sample custom subsystem `zmk_config_sample`.
-It registers int32, bool, string, bytes, bytes-with-RPC-conversion, array,
-private, secure, HID usage, layer id, and behavior id settings where supported.
+For split testing, flash `custom_settings_split_central_with_rpc_relay` to the
+central half and `custom_settings_split_peripheral_with_rpc_relay` to the
+peripheral half. The sample subsystem registers int32, bool, string, bytes,
+bytes-with-RPC-conversion, array, private, secure, HID usage, layer id, and
+behavior id settings where supported.
 
 ```bash
 # Run unit test + build test and verify the results

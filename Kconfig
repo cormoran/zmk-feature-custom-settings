@@ -8,7 +8,7 @@ if ZMK_CUSTOM_SETTINGS
 config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum custom setting value size"
     default 64
-    range 1 64 if ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       The Studio RPC protobuf schema currently supports values up to 64 bytes.
 
@@ -19,33 +19,57 @@ config ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN
 config ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN
     int "Maximum custom setting key length"
     default 48
-    range 1 48 if ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    range 1 48 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       The Studio RPC protobuf schema currently supports keys up to 48 bytes.
 
-config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
-    bool "Enable custom settings Studio RPC"
-    depends on ZMK_STUDIO
+config ZMK_CUSTOM_SETTINGS_PROTOBUF
+    bool
     select NANOPB
     imply NANOPB_NO_ERRMSG
     imply NANOPB_WITHOUT_64BIT
     imply NANOPB_NO_ENCODE_SIZE_CHECK
 
+config ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    bool "Enable custom settings Studio RPC"
+    depends on ZMK_STUDIO
+    select ZMK_CUSTOM_SETTINGS_PROTOBUF
+
 config ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
     bool "Relay custom settings RPC across split halves"
-    depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     depends on ZMK_SPLIT_RELAY_EVENT
+    select ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       Relays custom settings RPC requests to split peripherals and encoded
       setting notifications back to the central side. Increase
       CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN if your request or notification
       payloads exceed the default split relay event payload size.
 
-config ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
-    int "Maximum encoded custom settings relay payload size"
-    default 192
-    range 1 255
+config ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_QUEUE_SIZE
+    int "Maximum queued custom settings relay requests"
+    default 4
+    range 1 16
     depends on ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
+    help
+      Maximum number of relayed custom settings requests that can wait for
+      low-priority workqueue processing.
+
+config ZMK_CUSTOM_SETTINGS_RELAY_NOTIFICATION_QUEUE_SIZE
+    int "Maximum queued custom settings relay notifications"
+    default 4
+    range 1 16
+    depends on ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY
+    help
+      Maximum number of relayed custom settings notifications that can wait for
+      low-priority workqueue processing.
+
+config ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE
+    int "Maximum queued custom settings notifications"
+    default 8
+    range 1 32
+    help
+      Maximum number of setting change notifications that can wait for
+      low-priority workqueue processing.
 
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"

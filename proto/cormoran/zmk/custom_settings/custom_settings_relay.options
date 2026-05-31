@@ -1,0 +1,9 @@
+# Nanopb options for custom_settings_relay.proto.
+
+cormoran.zmk.custom_settings.RelaySettingRef.custom_subsystem_id max_size:32
+cormoran.zmk.custom_settings.RelaySettingRef.key max_size:48
+cormoran.zmk.custom_settings.RelaySettingScope.custom_subsystem_id max_size:32
+cormoran.zmk.custom_settings.RelaySettingScope.key max_size:48
+cormoran.zmk.custom_settings.RelaySettingScope.key_prefix max_size:48
+cormoran.zmk.custom_settings.RelayNotification.custom_subsystem_id max_size:32
+cormoran.zmk.custom_settings.RelayNotification descriptorsize:DS_4

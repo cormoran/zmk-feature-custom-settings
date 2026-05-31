@@ -33,12 +33,12 @@ src/
 ├── App.tsx
 ├── App.css
 └── proto/
-    └── cormoran/zmk/custom_settings/custom_settings.ts
+    ├── cormoran/zmk/custom_settings/custom_settings.ts
+    └── cormoran/zmk/custom_settings/custom_settings_relay.ts
 
 test/
 ├── App.spec.tsx
 └── RPCTestSection.spec.tsx
 ```
 
-The protobuf schema lives at
-`../proto/cormoran/zmk/custom_settings/custom_settings.proto`.
+The protobuf schemas live under `../proto/cormoran/zmk/custom_settings/`.

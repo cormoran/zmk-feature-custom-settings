@@ -18,9 +18,10 @@
 #include <zephyr/sys/util.h>
 #include <cormoran/zmk/custom_settings.h>
 #include <cormoran/zmk/custom_settings/custom_settings.pb.h>
-#include <zmk/studio/core.h>
+#include <cormoran/zmk/custom_settings/custom_settings_relay.pb.h>
 #include <zmk/workqueue.h>
-#if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC) && IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
+#include <zmk/studio/core.h>
 #include <zmk/studio/custom.h>
 #define ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC 1
 #else
@@ -37,6 +38,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define SUBSYSTEM_IDENTIFIER_STRING "cormoran_custom_settings"
 #define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
 #define LIST_SETTINGS_RELAY_DELAY K_MSEC(20)
+#define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD 2
+#define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE                                                 \
+    (CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN - ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD)
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
@@ -90,65 +94,24 @@ struct zmk_custom_settings_setting_scope {
 };
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
-enum zmk_custom_settings_relay_request_type {
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_NONE,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_LIST,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_WRITE,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_DISCARD,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_RESET,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK,
-    ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK,
-};
-
-struct zmk_custom_settings_relay_value {
-    uint8_t type;
-    uint8_t size;
-    union {
-        uint8_t bytes_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
-        int32_t int32_value;
-        bool bool_value;
-        char string_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
-    };
-};
+BUILD_ASSERT(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN > ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for custom settings relay "
+             "payloads");
+BUILD_ASSERT(ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE <= UINT8_MAX,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too large for custom settings relay "
+             "payload_size");
 
 struct zmk_custom_settings_relay_request {
     uint8_t source;
-    uint8_t type;
-    union {
-        struct {
-            bool require_meta;
-            struct zmk_custom_settings_setting_scope scope;
-        } list_settings;
-        struct {
-            bool value_is_array;
-            uint8_t mode;
-            uint32_t array_index;
-            uint32_t array_size;
-            struct zmk_custom_settings_setting_ref setting;
-            struct zmk_custom_settings_relay_value value;
-        } write_setting;
-        struct {
-            uint8_t mode;
-            struct zmk_custom_settings_setting_ref setting;
-            struct zmk_custom_settings_relay_value value;
-        } push_back_array;
-        struct {
-            uint8_t mode;
-            struct zmk_custom_settings_setting_ref setting;
-        } pop_back_array;
-        struct {
-            struct zmk_custom_settings_setting_scope scope;
-        } scope_mutation;
-    } request;
-};
+    uint8_t payload_size;
+    uint8_t payload[ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
+} __packed;
 
 struct zmk_custom_settings_relay_notification {
     uint8_t source;
-    char custom_subsystem_id[CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN];
     uint8_t payload_size;
-    uint8_t payload[CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
-};
+    uint8_t payload[ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE];
+} __packed;
 
 BUILD_ASSERT(sizeof(struct zmk_custom_settings_relay_request) <=
                  CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN,
@@ -174,6 +137,10 @@ ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(zmk_custom_settings_relay_notification, cs
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static uint32_t ref_source(const cormoran_zmk_custom_settings_SettingRef *ref) {
     return ref->has_source ? ref->source : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+}
+
+static bool source_targets_peripherals(uint32_t source) {
+    return source != ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
 }
 #endif
 
@@ -690,33 +657,53 @@ static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *
 
 static K_MUTEX_DEFINE(notification_buffer_lock);
 static cormoran_zmk_custom_settings_Notification notification_buffer;
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+static struct zmk_custom_settings_relay_notification notification_relay_event_buffer;
+static cormoran_zmk_custom_settings_RelayNotification notification_relay_buffer;
+#endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+static K_MUTEX_DEFINE(relay_notification_decode_lock);
+static cormoran_zmk_custom_settings_RelayNotification relay_notification_decode_buffer;
+
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
                                           cormoran_zmk_custom_settings_Notification *notification) {
+    k_mutex_lock(&relay_notification_decode_lock, K_FOREVER);
+
+    cormoran_zmk_custom_settings_RelayNotification *relay = &relay_notification_decode_buffer;
+    *relay = (cormoran_zmk_custom_settings_RelayNotification)
+        cormoran_zmk_custom_settings_RelayNotification_init_zero;
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
-    if (!pb_decode(&stream, cormoran_zmk_custom_settings_Notification_fields, notification)) {
+    if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
+        k_mutex_unlock(&relay_notification_decode_lock);
         return -EIO;
     }
 
+    *notification = relay->notification;
     if (notification->which_notification_type !=
             cormoran_zmk_custom_settings_Notification_setting_tag ||
         !notification->notification_type.setting.has_setting) {
+        k_mutex_unlock(&relay_notification_decode_lock);
         return 0;
     }
 
-    uint32_t custom_subsystem_index = 0;
-    int ret =
-        custom_subsystem_index_for_identifier(ev->custom_subsystem_id, &custom_subsystem_index);
-    if (ret < 0) {
-        return ret;
+    if (relay->has_custom_subsystem_id) {
+        uint32_t custom_subsystem_index = 0;
+        int ret = custom_subsystem_index_for_identifier(relay->custom_subsystem_id,
+                                                        &custom_subsystem_index);
+        if (ret < 0) {
+            k_mutex_unlock(&relay_notification_decode_lock);
+            return ret;
+        }
+        notification->notification_type.setting.setting.custom_subsystem_index =
+            custom_subsystem_index;
     }
-
-    notification->notification_type.setting.setting.custom_subsystem_index = custom_subsystem_index;
     notification->notification_type.setting.setting.source = ev->source;
 
+    k_mutex_unlock(&relay_notification_decode_lock);
     return 0;
 }
 
@@ -759,20 +746,28 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    struct zmk_custom_settings_relay_notification relay_notification = {
+    struct zmk_custom_settings_relay_notification *relay_notification =
+        &notification_relay_event_buffer;
+    *relay_notification = (struct zmk_custom_settings_relay_notification){
         .source = ZMK_RELAY_EVENT_SOURCE_SELF,
     };
-    copy_string(relay_notification.custom_subsystem_id,
-                sizeof(relay_notification.custom_subsystem_id), setting->custom_subsystem_id);
+    cormoran_zmk_custom_settings_RelayNotification *relay = &notification_relay_buffer;
+    *relay = (cormoran_zmk_custom_settings_RelayNotification)
+        cormoran_zmk_custom_settings_RelayNotification_init_zero;
+    relay->has_custom_subsystem_id = true;
+    copy_string(relay->custom_subsystem_id, sizeof(relay->custom_subsystem_id),
+                setting->custom_subsystem_id);
+    relay->has_notification = true;
+    relay->notification = *notification;
     pb_ostream_t stream =
-        pb_ostream_from_buffer(relay_notification.payload, sizeof(relay_notification.payload));
-    if (!pb_encode(&stream, cormoran_zmk_custom_settings_Notification_fields, notification)) {
+        pb_ostream_from_buffer(relay_notification->payload, sizeof(relay_notification->payload));
+    if (!pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to encode custom settings relay notification: %s", PB_GET_ERROR(&stream));
         k_mutex_unlock(&notification_buffer_lock);
         return -EIO;
     }
-    relay_notification.payload_size = stream.bytes_written;
-    ret = raise_zmk_custom_settings_relay_notification(relay_notification);
+    relay_notification->payload_size = stream.bytes_written;
+    ret = raise_zmk_custom_settings_relay_notification(*relay_notification);
 #else
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     int index = custom_subsystem_index();
@@ -1333,26 +1328,19 @@ static int handle_scope_mutation(const cormoran_zmk_custom_settings_SettingScope
 static bool should_relay_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
     switch (req->which_request_type) {
     case cormoran_zmk_custom_settings_Request_list_settings_tag:
-        return scope_source(&req->request_type.list_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.list_settings.scope));
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
-        return scope_source(&req->request_type.save_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.save_settings.scope));
     case cormoran_zmk_custom_settings_Request_discard_settings_tag:
-        return scope_source(&req->request_type.discard_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.discard_settings.scope));
     case cormoran_zmk_custom_settings_Request_reset_settings_tag:
-        return scope_source(&req->request_type.reset_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.reset_settings.scope));
     case cormoran_zmk_custom_settings_Request_write_setting_tag:
-        return ref_source(&req->request_type.write_setting.setting) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(ref_source(&req->request_type.write_setting.setting));
     case cormoran_zmk_custom_settings_Request_push_back_array_tag:
-        return ref_source(&req->request_type.push_back_array.setting) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(ref_source(&req->request_type.push_back_array.setting));
     case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
-        return ref_source(&req->request_type.pop_back_array.setting) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(ref_source(&req->request_type.pop_back_array.setting));
     default:
         return false;
     }
@@ -1444,112 +1432,169 @@ static bool relay_request_unlock_required(const cormoran_zmk_custom_settings_Req
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static int value_to_relay_value(const struct zmk_custom_setting_value *src,
-                                struct zmk_custom_settings_relay_value *dest) {
-    *dest = (struct zmk_custom_settings_relay_value){0};
-    dest->type = src->type;
-    dest->size = src->size;
+static int public_ref_to_relay(const cormoran_zmk_custom_settings_SettingRef *src,
+                               cormoran_zmk_custom_settings_RelaySettingRef *dest) {
+    *dest = (cormoran_zmk_custom_settings_RelaySettingRef)
+        cormoran_zmk_custom_settings_RelaySettingRef_init_zero;
 
-    switch (src->type) {
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
-        if (src->size > sizeof(dest->bytes_value)) {
-            return -EMSGSIZE;
+    if (src->has_custom_subsystem_index) {
+        const char *identifier = custom_subsystem_identifier_for_index(src->custom_subsystem_index);
+        if (!identifier) {
+            return -ENOENT;
         }
-        memcpy(dest->bytes_value, src->bytes_value, src->size);
-        return 0;
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
-        dest->int32_value = src->int32_value;
-        return 0;
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
-        dest->bool_value = src->bool_value;
-        return 0;
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
-        copy_string(dest->string_value, sizeof(dest->string_value), src->string_value);
-        return 0;
-    default:
-        return -EINVAL;
+        dest->has_custom_subsystem_id = true;
+        copy_string(dest->custom_subsystem_id, sizeof(dest->custom_subsystem_id), identifier);
     }
+    if (src->has_key) {
+        dest->has_key = true;
+        copy_string(dest->key, sizeof(dest->key), src->key);
+    }
+    if (src->has_source) {
+        dest->has_source = true;
+        dest->source = src->source == ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           ? ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+    }
+    if (src->has_array_index) {
+        dest->has_array_index = true;
+        dest->array_index = src->array_index;
+    }
+
+    return 0;
+}
+
+static int public_scope_to_relay(const cormoran_zmk_custom_settings_SettingScope *src,
+                                 cormoran_zmk_custom_settings_RelaySettingScope *dest) {
+    *dest = (cormoran_zmk_custom_settings_RelaySettingScope)
+        cormoran_zmk_custom_settings_RelaySettingScope_init_zero;
+
+    if (src->has_custom_subsystem_index) {
+        const char *identifier = custom_subsystem_identifier_for_index(src->custom_subsystem_index);
+        if (!identifier) {
+            return -ENOENT;
+        }
+        dest->has_custom_subsystem_id = true;
+        copy_string(dest->custom_subsystem_id, sizeof(dest->custom_subsystem_id), identifier);
+    }
+    if (src->has_key) {
+        dest->has_key = true;
+        copy_string(dest->key, sizeof(dest->key), src->key);
+    }
+    if (src->has_key_prefix) {
+        dest->has_key_prefix = true;
+        copy_string(dest->key_prefix, sizeof(dest->key_prefix), src->key_prefix);
+    }
+    if (src->has_source) {
+        dest->has_source = true;
+        dest->source = src->source == ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           ? ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+    }
+
+    return 0;
 }
 
 static int request_to_relay_request(const cormoran_zmk_custom_settings_Request *src,
                                     struct zmk_custom_settings_relay_request *dest) {
-    uint8_t source = dest->source;
     *dest = (struct zmk_custom_settings_relay_request){
-        .source = source,
+        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
     };
+
+    cormoran_zmk_custom_settings_RelayRequest relay =
+        cormoran_zmk_custom_settings_RelayRequest_init_zero;
+    int ret;
 
     switch (src->which_request_type) {
     case cormoran_zmk_custom_settings_Request_list_settings_tag:
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_LIST;
-        dest->request.list_settings.require_meta = src->request_type.list_settings.require_meta;
-        return setting_scope_to_private(&src->request_type.list_settings.scope,
-                                        &dest->request.list_settings.scope);
-    case cormoran_zmk_custom_settings_Request_write_setting_tag: {
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_WRITE;
-        dest->request.write_setting.mode = src->request_type.write_setting.mode;
-        int ret = setting_ref_to_private(&src->request_type.write_setting.setting,
-                                         &dest->request.write_setting.setting);
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_list_settings_tag;
+        relay.request_type.list_settings.has_scope = true;
+        ret = public_scope_to_relay(&src->request_type.list_settings.scope,
+                                    &relay.request_type.list_settings.scope);
         if (ret < 0) {
             return ret;
         }
-
-        struct zmk_custom_setting_value value;
-        bool value_is_array = false;
-        uint32_t array_index = 0;
-        uint32_t array_size = 0;
-        ret = proto_to_value(&src->request_type.write_setting.value, &value, &value_is_array,
-                             &array_index, &array_size);
+        relay.request_type.list_settings.require_meta =
+            src->request_type.list_settings.require_meta;
+        break;
+    case cormoran_zmk_custom_settings_Request_write_setting_tag:
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_write_setting_tag;
+        relay.request_type.write_setting.has_setting = true;
+        ret = public_ref_to_relay(&src->request_type.write_setting.setting,
+                                  &relay.request_type.write_setting.setting);
         if (ret < 0) {
             return ret;
         }
-        dest->request.write_setting.value_is_array = value_is_array;
-        dest->request.write_setting.array_index = array_index;
-        dest->request.write_setting.array_size = array_size;
-        return value_to_relay_value(&value, &dest->request.write_setting.value);
-    }
-    case cormoran_zmk_custom_settings_Request_push_back_array_tag: {
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK;
-        dest->request.push_back_array.mode = src->request_type.push_back_array.mode;
-        int ret = setting_ref_to_private(&src->request_type.push_back_array.setting,
-                                         &dest->request.push_back_array.setting);
+        relay.request_type.write_setting.has_value = true;
+        relay.request_type.write_setting.value = src->request_type.write_setting.value;
+        relay.request_type.write_setting.mode = src->request_type.write_setting.mode;
+        break;
+    case cormoran_zmk_custom_settings_Request_push_back_array_tag:
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_push_back_array_tag;
+        relay.request_type.push_back_array.has_setting = true;
+        ret = public_ref_to_relay(&src->request_type.push_back_array.setting,
+                                  &relay.request_type.push_back_array.setting);
         if (ret < 0) {
             return ret;
         }
-
-        struct zmk_custom_setting_value value;
-        ret = scalar_proto_to_value(&src->request_type.push_back_array.value, &value);
-        if (ret < 0) {
-            return ret;
-        }
-
-        return value_to_relay_value(&value, &dest->request.push_back_array.value);
-    }
+        relay.request_type.push_back_array.has_value = true;
+        relay.request_type.push_back_array.value = src->request_type.push_back_array.value;
+        relay.request_type.push_back_array.mode = src->request_type.push_back_array.mode;
+        break;
     case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK;
-        dest->request.pop_back_array.mode = src->request_type.pop_back_array.mode;
-        return setting_ref_to_private(&src->request_type.pop_back_array.setting,
-                                      &dest->request.pop_back_array.setting);
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_pop_back_array_tag;
+        relay.request_type.pop_back_array.has_setting = true;
+        ret = public_ref_to_relay(&src->request_type.pop_back_array.setting,
+                                  &relay.request_type.pop_back_array.setting);
+        if (ret < 0) {
+            return ret;
+        }
+        relay.request_type.pop_back_array.mode = src->request_type.pop_back_array.mode;
+        break;
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE;
-        return setting_scope_to_private(&src->request_type.save_settings.scope,
-                                        &dest->request.scope_mutation.scope);
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_save_settings_tag;
+        relay.request_type.save_settings.has_scope = true;
+        ret = public_scope_to_relay(&src->request_type.save_settings.scope,
+                                    &relay.request_type.save_settings.scope);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
     case cormoran_zmk_custom_settings_Request_discard_settings_tag:
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_DISCARD;
-        return setting_scope_to_private(&src->request_type.discard_settings.scope,
-                                        &dest->request.scope_mutation.scope);
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_discard_settings_tag;
+        relay.request_type.discard_settings.has_scope = true;
+        ret = public_scope_to_relay(&src->request_type.discard_settings.scope,
+                                    &relay.request_type.discard_settings.scope);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
     case cormoran_zmk_custom_settings_Request_reset_settings_tag:
-        dest->type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_RESET;
-        return setting_scope_to_private(&src->request_type.reset_settings.scope,
-                                        &dest->request.scope_mutation.scope);
+        relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_reset_settings_tag;
+        relay.request_type.reset_settings.has_scope = true;
+        ret = public_scope_to_relay(&src->request_type.reset_settings.scope,
+                                    &relay.request_type.reset_settings.scope);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
     default:
         return -ENOTSUP;
     }
+
+    pb_ostream_t stream = pb_ostream_from_buffer(dest->payload, sizeof(dest->payload));
+    if (!pb_encode(&stream, cormoran_zmk_custom_settings_RelayRequest_fields, &relay)) {
+        LOG_WRN("Failed to encode custom settings relay request: %s", PB_GET_ERROR(&stream));
+        return -EIO;
+    }
+    if (stream.bytes_written > sizeof(dest->payload)) {
+        return -EMSGSIZE;
+    }
+    dest->payload_size = stream.bytes_written;
+    return 0;
 }
 
 static int relay_request_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
-    struct zmk_custom_settings_relay_request relay_request = {
-        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-    };
+    struct zmk_custom_settings_relay_request relay_request;
 
     int ret = request_to_relay_request(req, &relay_request);
     if (ret < 0) {
@@ -1587,9 +1632,7 @@ static void list_settings_relay_work_handler(struct k_work *work) {
 
 static int
 schedule_list_settings_relay_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
-    struct zmk_custom_settings_relay_request relay_request = {
-        .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-    };
+    struct zmk_custom_settings_relay_request relay_request;
 
     int ret = request_to_relay_request(req, &relay_request);
     if (ret < 0) {
@@ -1636,82 +1679,221 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
 }
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
-static int relay_value_to_value(const struct zmk_custom_settings_relay_value *src,
-                                struct zmk_custom_setting_value *dest) {
-    *dest = (struct zmk_custom_setting_value){0};
-    dest->type = src->type;
-    dest->size = src->size;
+static void relay_ref_to_private(const cormoran_zmk_custom_settings_RelaySettingRef *src,
+                                 struct zmk_custom_settings_setting_ref *dest) {
+    *dest = (struct zmk_custom_settings_setting_ref){0};
 
-    switch (src->type) {
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
-        if (src->size > sizeof(dest->bytes_value)) {
-            return -EMSGSIZE;
-        }
-        memcpy(dest->bytes_value, src->bytes_value, src->size);
-        return 0;
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
-        dest->int32_value = src->int32_value;
-        return 0;
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
-        dest->bool_value = src->bool_value;
-        return 0;
-    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
-        copy_string(dest->string_value, sizeof(dest->string_value), src->string_value);
-        dest->size = bounded_strlen(dest->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
-        return 0;
-    default:
-        return -EINVAL;
+    if (src->has_custom_subsystem_id) {
+        dest->has_custom_subsystem_id = true;
+        copy_string(dest->custom_subsystem_id, sizeof(dest->custom_subsystem_id),
+                    src->custom_subsystem_id);
+    }
+    if (src->has_key) {
+        dest->has_key = true;
+        copy_string(dest->key, sizeof(dest->key), src->key);
+    }
+    if (src->has_source) {
+        dest->has_source = true;
+        dest->source = src->source;
+    }
+    if (src->has_array_index) {
+        dest->has_array_index = true;
+        dest->array_index = src->array_index;
     }
 }
+
+static void relay_scope_to_private(const cormoran_zmk_custom_settings_RelaySettingScope *src,
+                                   struct zmk_custom_settings_setting_scope *dest) {
+    *dest = (struct zmk_custom_settings_setting_scope){0};
+
+    if (src->has_custom_subsystem_id) {
+        dest->has_custom_subsystem_id = true;
+        copy_string(dest->custom_subsystem_id, sizeof(dest->custom_subsystem_id),
+                    src->custom_subsystem_id);
+    }
+    if (src->has_key) {
+        dest->has_key = true;
+        copy_string(dest->key, sizeof(dest->key), src->key);
+    }
+    if (src->has_key_prefix) {
+        dest->has_key_prefix = true;
+        copy_string(dest->key_prefix, sizeof(dest->key_prefix), src->key_prefix);
+    }
+    if (src->has_source) {
+        dest->has_source = true;
+        dest->source = src->source;
+    }
+}
+
+static K_MUTEX_DEFINE(relay_request_decode_lock);
+static cormoran_zmk_custom_settings_RelayRequest relay_request_decode_buffer;
+static cormoran_zmk_custom_settings_Response relay_request_response_buffer;
 
 static int process_relay_request(const struct zmk_custom_settings_relay_request *req,
                                  cormoran_zmk_custom_settings_Response *resp) {
-    switch (req->type) {
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_LIST:
-        return handle_private_list_settings(&req->request.list_settings.scope,
-                                            req->request.list_settings.require_meta, resp);
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_WRITE: {
-        struct zmk_custom_setting_value value;
-        int ret = relay_value_to_value(&req->request.write_setting.value, &value);
-        if (ret < 0) {
-            return ret;
-        }
-        return handle_private_write_setting(
-            &req->request.write_setting.setting, &value, req->request.write_setting.value_is_array,
-            req->request.write_setting.array_index, req->request.write_setting.array_size,
-            (cormoran_zmk_custom_settings_SettingWriteMode)req->request.write_setting.mode, resp,
-            true);
+    k_mutex_lock(&relay_request_decode_lock, K_FOREVER);
+
+    cormoran_zmk_custom_settings_RelayRequest *decoded_req = &relay_request_decode_buffer;
+    *decoded_req = (cormoran_zmk_custom_settings_RelayRequest)
+        cormoran_zmk_custom_settings_RelayRequest_init_zero;
+    pb_istream_t req_stream = pb_istream_from_buffer(req->payload, req->payload_size);
+    if (!pb_decode(&req_stream, cormoran_zmk_custom_settings_RelayRequest_fields, decoded_req)) {
+        LOG_WRN("Failed to decode relayed custom settings request: %s", PB_GET_ERROR(&req_stream));
+        k_mutex_unlock(&relay_request_decode_lock);
+        return -EIO;
     }
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK: {
-        struct zmk_custom_setting_value value;
-        int ret = relay_value_to_value(&req->request.push_back_array.value, &value);
-        if (ret < 0) {
-            return ret;
-        }
-        return handle_private_push_back_array(
-            &req->request.push_back_array.setting, &value,
-            (cormoran_zmk_custom_settings_SettingWriteMode)req->request.push_back_array.mode, resp,
-            true);
+
+    int ret = 0;
+    switch (decoded_req->which_request_type) {
+    case cormoran_zmk_custom_settings_RelayRequest_list_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        relay_scope_to_private(&decoded_req->request_type.list_settings.scope, &scope);
+        ret = handle_private_list_settings(
+            &scope, decoded_req->request_type.list_settings.require_meta, resp);
+        break;
     }
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK:
-        return handle_private_pop_back_array(
-            &req->request.pop_back_array.setting,
-            (cormoran_zmk_custom_settings_SettingWriteMode)req->request.pop_back_array.mode, resp);
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_SAVE:
-        return handle_private_scope_mutation(&req->request.scope_mutation.scope, resp,
-                                             "Settings saved", zmk_custom_settings_save_scope);
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_DISCARD:
-        return handle_private_scope_mutation(&req->request.scope_mutation.scope, resp,
-                                             "Settings discarded",
-                                             zmk_custom_settings_discard_scope);
-    case ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_RESET:
-        return handle_private_scope_mutation(&req->request.scope_mutation.scope, resp,
-                                             "Settings reset", zmk_custom_settings_reset_scope);
+    case cormoran_zmk_custom_settings_RelayRequest_write_setting_tag: {
+        struct zmk_custom_settings_setting_ref ref;
+        relay_ref_to_private(&decoded_req->request_type.write_setting.setting, &ref);
+
+        struct zmk_custom_setting_value value;
+        bool value_is_array = false;
+        uint32_t array_index = 0;
+        uint32_t array_size = 0;
+        ret = proto_to_value(&decoded_req->request_type.write_setting.value, &value,
+                             &value_is_array, &array_index, &array_size);
+        if (ret < 0) {
+            break;
+        }
+        ret =
+            handle_private_write_setting(&ref, &value, value_is_array, array_index, array_size,
+                                         decoded_req->request_type.write_setting.mode, resp, true);
+        break;
+    }
+    case cormoran_zmk_custom_settings_RelayRequest_push_back_array_tag: {
+        struct zmk_custom_settings_setting_ref ref;
+        relay_ref_to_private(&decoded_req->request_type.push_back_array.setting, &ref);
+
+        struct zmk_custom_setting_value value;
+        ret = scalar_proto_to_value(&decoded_req->request_type.push_back_array.value, &value);
+        if (ret < 0) {
+            break;
+        }
+        ret = handle_private_push_back_array(
+            &ref, &value, decoded_req->request_type.push_back_array.mode, resp, true);
+        break;
+    }
+    case cormoran_zmk_custom_settings_RelayRequest_pop_back_array_tag: {
+        struct zmk_custom_settings_setting_ref ref;
+        relay_ref_to_private(&decoded_req->request_type.pop_back_array.setting, &ref);
+        ret = handle_private_pop_back_array(&ref, decoded_req->request_type.pop_back_array.mode,
+                                            resp);
+        break;
+    }
+    case cormoran_zmk_custom_settings_RelayRequest_save_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        relay_scope_to_private(&decoded_req->request_type.save_settings.scope, &scope);
+        ret = handle_private_scope_mutation(&scope, resp, "Settings saved",
+                                            zmk_custom_settings_save_scope);
+        break;
+    }
+    case cormoran_zmk_custom_settings_RelayRequest_discard_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        relay_scope_to_private(&decoded_req->request_type.discard_settings.scope, &scope);
+        ret = handle_private_scope_mutation(&scope, resp, "Settings discarded",
+                                            zmk_custom_settings_discard_scope);
+        break;
+    }
+    case cormoran_zmk_custom_settings_RelayRequest_reset_settings_tag: {
+        struct zmk_custom_settings_setting_scope scope;
+        relay_scope_to_private(&decoded_req->request_type.reset_settings.scope, &scope);
+        ret = handle_private_scope_mutation(&scope, resp, "Settings reset",
+                                            zmk_custom_settings_reset_scope);
+        break;
+    }
     default:
-        return -ENOTSUP;
+        ret = -ENOTSUP;
+        break;
+    }
+
+    k_mutex_unlock(&relay_request_decode_lock);
+    return ret;
+}
+
+static void relay_request_work_handler(struct k_work *work);
+
+K_MSGQ_DEFINE(relay_request_msgq, sizeof(struct zmk_custom_settings_relay_request),
+              CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_QUEUE_SIZE, 4);
+K_WORK_DEFINE(relay_request_work, relay_request_work_handler);
+
+static void relay_request_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    struct zmk_custom_settings_relay_request req;
+    while (k_msgq_get(&relay_request_msgq, &req, K_NO_WAIT) == 0) {
+        relay_request_response_buffer =
+            (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+        int ret = process_relay_request(&req, &relay_request_response_buffer);
+        if (ret < 0) {
+            LOG_WRN("Relayed custom settings request failed: %d", ret);
+        }
     }
 }
 #endif
+
+struct zmk_custom_settings_notification_request {
+    const struct zmk_custom_setting *setting;
+    cormoran_zmk_custom_settings_SettingNotificationKind kind;
+    uint32_t source;
+};
+
+static void notification_work_handler(struct k_work *work);
+
+K_MSGQ_DEFINE(notification_msgq, sizeof(struct zmk_custom_settings_notification_request),
+              CONFIG_ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE, 4);
+K_WORK_DEFINE(notification_work, notification_work_handler);
+
+static void notification_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    struct zmk_custom_settings_notification_request request;
+    while (k_msgq_get(&notification_msgq, &request, K_NO_WAIT) == 0) {
+        int ret =
+            raise_setting_notification(request.setting, request.kind,
+                                       can_include_value(request.setting), false, request.source);
+        if (ret < 0) {
+            LOG_WRN("Failed to raise custom settings notification: %d", ret);
+        }
+    }
+}
+
+static int setting_changed_listener(const zmk_event_t *eh) {
+    const struct zmk_custom_setting_changed *ev = as_zmk_custom_setting_changed(eh);
+    if (!ev || !ev->setting) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    struct zmk_custom_settings_notification_request request = {
+        .setting = ev->setting,
+        .kind = proto_notification_kind(ev->kind),
+        .source = ev->source,
+    };
+    int ret = k_msgq_put(&notification_msgq, &request, K_NO_WAIT);
+    if (ret < 0) {
+        LOG_WRN("Failed to queue custom settings notification: %d", ret);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    ret = k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &notification_work);
+    if (ret < 0) {
+        LOG_WRN("Failed to submit custom settings notification work: %d", ret);
+    }
+
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(custom_settings_studio, setting_changed_listener);
+ZMK_SUBSCRIPTION(custom_settings_studio, zmk_custom_setting_changed);
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
@@ -1769,21 +1951,6 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
     return true;
 }
 #endif
-
-static int setting_changed_listener(const zmk_event_t *eh) {
-    const struct zmk_custom_setting_changed *ev = as_zmk_custom_setting_changed(eh);
-    if (!ev || !ev->setting) {
-        return ZMK_EV_EVENT_BUBBLE;
-    }
-
-    raise_setting_notification(ev->setting, proto_notification_kind(ev->kind),
-                               can_include_value(ev->setting), false, ev->source);
-
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(custom_settings_studio, setting_changed_listener);
-ZMK_SUBSCRIPTION(custom_settings_studio, zmk_custom_setting_changed);
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static int custom_settings_rpc_bytes_converter_test_init(void) {
@@ -1868,16 +2035,50 @@ static int relay_request_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
-    int ret = process_relay_request(ev, &resp);
+    int ret = k_msgq_put(&relay_request_msgq, ev, K_NO_WAIT);
     if (ret < 0) {
-        LOG_WRN("Relayed custom settings request failed: %d", ret);
+        LOG_WRN("Failed to queue relayed custom settings request: %d", ret);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    ret = k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &relay_request_work);
+    if (ret < 0) {
+        LOG_WRN("Failed to submit relayed custom settings request work: %d", ret);
     }
 
     return ZMK_EV_EVENT_BUBBLE;
 }
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+static void relay_notification_work_handler(struct k_work *work);
+
+K_MSGQ_DEFINE(relay_notification_msgq, sizeof(struct zmk_custom_settings_relay_notification),
+              CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_NOTIFICATION_QUEUE_SIZE, 4);
+K_WORK_DEFINE(relay_notification_work, relay_notification_work_handler);
+
+static void relay_notification_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    struct zmk_custom_settings_relay_notification ev;
+    while (k_msgq_get(&relay_notification_msgq, &ev, K_NO_WAIT) == 0) {
+        k_mutex_lock(&notification_buffer_lock, K_FOREVER);
+        notification_buffer = (cormoran_zmk_custom_settings_Notification)
+            cormoran_zmk_custom_settings_Notification_init_zero;
+        int ret = relayed_notification_to_public(&ev, &notification_buffer);
+        if (ret < 0) {
+            LOG_WRN("Failed to convert relayed custom settings notification: %d", ret);
+            k_mutex_unlock(&notification_buffer_lock);
+            continue;
+        }
+
+        ret = raise_encoded_studio_notification(&notification_buffer);
+        if (ret < 0) {
+            LOG_WRN("Failed to raise relayed custom settings notification: %d", ret);
+        }
+        k_mutex_unlock(&notification_buffer_lock);
+    }
+}
+
 static int relay_notification_listener(const zmk_event_t *eh) {
     const struct zmk_custom_settings_relay_notification *ev =
         as_zmk_custom_settings_relay_notification(eh);
@@ -1888,18 +2089,17 @@ static int relay_notification_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    k_mutex_lock(&notification_buffer_lock, K_FOREVER);
-    notification_buffer = (cormoran_zmk_custom_settings_Notification)
-        cormoran_zmk_custom_settings_Notification_init_zero;
-    int ret = relayed_notification_to_public(ev, &notification_buffer);
+    int ret = k_msgq_put(&relay_notification_msgq, ev, K_NO_WAIT);
     if (ret < 0) {
-        LOG_WRN("Failed to convert relayed custom settings notification: %d", ret);
-        k_mutex_unlock(&notification_buffer_lock);
+        LOG_WRN("Failed to queue relayed custom settings notification: %d", ret);
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    raise_encoded_studio_notification(&notification_buffer);
-    k_mutex_unlock(&notification_buffer_lock);
+    ret = k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &relay_notification_work);
+    if (ret < 0) {
+        LOG_WRN("Failed to submit relayed custom settings notification work: %d", ret);
+    }
+
     return ZMK_EV_EVENT_BUBBLE;
 }
 #endif
@@ -1915,6 +2115,31 @@ ZMK_SUBSCRIPTION(custom_settings_relay_notification, zmk_custom_settings_relay_n
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) &&                                                 \
     IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+static int relay_test_process_request(const cormoran_zmk_custom_settings_RelayRequest *src,
+                                      cormoran_zmk_custom_settings_Response *resp) {
+    struct zmk_custom_settings_relay_request request = {
+        .source = 1,
+    };
+    pb_ostream_t stream = pb_ostream_from_buffer(request.payload, sizeof(request.payload));
+    if (!pb_encode(&stream, cormoran_zmk_custom_settings_RelayRequest_fields, src)) {
+        LOG_ERR("Split peripheral relay test encode failed: %s", PB_GET_ERROR(&stream));
+        return -EIO;
+    }
+    request.payload_size = stream.bytes_written;
+    return process_relay_request(&request, resp);
+}
+
+static int relay_test_setting_ref(const char *key,
+                                  cormoran_zmk_custom_settings_RelaySettingRef *ref) {
+    ref->has_custom_subsystem_id = true;
+    copy_string(ref->custom_subsystem_id, sizeof(ref->custom_subsystem_id), "test");
+    ref->has_key = true;
+    copy_string(ref->key, sizeof(ref->key), key);
+    ref->has_source = true;
+    ref->source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+    return 0;
+}
+
 static int custom_settings_split_peripheral_relay_test_init(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "int_value");
     if (!setting) {
@@ -1930,25 +2155,23 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
         return -ENOENT;
     }
 
-    struct zmk_custom_settings_relay_request request = {
-        .source = 1,
-        .type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_WRITE,
-    };
-    request.request.write_setting.setting.has_custom_subsystem_id = true;
-    copy_string(request.request.write_setting.setting.custom_subsystem_id,
-                sizeof(request.request.write_setting.setting.custom_subsystem_id), "test");
-    request.request.write_setting.setting.has_key = true;
-    copy_string(request.request.write_setting.setting.key,
-                sizeof(request.request.write_setting.setting.key), "int_value");
-    request.request.write_setting.setting.has_source = true;
-    request.request.write_setting.setting.source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
-    request.request.write_setting.value.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
-    request.request.write_setting.value.int32_value = 66;
-    request.request.write_setting.mode =
+    cormoran_zmk_custom_settings_RelayRequest request =
+        cormoran_zmk_custom_settings_RelayRequest_init_zero;
+    request.which_request_type = cormoran_zmk_custom_settings_RelayRequest_write_setting_tag;
+    request.request_type.write_setting.has_setting = true;
+    int ret = relay_test_setting_ref("int_value", &request.request_type.write_setting.setting);
+    if (ret < 0) {
+        return ret;
+    }
+    request.request_type.write_setting.has_value = true;
+    request.request_type.write_setting.value.which_value_type =
+        cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
+    request.request_type.write_setting.value.value_type.int32_value = 66;
+    request.request_type.write_setting.mode =
         cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
 
     cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
-    int ret = process_relay_request(&request, &resp);
+    ret = relay_test_process_request(&request, &resp);
     if (ret < 0) {
         LOG_ERR("Split peripheral relay request failed: %d", ret);
         return ret;
@@ -1972,23 +2195,19 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
         return ret;
     }
 
-    struct zmk_custom_settings_relay_request pop_request = {
-        .source = 1,
-        .type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_POP_BACK,
-    };
-    pop_request.request.pop_back_array.setting.has_custom_subsystem_id = true;
-    copy_string(pop_request.request.pop_back_array.setting.custom_subsystem_id,
-                sizeof(pop_request.request.pop_back_array.setting.custom_subsystem_id), "test");
-    pop_request.request.pop_back_array.setting.has_key = true;
-    copy_string(pop_request.request.pop_back_array.setting.key,
-                sizeof(pop_request.request.pop_back_array.setting.key), "array_value");
-    pop_request.request.pop_back_array.setting.has_source = true;
-    pop_request.request.pop_back_array.setting.source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
-    pop_request.request.pop_back_array.mode =
+    cormoran_zmk_custom_settings_RelayRequest pop_request =
+        cormoran_zmk_custom_settings_RelayRequest_init_zero;
+    pop_request.which_request_type = cormoran_zmk_custom_settings_RelayRequest_pop_back_array_tag;
+    pop_request.request_type.pop_back_array.has_setting = true;
+    ret = relay_test_setting_ref("array_value", &pop_request.request_type.pop_back_array.setting);
+    if (ret < 0) {
+        return ret;
+    }
+    pop_request.request_type.pop_back_array.mode =
         cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
 
     resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
-    ret = process_relay_request(&pop_request, &resp);
+    ret = relay_test_process_request(&pop_request, &resp);
     if (ret < 0) {
         LOG_ERR("Split peripheral relay pop_back failed: %d", ret);
         return ret;
@@ -2004,25 +2223,23 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
     }
     printk("PASS: split_peripheral_relay_pop_back size=2\n");
 
-    struct zmk_custom_settings_relay_request push_request = {
-        .source = 1,
-        .type = ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_PUSH_BACK,
-    };
-    push_request.request.push_back_array.setting.has_custom_subsystem_id = true;
-    copy_string(push_request.request.push_back_array.setting.custom_subsystem_id,
-                sizeof(push_request.request.push_back_array.setting.custom_subsystem_id), "test");
-    push_request.request.push_back_array.setting.has_key = true;
-    copy_string(push_request.request.push_back_array.setting.key,
-                sizeof(push_request.request.push_back_array.setting.key), "array_value");
-    push_request.request.push_back_array.setting.has_source = true;
-    push_request.request.push_back_array.setting.source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
-    push_request.request.push_back_array.value.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
-    push_request.request.push_back_array.value.int32_value = 44;
-    push_request.request.push_back_array.mode =
+    cormoran_zmk_custom_settings_RelayRequest push_request =
+        cormoran_zmk_custom_settings_RelayRequest_init_zero;
+    push_request.which_request_type = cormoran_zmk_custom_settings_RelayRequest_push_back_array_tag;
+    push_request.request_type.push_back_array.has_setting = true;
+    ret = relay_test_setting_ref("array_value", &push_request.request_type.push_back_array.setting);
+    if (ret < 0) {
+        return ret;
+    }
+    push_request.request_type.push_back_array.has_value = true;
+    push_request.request_type.push_back_array.value.which_value_type =
+        cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag;
+    push_request.request_type.push_back_array.value.value_type.int32_value = 44;
+    push_request.request_type.push_back_array.mode =
         cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
 
     resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
-    ret = process_relay_request(&push_request, &resp);
+    ret = relay_test_process_request(&push_request, &resp);
     if (ret < 0) {
         LOG_ERR("Split peripheral relay push_back failed: %d", ret);
         return ret;
