@@ -128,6 +128,10 @@ ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(zmk_custom_settings_relay_notification, cs
 static uint32_t ref_source(const cormoran_zmk_custom_settings_SettingRef *ref) {
     return ref->has_source ? ref->source : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
 }
+
+static bool source_targets_peripherals(uint32_t source) {
+    return source != ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
+}
 #endif
 
 static uint32_t setting_ref_source(const struct zmk_custom_settings_setting_ref *ref) {
@@ -1314,26 +1318,19 @@ static int handle_scope_mutation(const cormoran_zmk_custom_settings_SettingScope
 static bool should_relay_to_peripherals(const cormoran_zmk_custom_settings_Request *req) {
     switch (req->which_request_type) {
     case cormoran_zmk_custom_settings_Request_list_settings_tag:
-        return scope_source(&req->request_type.list_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.list_settings.scope));
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
-        return scope_source(&req->request_type.save_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.save_settings.scope));
     case cormoran_zmk_custom_settings_Request_discard_settings_tag:
-        return scope_source(&req->request_type.discard_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.discard_settings.scope));
     case cormoran_zmk_custom_settings_Request_reset_settings_tag:
-        return scope_source(&req->request_type.reset_settings.scope) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(scope_source(&req->request_type.reset_settings.scope));
     case cormoran_zmk_custom_settings_Request_write_setting_tag:
-        return ref_source(&req->request_type.write_setting.setting) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(ref_source(&req->request_type.write_setting.setting));
     case cormoran_zmk_custom_settings_Request_push_back_array_tag:
-        return ref_source(&req->request_type.push_back_array.setting) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(ref_source(&req->request_type.push_back_array.setting));
     case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
-        return ref_source(&req->request_type.pop_back_array.setting) ==
-               ZMK_CUSTOM_SETTING_SOURCE_ALL;
+        return source_targets_peripherals(ref_source(&req->request_type.pop_back_array.setting));
     default:
         return false;
     }
@@ -1444,7 +1441,9 @@ static int public_ref_to_relay(const cormoran_zmk_custom_settings_SettingRef *sr
     }
     if (src->has_source) {
         dest->has_source = true;
-        dest->source = src->source;
+        dest->source = src->source == ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           ? ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
     }
     if (src->has_array_index) {
         dest->has_array_index = true;
@@ -1477,7 +1476,9 @@ static int public_scope_to_relay(const cormoran_zmk_custom_settings_SettingScope
     }
     if (src->has_source) {
         dest->has_source = true;
-        dest->source = src->source;
+        dest->source = src->source == ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           ? ZMK_CUSTOM_SETTING_SOURCE_ALL
+                           : ZMK_CUSTOM_SETTING_SOURCE_LOCAL;
     }
 
     return 0;
