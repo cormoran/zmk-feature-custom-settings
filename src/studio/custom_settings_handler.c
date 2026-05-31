@@ -1770,6 +1770,26 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         return -ENOTSUP;
     }
 }
+
+static void relay_request_work_handler(struct k_work *work);
+
+K_MSGQ_DEFINE(relay_request_msgq, sizeof(struct zmk_custom_settings_relay_request),
+              CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_QUEUE_SIZE, 4);
+K_WORK_DEFINE(relay_request_work, relay_request_work_handler);
+
+static void relay_request_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    struct zmk_custom_settings_relay_request req;
+    while (k_msgq_get(&relay_request_msgq, &req, K_NO_WAIT) == 0) {
+        cormoran_zmk_custom_settings_Response resp =
+            cormoran_zmk_custom_settings_Response_init_zero;
+        int ret = process_relay_request(&req, &resp);
+        if (ret < 0) {
+            LOG_WRN("Relayed custom settings request failed: %d", ret);
+        }
+    }
+}
 #endif
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
@@ -1927,10 +1947,15 @@ static int relay_request_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
-    int ret = process_relay_request(ev, &resp);
+    int ret = k_msgq_put(&relay_request_msgq, ev, K_NO_WAIT);
     if (ret < 0) {
-        LOG_WRN("Relayed custom settings request failed: %d", ret);
+        LOG_WRN("Failed to queue relayed custom settings request: %d", ret);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    ret = k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &relay_request_work);
+    if (ret < 0) {
+        LOG_WRN("Failed to submit relayed custom settings request work: %d", ret);
     }
 
     return ZMK_EV_EVENT_BUBBLE;
