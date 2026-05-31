@@ -61,6 +61,14 @@ config ZMK_CUSTOM_SETTINGS_RELAY_REQUEST_QUEUE_SIZE
       Maximum number of relayed custom settings requests that can wait for
       low-priority workqueue processing.
 
+config ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE
+    int "Maximum queued custom settings notifications"
+    default 8
+    range 1 32
+    help
+      Maximum number of setting change notifications that can wait for
+      low-priority workqueue processing.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 
