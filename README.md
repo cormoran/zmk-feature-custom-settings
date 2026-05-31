@@ -68,15 +68,21 @@ keys are limited to 48 bytes by the generated RPC schema.
 
 ### Split Keyboards
 
-For split keyboards, enable ZMK's relay-event transport on both halves and size
-the relay event buffer for the setting notifications you expect to relay:
+For split keyboards, enable ZMK's relay-event transport on both halves. With
+ZMK's default `CONFIG_BT_L2CAP_TX_MTU=65`, keep relay events within the 62 byte
+ATT value payload by using a 57 byte relay event and a 55 byte custom settings
+payload:
 
 ```conf
 CONFIG_ZMK_SPLIT_RELAY_EVENT=y
 CONFIG_ZMK_SPLIT_RELAY_EVENT_TYPE_NAME_LEN=4
-CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=256
+CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=57
 CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y
+CONFIG_ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE=55
 ```
+
+Larger setting values or metadata-heavy list responses may need a larger BLE MTU
+and matching relay payload sizes.
 
 ### Register Settings
 

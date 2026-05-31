@@ -12,8 +12,14 @@ cormoran.zmk.custom_settings.SettingConstraintOptions.labels max_size:32
 cormoran.zmk.custom_settings.SettingRef.key max_size:48
 cormoran.zmk.custom_settings.SettingScope.key max_size:48
 cormoran.zmk.custom_settings.SettingScope.key_prefix max_size:48
+cormoran.zmk.custom_settings.RelaySettingRef.custom_subsystem_id max_size:32
+cormoran.zmk.custom_settings.RelaySettingRef.key max_size:48
+cormoran.zmk.custom_settings.RelaySettingScope.custom_subsystem_id max_size:32
+cormoran.zmk.custom_settings.RelaySettingScope.key max_size:48
+cormoran.zmk.custom_settings.RelaySettingScope.key_prefix max_size:48
 cormoran.zmk.custom_settings.SettingMeta.constraints max_count:8
 cormoran.zmk.custom_settings.Setting.key max_size:48
+cormoran.zmk.custom_settings.RelayNotification.custom_subsystem_id max_size:32
 
 cormoran.zmk.custom_settings.ErrorResponse.message max_size:96
 cormoran.zmk.custom_settings.StatusResponse.message max_size:96
