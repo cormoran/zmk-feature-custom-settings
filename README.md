@@ -54,13 +54,11 @@ CONFIG_ZMK_CUSTOM_SETTINGS=y
 CONFIG_ZMK_STUDIO=y
 CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
 CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
-CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=96
 CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
 ```
 
 `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` must be large enough for custom settings
-RPC requests. `CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES`
-must also be large enough for the encoded custom settings request payload.
+RPC requests.
 `CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE` should be increased because listing
 settings builds encoded notifications from the low priority workqueue.
 When Studio RPC is enabled, setting values are limited to 64 bytes and setting
