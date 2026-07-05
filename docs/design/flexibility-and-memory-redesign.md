@@ -162,10 +162,12 @@ Key changes compared to today:
     acceptable for the UI (it already refreshes on save/discard) and is much
     cheaper than keeping a full shadow copy.
 - **Move `temporary_value` out of the per-setting struct.** Temporary
-  overrides are rare and short-lived; keep a small shared pool
-  (`CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS`, default 2–4 slots of the largest
-  registered size, or per-slot fixed capacity). A setting with an active
-  override points at its slot. `-EBUSY` when the pool is exhausted.
+  overrides are rare and short-lived; keep a small shared pool with a fixed
+  per-slot capacity (`CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS`, default 2–4,
+  and `CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE`, default 64). A setting
+  with an active override points at its slot. `-EBUSY` when the pool is
+  exhausted; `-EMSGSIZE` when the value exceeds the slot capacity (settings
+  larger than the slot size simply cannot use temporary mode).
 - `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` remains only as the default for
   macros that do not pass an explicit `max_size`, and as the transport-side
   cap (P6). It no longer sizes any struct.
@@ -362,8 +364,10 @@ ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(
 
 - New RPC requests `CreateSetting { subsystem, key, value }` /
   `DeleteSetting { ref }` allocate/release a slot when the key matches a
-  registered keyspace prefix and the quota allows it. Key names occupy a
-  fixed `KEY_MAX_LEN` buffer per slot.
+  registered keyspace prefix and the quota allows it. Each keyspace declares
+  its own maximum key length (a macro argument, kept tight by the caller —
+  e.g. 16 bytes for `macro/<name>`), so slot key buffers do not pay the
+  global `KEY_MAX_LEN`.
 - Persisted entries under the prefix are re-bound to slots during settings
   load, so user-created keys survive reboot without any module code.
 - Firmware discovers entries via the existing `key_prefix` filter and a
@@ -442,13 +446,18 @@ message WriteValueChunkRequest { SettingRef setting = 1; uint32 total_size = 2;
 Each phase follows the repository rule: proto definition → firmware handler →
 web UI, with unit tests in `tests/` and build coverage in `tests/zmk-config`.
 
-## Open Questions
+## Decisions
 
-1. Should `discard` on a dirty setting re-read flash (proposed) or should
-   settings opt in to keeping a shadow copy when instant discard matters?
-2. Temporary-override pool sizing: fixed slot capacity (simple) vs.
-   largest-registered-size slots (no failure mode for big settings)?
-3. For record arrays, is TLV the right wire format, or should records reuse
-   nanopb with a module-supplied `.proto` (more tooling, but heavier)?
-4. Keyspace slot keys consume `KEY_MAX_LEN` RAM per slot; is a tighter
-   per-keyspace key length worth the extra Kconfig knob?
+Resolved 2026-07-05:
+
+1. **Discard re-reads flash.** No shadow-copy opt-in; the dirty flag plus
+   `settings_load_subtree()` on discard is the only persistence-tracking
+   mechanism.
+2. **Temporary-override pool uses fixed slot capacity**
+   (`CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE`). Settings larger than the
+   slot size cannot use temporary mode (`-EMSGSIZE`).
+3. **Records use the TLV wire format** (version byte + field-tagged TLV), not
+   a module-supplied nanopb schema.
+4. **Keyspace key length is per-keyspace and tight** — declared as a macro
+   argument by the registering module instead of reusing the global
+   `KEY_MAX_LEN`.
