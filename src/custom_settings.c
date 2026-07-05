@@ -17,6 +17,7 @@
 #include <zephyr/settings/settings.h>
 
 #include <dt-bindings/zmk/hid_usage_pages.h>
+#include <drivers/behavior.h>
 #include <zmk/behavior.h>
 #include <cormoran/zmk/custom_settings.h>
 #include <zmk/keymap.h>
@@ -55,6 +56,10 @@ static bool value_equals(const struct zmk_custom_setting_value *a,
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
         return strncmp(a->string_value, b->string_value,
                        CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) == 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        return a->behavior_value.behavior_id == b->behavior_value.behavior_id &&
+               a->behavior_value.param1 == b->behavior_value.param1 &&
+               a->behavior_value.param2 == b->behavior_value.param2;
     default:
         return false;
     }
@@ -90,6 +95,93 @@ static struct zmk_custom_settings_temp_slot temp_slots[CONFIG_ZMK_CUSTOM_SETTING
  * is held. */
 static struct zmk_custom_setting_value temp_scratch_value;
 
+/*
+ * BEHAVIOR values (behavior_id, param1, param2) are stored/cached as ULEB128
+ * varints back-to-back instead of a fixed 3x uint32_t layout: real behavior
+ * bindings overwhelmingly use small ids and parameters (keycodes, layer
+ * indices), so this is smaller than a fixed encoding in the common case
+ * while still bounded (13 bytes worst case: up to 3 bytes for a 16-bit
+ * behavior_id plus up to 5 bytes each for full-range uint32_t params).
+ */
+#define BEHAVIOR_VALUE_ENCODED_MAX_SIZE 13
+
+static size_t encode_uvarint(uint32_t value, uint8_t *out) {
+    size_t pos = 0;
+
+    do {
+        uint8_t byte = value & 0x7f;
+        value >>= 7;
+        if (value) {
+            byte |= 0x80;
+        }
+        out[pos++] = byte;
+    } while (value);
+
+    return pos;
+}
+
+static int decode_uvarint(const uint8_t *in, size_t in_size, uint32_t *out, size_t *consumed) {
+    uint32_t result = 0;
+    size_t pos = 0;
+    unsigned int shift = 0;
+
+    for (;;) {
+        if (pos >= in_size || shift > 28) {
+            return -EINVAL;
+        }
+
+        uint8_t byte = in[pos++];
+        result |= (uint32_t)(byte & 0x7f) << shift;
+        if (!(byte & 0x80)) {
+            break;
+        }
+        shift += 7;
+    }
+
+    *out = result;
+    *consumed = pos;
+    return 0;
+}
+
+static int encode_behavior_value(const struct zmk_custom_setting_behavior_value *behavior,
+                                 uint8_t *out, size_t out_capacity, size_t *out_size) {
+    if (out_capacity < BEHAVIOR_VALUE_ENCODED_MAX_SIZE) {
+        return -EMSGSIZE;
+    }
+
+    size_t pos = 0;
+    pos += encode_uvarint(behavior->behavior_id, &out[pos]);
+    pos += encode_uvarint(behavior->param1, &out[pos]);
+    pos += encode_uvarint(behavior->param2, &out[pos]);
+    *out_size = pos;
+    return 0;
+}
+
+static int decode_behavior_value(const uint8_t *data, size_t size,
+                                 struct zmk_custom_setting_behavior_value *behavior) {
+    size_t pos = 0;
+    size_t consumed;
+
+    int ret = decode_uvarint(&data[pos], size - pos, &behavior->behavior_id, &consumed);
+    if (ret < 0) {
+        return ret;
+    }
+    pos += consumed;
+
+    ret = decode_uvarint(&data[pos], size - pos, &behavior->param1, &consumed);
+    if (ret < 0) {
+        return ret;
+    }
+    pos += consumed;
+
+    return decode_uvarint(&data[pos], size - pos, &behavior->param2, &consumed);
+}
+
+/* Shared scratch buffer for encode_behavior_value() output. Safe as a single
+ * instance: every value_to_storage() caller holds settings_lock (see
+ * temp_scratch_value above for the same pattern). */
+static uint8_t behavior_encode_scratch[BEHAVIOR_VALUE_ENCODED_MAX_SIZE];
+
 static void value_from_raw(struct zmk_custom_setting_value *dest,
                            enum zmk_custom_setting_value_type type, const void *data, size_t size) {
     dest->type = type;
@@ -108,6 +200,9 @@ static void value_from_raw(struct zmk_custom_setting_value *dest,
         break;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
         memcpy(&dest->bool_value, data, sizeof(dest->bool_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        decode_behavior_value(data, size, &dest->behavior_value);
         break;
     default:
         break;
@@ -343,6 +438,34 @@ uint32_t zmk_custom_setting_array_max_size(const struct zmk_custom_setting *sett
     return zmk_custom_setting_is_array(setting) ? setting->array_max_size : 0;
 }
 
+/* Validate a BEHAVIOR value's behaviorId/param1/param2 against the target
+ * behavior's real ZMK parameter metadata (CONFIG_ZMK_BEHAVIOR_METADATA),
+ * mirroring how validate_behavior_id_constraint below resolves a behavior
+ * local id, but additionally checking param1/param2 through
+ * zmk_behavior_validate_binding instead of accepting any uint32_t. */
+static int validate_behavior_value(const struct zmk_custom_setting_behavior_value *behavior) {
+    if (behavior->behavior_id >= UINT16_MAX) {
+        return -ERANGE;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+    const char *behavior_dev_name = zmk_behavior_find_behavior_name_from_local_id(
+        (zmk_behavior_local_id_t)behavior->behavior_id);
+    if (!behavior_dev_name) {
+        return -EINVAL;
+    }
+
+    struct zmk_behavior_binding binding = {
+        .behavior_dev = behavior_dev_name,
+        .param1 = behavior->param1,
+        .param2 = behavior->param2,
+    };
+    return zmk_behavior_validate_binding(&binding);
+#else
+    return -ENOTSUP;
+#endif
+}
+
 static int value_type_validate(const struct zmk_custom_setting *setting,
                                const struct zmk_custom_setting_value *value) {
     if (setting->value_type != value->type) {
@@ -357,6 +480,8 @@ static int value_type_validate(const struct zmk_custom_setting *setting,
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
         return 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        return validate_behavior_value(&value->behavior_value);
     default:
         return -EINVAL;
     }
@@ -591,6 +716,17 @@ static int value_to_storage(const struct zmk_custom_setting_value *value, const 
         *data = value->string_value;
         *len = bounded_strlen(value->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
         return 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR: {
+        size_t size;
+        int ret = encode_behavior_value(&value->behavior_value, behavior_encode_scratch,
+                                        sizeof(behavior_encode_scratch), &size);
+        if (ret < 0) {
+            return ret;
+        }
+        *data = behavior_encode_scratch;
+        *len = size;
+        return 0;
+    }
     default:
         return -EINVAL;
     }
@@ -1229,6 +1365,10 @@ static void read_into_visitor(const struct zmk_custom_setting_value *value, void
         data = &value->bool_value;
         size = sizeof(value->bool_value);
         break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        data = &value->behavior_value;
+        size = sizeof(value->behavior_value);
+        break;
     default:
         ctx->ret = -EINVAL;
         return;
@@ -1345,6 +1485,35 @@ int zmk_custom_setting_set_bool(const struct zmk_custom_setting *setting, bool v
     return zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_BOOL(value), mode);
 }
 
+int zmk_custom_setting_get_behavior(const struct zmk_custom_setting *setting,
+                                    struct zmk_custom_setting_behavior_value *value) {
+    if (!setting || !value) {
+        return -EINVAL;
+    }
+
+    enum zmk_custom_setting_value_type type;
+    int ret = zmk_custom_setting_read_into(setting, value, sizeof(*value), NULL, &type);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR ? 0 : -EINVAL;
+}
+
+int zmk_custom_setting_set_behavior(const struct zmk_custom_setting *setting,
+                                    struct zmk_custom_setting_behavior_value value,
+                                    enum zmk_custom_setting_write_mode mode) {
+    if (!setting) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting_value setting_value = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
+        .behavior_value = value,
+    };
+    return zmk_custom_setting_write(setting, &setting_value, mode);
+}
+
 static int value_from_storage(struct zmk_custom_setting *setting, const void *data, size_t len) {
     struct zmk_custom_setting_value value = {.type = setting->value_type};
 
@@ -1376,6 +1545,13 @@ static int value_from_storage(struct zmk_custom_setting *setting, const void *da
         memcpy(value.string_value, data, len);
         value.string_value[len] = '\0';
         break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR: {
+        int ret = decode_behavior_value(data, len, &value.behavior_value);
+        if (ret < 0) {
+            return ret;
+        }
+        break;
+    }
     default:
         return -EINVAL;
     }

@@ -10,10 +10,11 @@ web UI.
 
 - Register settings from any module with a custom subsystem namespace and key.
   RPC clients address the namespace by its ZMK Studio custom subsystem index.
-- Store typed values: bytes, int32, bool, string, and dynamic arrays of
-  those scalar types.
+- Store typed values: bytes, int32, bool, string, behavior bindings, and
+  dynamic arrays of those scalar types.
 - Validate writes with optional range, option-list, HID usage, layer ID, or
-  behavior ID constraints.
+  behavior ID constraints. Behavior values are additionally validated against
+  the target behavior's own ZMK parameter metadata.
 - Write values in memory, persist them to flash, discard memory changes, or
   reset persisted values back to defaults.
 - Mark values as device-private, RPC-personal, or RPC-public.
@@ -127,6 +128,7 @@ and Studio custom subsystem requests.
 | `ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32`  | `ZMK_CUSTOM_SETTING_VALUE_INT32(value)`  | Signed 32-bit integer. Use this for numeric settings, indexes, and IDs.                                |
 | `ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL`   | `ZMK_CUSTOM_SETTING_VALUE_BOOL(value)`   | Boolean setting.                                                                                       |
 | `ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING` | `ZMK_CUSTOM_SETTING_VALUE_STRING(value)` | UTF-8/string setting stored with an explicit byte length.                                              |
+| `ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR` | `ZMK_CUSTOM_SETTING_VALUE_BEHAVIOR(behavior_id, param1, param2)` | A ZMK behavior binding (behavior local ID plus its two binding parameters). See [Behavior Settings](#behavior-settings). |
 
 #### Confidentiality
 
@@ -246,6 +248,49 @@ Field constraints are limited to none and a range on `INT32` fields
 kinds on a field). There is no dedicated Studio RPC message for records yet:
 a record setting's RPC representation is its encoded bytes, so a Studio
 client sees an opaque blob rather than a generic per-field edit form.
+
+### Behavior Settings
+
+`ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR` stores a ZMK behavior binding: a
+behavior local ID (`CONFIG_ZMK_BEHAVIOR_LOCAL_IDS`) plus its two binding
+parameters, e.g. for reassigning a key at runtime.
+
+```c
+ZMK_CUSTOM_SETTING_DEFINE(my_key_setting, "my_module", "key_binding",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
+                          ZMK_CUSTOM_SETTING_VALUE_BEHAVIOR(0, 0, 0),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+struct zmk_custom_setting_behavior_value binding;
+zmk_custom_setting_get_behavior(my_key_setting, &binding);
+zmk_custom_setting_set_behavior(my_key_setting,
+                                (struct zmk_custom_setting_behavior_value){
+                                    .behavior_id = zmk_behavior_get_local_id("key_press"),
+                                    .param1 = A,
+                                    .param2 = 0,
+                                },
+                                ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+```
+
+Every write is validated against the target behavior's own ZMK parameter
+metadata (`zmk_behavior_validate_binding`, `CONFIG_ZMK_BEHAVIOR_METADATA`):
+an unknown `behavior_id`, or a `param1`/`param2` combination the behavior
+itself rejects (e.g. an out-of-range HID usage for `&kp`), fails with
+`-EINVAL` instead of being stored. This requires
+`CONFIG_ZMK_BEHAVIOR_LOCAL_IDS`; without it, writes fail with `-ENOTSUP`.
+
+Internally (both in the temporary-override pool and on flash), a behavior
+value is packed as three back-to-back ULEB128 varints instead of a fixed
+3x `uint32_t` layout, since real bindings overwhelmingly use small ids and
+parameters (keycodes, layer indices). This bounds worst case at 13 bytes
+while using as little as 3 bytes for the common case. There is no dedicated
+Studio RPC message for the encoded bytes: `SettingBehaviorValue` in the
+Studio RPC protocol carries `behavior_id`/`param1`/`param2` as plain
+`uint32` fields, and the compact encoding is purely an internal storage
+detail.
 
 ### Studio RPC Access
 

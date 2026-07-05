@@ -24,6 +24,17 @@ enum zmk_custom_setting_value_type {
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 = 2,
     ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL = 3,
     ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING = 4,
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR = 5,
+};
+
+/* A ZMK behavior binding: a behavior local ID (see CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+ * plus its two binding parameters. Writes are validated against the target
+ * behavior's parameter metadata (see zmk_behavior_validate_binding in
+ * <drivers/behavior.h>) when CONFIG_ZMK_BEHAVIOR_LOCAL_IDS is enabled. */
+struct zmk_custom_setting_behavior_value {
+    uint32_t behavior_id;
+    uint32_t param1;
+    uint32_t param2;
 };
 
 /* Write mode controls whether a new value is saved, staged in RAM, or temporary. */
@@ -70,6 +81,7 @@ struct zmk_custom_setting_value {
         int32_t int32_value;
         bool bool_value;
         char string_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+        struct zmk_custom_setting_behavior_value behavior_value;
     };
 };
 
@@ -171,6 +183,14 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,                                               \
         .size = sizeof((uint8_t[]){__VA_ARGS__}),                                                  \
         .bytes_value = {__VA_ARGS__},                                                              \
+    })
+
+#define ZMK_CUSTOM_SETTING_VALUE_BEHAVIOR(_behavior_id, _param1, _param2)                          \
+    ((struct zmk_custom_setting_value){                                                            \
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,                                            \
+        .behavior_value = {.behavior_id = (_behavior_id),                                          \
+                           .param1 = (_param1),                                                    \
+                           .param2 = (_param2)},                                                   \
     })
 
 #define ZMK_CUSTOM_SETTINGS_STRINGIFY(x) ZMK_CUSTOM_SETTINGS_STRINGIFY_INNER(x)
@@ -466,6 +486,14 @@ int zmk_custom_setting_set_int32(const struct zmk_custom_setting *setting, int32
 int zmk_custom_setting_get_bool(const struct zmk_custom_setting *setting, bool *value);
 int zmk_custom_setting_set_bool(const struct zmk_custom_setting *setting, bool value,
                                 enum zmk_custom_setting_write_mode mode);
+
+/* Get/set a BEHAVIOR setting. set validates behaviorId/param1/param2 against
+ * the target behavior's parameter metadata (see zmk_custom_setting_validate). */
+int zmk_custom_setting_get_behavior(const struct zmk_custom_setting *setting,
+                                    struct zmk_custom_setting_behavior_value *value);
+int zmk_custom_setting_set_behavior(const struct zmk_custom_setting *setting,
+                                    struct zmk_custom_setting_behavior_value value,
+                                    enum zmk_custom_setting_write_mode mode);
 
 /*
  * Record settings: a struct with a declared field schema, stored as a

@@ -12,6 +12,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 
+#include <dt-bindings/zmk/hid_usage.h>
 #include <dt-bindings/zmk/hid_usage_pages.h>
 #include <zmk/behavior.h>
 #include <cormoran/zmk/custom_settings.h>
@@ -22,7 +23,11 @@
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-#define TEST_SETTINGS_STORAGE_CAPACITY 8
+/* Generous enough to also hold every "behavior/local_id/N" entry ZMK's own
+ * behavior subsystem persists once test_behavior_value_type() loads the
+ * "behavior" settings subtree (one entry per compiled-in behavior, ~30 for
+ * the standard behaviors.dtsi set), on top of this file's own settings. */
+#define TEST_SETTINGS_STORAGE_CAPACITY 64
 
 struct test_settings_record {
     bool present;
@@ -226,6 +231,13 @@ ZMK_CUSTOM_SETTING_DEFINE(test_behavior_id_setting, "test", "behavior_id",
                           ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_BEHAVIOR_ID);
+
+ZMK_CUSTOM_SETTING_DEFINE(test_behavior_setting, "test", "behavior_value",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
+                          ZMK_CUSTOM_SETTING_VALUE_BEHAVIOR(0, 0, 0),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 #endif
 
 struct test_profile {
@@ -310,6 +322,28 @@ static int expect_bytes_value(const struct zmk_custom_setting_value *value, cons
 
     return 0;
 }
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+static int expect_behavior_value(const struct zmk_custom_setting *setting,
+                                 struct zmk_custom_setting_behavior_value expected) {
+    struct zmk_custom_setting_behavior_value value;
+    int ret = zmk_custom_setting_get_behavior(setting, &value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (value.behavior_id != expected.behavior_id || value.param1 != expected.param1 ||
+        value.param2 != expected.param2) {
+        LOG_ERR("Unexpected custom behavior setting value: expected id=%u p1=%u p2=%u, got id=%u "
+                "p1=%u p2=%u",
+                expected.behavior_id, expected.param1, expected.param2, value.behavior_id,
+                value.param1, value.param2);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+#endif
 
 static int test_constraint_validation(void) {
     const struct zmk_custom_setting *hid_usage = zmk_custom_setting_find("test", "hid_usage");
@@ -1118,6 +1152,99 @@ static int test_record_settings(void) {
     return 0;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+static int test_behavior_value_type(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "behavior_value");
+    if (!setting) {
+        LOG_ERR("Test behavior value setting not registered");
+        return -ENOENT;
+    }
+
+    /* ZMK's own "behavior" settings subtree assigns real local IDs from its
+     * commit handler (behavior_local_id_init for the CRC16 id type, or
+     * behavior_handle_commit for the settings-table id type); until that
+     * subtree is loaded/committed once, every behavior's local_id is stuck
+     * at its zero-initialized default, making zmk_behavior_get_local_id and
+     * zmk_behavior_find_behavior_name_from_local_id both resolve to id 0 and
+     * therefore ambiguous between behaviors. Load it explicitly here since
+     * this test file's fake settings backend is otherwise only driven by
+     * this module's own "custom_settings" subtree. */
+    int ret = settings_load_subtree("behavior");
+    if (ret < 0) {
+        return ret;
+    }
+
+    zmk_behavior_local_id_t key_press_id = zmk_behavior_get_local_id("key_press");
+    if (key_press_id == UINT16_MAX) {
+        LOG_ERR("Test key press behavior local ID not registered");
+        return -ENOENT;
+    }
+
+    /* &kp's metadata only accepts an HID_USAGE-shaped param1 and requires
+     * param2 == 0, so this exercises real ZMK behavior metadata validation
+     * (zmk_behavior_validate_binding), not just a local id lookup. */
+    struct zmk_custom_setting_behavior_value key_a = {
+        .behavior_id = key_press_id,
+        .param1 = ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_A),
+        .param2 = 0,
+    };
+
+    ret = zmk_custom_setting_set_behavior(setting, key_a, ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = expect_behavior_value(setting, key_a);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Force a reload from persistent storage to prove the varint-packed
+     * storage encoding (see encode_behavior_value in custom_settings.c)
+     * round-trips through the settings backend, not just the in-RAM cache. */
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = expect_behavior_value(setting, key_a);
+    if (ret < 0) {
+        return ret;
+    }
+    /* behavior_id is a runtime-assigned local id (registration-order
+     * dependent), so it is deliberately omitted from this log line to keep
+     * it deterministic across builds -- see custom_settings_validate_behavior_id
+     * above for the same reasoning. */
+    LOG_INF("PASS: custom_settings_behavior_value param1=0x%05x", key_a.param1);
+
+    struct zmk_custom_setting_behavior_value bad_param1 = {
+        .behavior_id = key_press_id,
+        .param1 = 0xffff,
+        .param2 = 0,
+    };
+    ret =
+        zmk_custom_setting_set_behavior(setting, bad_param1, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected behavior param metadata validation failure, got %d", ret);
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting_behavior_value bad_id = {
+        .behavior_id = UINT16_MAX,
+        .param1 = 0,
+        .param2 = 0,
+    };
+    ret = zmk_custom_setting_set_behavior(setting, bad_id, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected behavior id validation failure, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_behavior_value_rejects_invalid");
+
+    return zmk_custom_setting_reset(setting);
+}
+#endif
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -1159,7 +1286,16 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    return test_record_settings();
+    ret = test_record_settings();
+    if (ret < 0) {
+        return ret;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+    return test_behavior_value_type();
+#else
+    return 0;
+#endif
 }
 
 SYS_INIT(custom_settings_test_init, APPLICATION, 99);

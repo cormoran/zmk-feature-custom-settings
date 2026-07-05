@@ -269,6 +269,24 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_id) = {
     .default_value = &zmk_config_sample_behavior_id_default,
     .temp_slot = -1,
 };
+
+static const struct zmk_custom_setting_value zmk_config_sample_behavior_value_default = {
+    .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
+    .behavior_value = {.behavior_id = 0, .param1 = 0, .param2 = 0}};
+
+STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_value) = {
+    .custom_subsystem_id = "zmk_config_sample",
+    .key = "behavior_value",
+    .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
+    .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
+    .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    .constraints = zmk_config_sample_no_constraints,
+    .constraints_count = ARRAY_SIZE(zmk_config_sample_no_constraints),
+    .default_value = &zmk_config_sample_behavior_value_default,
+    .temp_slot = -1,
+};
 #endif
 
 #define ZMK_CONFIG_SAMPLE_ARRAY_SETTING(_name, _index, _default)                                   \
