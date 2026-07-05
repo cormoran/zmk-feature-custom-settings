@@ -448,3 +448,113 @@ int zmk_custom_setting_set_int32(const struct zmk_custom_setting *setting, int32
 int zmk_custom_setting_get_bool(const struct zmk_custom_setting *setting, bool *value);
 int zmk_custom_setting_set_bool(const struct zmk_custom_setting *setting, bool value,
                                 enum zmk_custom_setting_write_mode mode);
+
+/*
+ * Record settings: a struct with a declared field schema, stored as a
+ * versioned TLV (field id, length, value) encoding inside a BYTES setting.
+ * Unknown field ids are skipped on decode and fields absent from the stored
+ * data are left untouched in the destination struct (so callers should
+ * populate defaults before calling zmk_custom_setting_record_get); adding a
+ * field to the struct does not invalidate previously stored data.
+ *
+ * This builds on the existing BYTES value type and zmk_custom_setting_write_bytes/
+ * read_into; there is no new RPC value type, so a record setting's RPC/export
+ * representation is the encoded TLV bytes. zmk_custom_setting_record_set only
+ * enforces ZMK_CUSTOM_SETTING_CONSTRAINT_NONE and
+ * ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE (on INT32 fields); other constraint
+ * kinds fail with -ENOTSUP.
+ */
+#define ZMK_CUSTOM_SETTING_RECORD_VERSION 1
+#define ZMK_CUSTOM_SETTING_RECORD_MAX_FIELD_SIZE 255
+
+struct zmk_custom_setting_record_field {
+    uint8_t field_id;
+    size_t offset;
+    size_t size;
+    enum zmk_custom_setting_value_type type;
+    const struct zmk_custom_setting_constraint *constraint;
+};
+
+struct zmk_custom_setting_record_schema {
+    const struct zmk_custom_setting_record_field *fields;
+    size_t fields_count;
+    size_t record_size;
+};
+
+/* _constraint is a pointer to a separately-declared static const
+ * struct zmk_custom_setting_constraint (see
+ * ZMK_CUSTOM_SETTING_RECORD_RANGE_INT32_DEFINE), or NULL for no constraint.
+ * It must be a pointer, not the ZMK_CUSTOM_SETTING_RANGE_INT32(...) compound
+ * literal used elsewhere: nesting that inside this field's own initializer
+ * hits the same non-constant-expression restriction that
+ * ZMK_CUSTOM_SETTING_RANGE_INT32's own definition works around. */
+#define ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32(_struct, _field, _id, _constraint)                   \
+    {.field_id = (_id),                                                                            \
+     .offset = offsetof(_struct, _field),                                                          \
+     .size = sizeof(((_struct *)0)->_field),                                                       \
+     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,                                                  \
+     .constraint = (_constraint)}
+
+/* Declares a named, reusable range constraint suitable for
+ * ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32's _constraint argument (pass
+ * &_name). Uses field initializers rather than the
+ * ZMK_CUSTOM_SETTING_RANGE_INT32(...) compound literal so the declaration
+ * itself is a valid constant initializer. */
+#define ZMK_CUSTOM_SETTING_RECORD_RANGE_INT32_DEFINE(_name, _min, _max)                            \
+    static const struct zmk_custom_setting_constraint _name = {                                    \
+        .type = ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE,                                               \
+        .range = {.min = {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_min)},     \
+                  .max = {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_max)}}}
+
+#define ZMK_CUSTOM_SETTING_RECORD_FIELD_BOOL(_struct, _field, _id)                                 \
+    {.field_id = (_id),                                                                            \
+     .offset = offsetof(_struct, _field),                                                          \
+     .size = sizeof(((_struct *)0)->_field),                                                       \
+     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,                                                   \
+     .constraint = NULL}
+
+/* _field must be a fixed-size char array; the encoded/decoded length always
+ * leaves room for a NUL terminator within that array. */
+#define ZMK_CUSTOM_SETTING_RECORD_FIELD_STRING(_struct, _field, _id)                               \
+    {.field_id = (_id),                                                                            \
+     .offset = offsetof(_struct, _field),                                                          \
+     .size = sizeof(((_struct *)0)->_field),                                                       \
+     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,                                                 \
+     .constraint = NULL}
+
+/* Declares the fields array and schema object as two plain (non-compound-
+ * literal) static objects -- required so this expands to a valid constant
+ * initializer under strict -std=c11 (see ZMK_CUSTOM_SETTING_RANGE_INT32). */
+#define ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(_name, _struct, ...)                               \
+    static const struct zmk_custom_setting_record_field _name##_fields[] = {__VA_ARGS__};          \
+    static const struct zmk_custom_setting_record_schema _name = {                                 \
+        .fields = _name##_fields,                                                                  \
+        .fields_count = ARRAY_SIZE(_name##_fields),                                                \
+        .record_size = sizeof(_struct),                                                            \
+    }
+
+/* Encode record (a pointer to a struct matching schema) into a TLV byte
+ * buffer. Returns -EMSGSIZE if it does not fit out_capacity or a field
+ * exceeds ZMK_CUSTOM_SETTING_RECORD_MAX_FIELD_SIZE bytes. */
+int zmk_custom_setting_record_encode(const struct zmk_custom_setting_record_schema *schema,
+                                     const void *record, uint8_t *out, size_t out_capacity,
+                                     size_t *out_size);
+
+/* Decode a TLV byte buffer into record. Fields present in the data but not
+ * in schema are skipped; fields in schema but absent from the data are left
+ * unmodified in record. Returns -ENOTSUP for an unrecognized version byte. */
+int zmk_custom_setting_record_decode(const struct zmk_custom_setting_record_schema *schema,
+                                     const uint8_t *data, size_t data_size, void *record);
+
+/* Validate record's fields against schema's constraints, then encode and
+ * write it to a BYTES setting via zmk_custom_setting_write_bytes. */
+int zmk_custom_setting_record_set(const struct zmk_custom_setting *setting,
+                                  const struct zmk_custom_setting_record_schema *schema,
+                                  const void *record, enum zmk_custom_setting_write_mode mode);
+
+/* Read a BYTES setting's stored TLV bytes and decode them into record.
+ * Populate record with defaults before calling, since fields absent from
+ * the stored data are left as-is. */
+int zmk_custom_setting_record_get(const struct zmk_custom_setting *setting,
+                                  const struct zmk_custom_setting_record_schema *schema,
+                                  void *record);

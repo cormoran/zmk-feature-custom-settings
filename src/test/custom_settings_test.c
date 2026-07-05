@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <stddef.h>
 #include <string.h>
 
 #include <zephyr/init.h>
@@ -226,6 +227,28 @@ ZMK_CUSTOM_SETTING_DEFINE(test_behavior_id_setting, "test", "behavior_id",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_BEHAVIOR_ID);
 #endif
+
+struct test_profile {
+    int32_t speed;
+    bool invert;
+    char label[8];
+};
+
+ZMK_CUSTOM_SETTING_RECORD_RANGE_INT32_DEFINE(test_profile_speed_range, 0, 100);
+
+ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(
+    test_profile_schema, struct test_profile,
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32(struct test_profile, speed, 1, &test_profile_speed_range),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_BOOL(struct test_profile, invert, 2),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_STRING(struct test_profile, label, 3));
+
+/* Default value is just the TLV version byte (no fields), decodes to "no
+ * change" against caller-provided defaults. */
+ZMK_CUSTOM_SETTING_DEFINE(test_record_setting, "test", "record_value",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, ZMK_CUSTOM_SETTING_VALUE_BYTES(1),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
@@ -928,6 +951,104 @@ static int test_temporary_override_pool(void) {
     return 0;
 }
 
+static int test_record_settings(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
+    if (!setting) {
+        LOG_ERR("Record test setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Nothing stored yet (default is just the TLV version byte), so
+     * caller-provided defaults must survive record_get untouched. */
+    struct test_profile profile = {.speed = 5, .invert = false, .label = "def"};
+    ret = zmk_custom_setting_record_get(setting, &test_profile_schema, &profile);
+    if (ret < 0) {
+        return ret;
+    }
+    if (profile.speed != 5 || profile.invert != false || strcmp(profile.label, "def") != 0) {
+        LOG_ERR("record_get on the default value changed caller-provided defaults");
+        return -EINVAL;
+    }
+
+    struct test_profile write_profile = {.speed = 42, .invert = true, .label = "abcdefg"};
+    ret = zmk_custom_setting_record_set(setting, &test_profile_schema, &write_profile,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct test_profile read_profile = {0};
+    ret = zmk_custom_setting_record_get(setting, &test_profile_schema, &read_profile);
+    if (ret < 0) {
+        return ret;
+    }
+    if (read_profile.speed != 42 || read_profile.invert != true ||
+        strcmp(read_profile.label, "abcdefg") != 0) {
+        LOG_ERR("Record round-trip mismatch: speed=%d invert=%d label=%s", read_profile.speed,
+                read_profile.invert, read_profile.label);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_record speed=42 invert=1 label=abcdefg");
+
+    /* A field constraint violation is rejected before anything is written. */
+    struct test_profile invalid_profile = {.speed = 999, .invert = false, .label = "x"};
+    ret = zmk_custom_setting_record_set(setting, &test_profile_schema, &invalid_profile,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected an out-of-range record field to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+    read_profile = (struct test_profile){0};
+    ret = zmk_custom_setting_record_get(setting, &test_profile_schema, &read_profile);
+    if (ret < 0 || read_profile.speed != 42) {
+        LOG_ERR("Rejected record write unexpectedly changed the stored value");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_record_constraint_rejected");
+
+    /* Schema evolution: decoding with a schema missing a field the data
+     * has (label) skips it and leaves the destination struct's own value
+     * for that field untouched. */
+    uint8_t encoded[32];
+    size_t encoded_size;
+    ret = zmk_custom_setting_record_encode(&test_profile_schema, &write_profile, encoded,
+                                           sizeof(encoded), &encoded_size);
+    if (ret < 0) {
+        return ret;
+    }
+    static const struct zmk_custom_setting_record_field speed_only_fields[] = {
+        {.field_id = 1,
+         .offset = offsetof(struct test_profile, speed),
+         .size = sizeof(int32_t),
+         .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+         .constraint = NULL},
+    };
+    static const struct zmk_custom_setting_record_schema speed_only_schema = {
+        .fields = speed_only_fields,
+        .fields_count = ARRAY_SIZE(speed_only_fields),
+        .record_size = sizeof(struct test_profile),
+    };
+    struct test_profile speed_only = {.speed = -1, .invert = false, .label = "kept"};
+    ret = zmk_custom_setting_record_decode(&speed_only_schema, encoded, encoded_size, &speed_only);
+    if (ret < 0 || speed_only.speed != 42 || strcmp(speed_only.label, "kept") != 0) {
+        LOG_ERR("Decoding with a narrower schema did not skip the unknown field correctly");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_record_schema_evolution speed=42 label=kept");
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -959,7 +1080,12 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    return test_temporary_override_pool();
+    ret = test_temporary_override_pool();
+    if (ret < 0) {
+        return ret;
+    }
+
+    return test_record_settings();
 }
 
 SYS_INIT(custom_settings_test_init, APPLICATION, 99);

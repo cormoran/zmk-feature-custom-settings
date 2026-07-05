@@ -194,6 +194,59 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 ```
 
+### Record Settings (Structs)
+
+A record setting stores a C struct as a single `BYTES` setting, using a
+versioned, per-field TLV (tag, length, value) encoding declared through a
+field schema. Unlike a hand-written bytes converter, individual fields are
+validated separately, and the encoding tolerates schema evolution: a field
+added to the struct later does not invalidate previously stored data (it is
+just absent from old records, so the caller's own default for that field
+applies), and a field removed from the schema is silently skipped when
+decoding old data.
+
+```c
+struct my_profile {
+    int32_t speed;
+    bool invert;
+    char label[12];
+};
+
+ZMK_CUSTOM_SETTING_RECORD_RANGE_INT32_DEFINE(my_profile_speed_range, 0, 100);
+
+ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(
+    my_profile_schema, struct my_profile,
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32(struct my_profile, speed, /* field id */ 1,
+                                          &my_profile_speed_range),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_BOOL(struct my_profile, invert, /* field id */ 2),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_STRING(struct my_profile, label, /* field id */ 3));
+
+ZMK_CUSTOM_SETTING_DEFINE(my_profile_setting, "my_module", "profile",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, ZMK_CUSTOM_SETTING_VALUE_BYTES(1),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+struct my_profile profile = {.speed = 50, .invert = false, .label = "default"};
+zmk_custom_setting_record_get(my_profile_setting, &my_profile_schema, &profile);
+
+profile.speed = 80;
+int ret = zmk_custom_setting_record_set(my_profile_setting, &my_profile_schema, &profile,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+/* ret == -ERANGE if a field like speed violates its constraint; nothing is
+ * written in that case. */
+```
+
+Field ids are the stable identifiers for schema evolution, so keep them
+fixed once a field ships (like setting keys). `_id` values are single bytes
+(0-255) and only need to be unique within one schema.
+
+Field constraints are limited to none and a range on `INT32` fields
+(`zmk_custom_setting_record_set` returns `-ENOTSUP` for other constraint
+kinds on a field). There is no dedicated Studio RPC message for records yet:
+a record setting's RPC representation is its encoded bytes, so a Studio
+client sees an opaque blob rather than a generic per-field edit form.
+
 ### Studio RPC Access
 
 For RPC access, the setting namespace should match a Studio custom subsystem
