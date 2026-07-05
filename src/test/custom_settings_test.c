@@ -951,6 +951,75 @@ static int test_temporary_override_pool(void) {
     return 0;
 }
 
+/* Simulates what a boot-time devicetree default installer does: replace a
+ * setting's compile-time default before any user value has been set, then
+ * confirm reset() re-applies the new default. */
+static int test_boot_default_override(void) {
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    if (!int_setting) {
+        return -ENODEV;
+    }
+
+    int ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* An out-of-range default is rejected and must not disturb the existing
+     * default. */
+    ret = zmk_custom_setting_set_default(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(500));
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected out-of-range default to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+    ret = expect_int_value(int_setting, 10);
+    if (ret < 0) {
+        return ret;
+    }
+
+    static const struct zmk_custom_setting_value boot_default = ZMK_CUSTOM_SETTING_VALUE_INT32(77);
+    ret = zmk_custom_setting_set_default(int_setting, &boot_default);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 77);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* A user write still shadows the new default, and reset() restores it. */
+    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(42),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 42);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 77);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Restore the compile-time default so this test is order-independent. */
+    ret = zmk_custom_setting_set_default(int_setting, &test_int_setting_default);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_boot_default_override");
+    return 0;
+}
+
 static int test_record_settings(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
     if (!setting) {
@@ -1081,6 +1150,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_temporary_override_pool();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_boot_default_override();
     if (ret < 0) {
         return ret;
     }

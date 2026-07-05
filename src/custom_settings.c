@@ -517,6 +517,35 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
     return 0;
 }
 
+int zmk_custom_setting_set_default(const struct zmk_custom_setting *const_setting,
+                                   const struct zmk_custom_setting_value *value) {
+    if (!const_setting || !value) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+
+    int ret = zmk_custom_setting_validate(setting, value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    setting->default_value = value;
+    /* No persisted value has been loaded and no in-memory write has happened
+     * yet, so the current memory_value (whatever it was materialized to, or
+     * even its zero-initialized pre-init state) still represents "unset" -
+     * refresh it too. This makes the call safe regardless of whether it runs
+     * before or after this module's own registry init, as long as it is
+     * before settings_load() (i.e. from any SYS_INIT). */
+    if (!setting->has_persistent_value && !setting->dirty) {
+        copy_value(&setting->memory_value, value);
+    }
+    k_mutex_unlock(&settings_lock);
+
+    return 0;
+}
+
 static int setting_storage_name(const struct zmk_custom_setting *setting, char *name,
                                 size_t name_size) {
     int ret = snprintf(name, name_size, SETTINGS_SUBTREE "/%s/%s", setting->custom_subsystem_id,
