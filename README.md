@@ -288,6 +288,41 @@ zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
 zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
 
+`struct zmk_custom_setting_value` is sized by
+`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`, so declaring one on the stack
+just to read or write a small value, or to write a byte buffer whose size
+isn't known at compile time, is wasteful or impossible with the macros
+above. A view-based API avoids both:
+
+```c
+/* Read into a right-sized buffer instead of a full zmk_custom_setting_value. */
+int32_t speed;
+zmk_custom_setting_get_int32(setting, &speed);
+zmk_custom_setting_set_int32(setting, 20, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+/* zmk_custom_setting_get_bool/set_bool follow the same pattern. */
+
+/* Write bytes/string settings from a runtime buffer of dynamic length. */
+uint8_t payload[dynamic_len];
+zmk_custom_setting_write_bytes(blob_setting, payload, dynamic_len,
+                               ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+/* Copy any setting's raw payload into a caller-sized buffer; fails with
+ * -EMSGSIZE instead of overflowing if the buffer is too small. */
+uint8_t buf[8];
+size_t size;
+zmk_custom_setting_read_into(setting, buf, sizeof(buf), &size, NULL);
+
+/* Borrow the effective value with no copy at all; the callback runs while
+ * the settings lock is held, so keep it short and do not call back into
+ * other zmk_custom_setting_* functions from within it. */
+void log_speed(const struct zmk_custom_setting_value *value, void *user_data) {
+    ARG_UNUSED(user_data);
+    LOG_INF("speed=%d", value->int32_value);
+}
+zmk_custom_setting_with_value(setting, log_speed, NULL);
+```
+
 ## Web UI
 
 The web UI in `web/` connects to a keyboard over serial, finds the

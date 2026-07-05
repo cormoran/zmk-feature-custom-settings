@@ -387,3 +387,48 @@ bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setti
 /* Validate value type and all constraints for a setting without writing it. */
 int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
                                 const struct zmk_custom_setting_value *value);
+
+/*
+ * View-based read/write API.
+ *
+ * These avoid requiring callers to declare a full struct
+ * zmk_custom_setting_value (sized by CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE)
+ * on their own stack just to read or write one small or dynamically-sized
+ * value, and let bytes/string values be written from a runtime buffer
+ * instead of only the compile-time-literal ZMK_CUSTOM_SETTING_VALUE_BYTES(...)
+ * macro.
+ */
+
+/* Callback invoked with the effective value while the settings lock is held.
+ * Runs synchronously; keep it short, copy out anything needed, and do not
+ * call back into other zmk_custom_setting_* functions for the same or other
+ * settings from within it. */
+typedef void (*zmk_custom_setting_value_visitor_t)(const struct zmk_custom_setting_value *value,
+                                                   void *user_data);
+
+/* Borrow the effective value without copying it into a caller-owned
+ * struct zmk_custom_setting_value first. */
+int zmk_custom_setting_with_value(const struct zmk_custom_setting *setting,
+                                  zmk_custom_setting_value_visitor_t visitor, void *user_data);
+
+/* Copy the effective value's raw payload into a caller-sized buffer.
+ * Returns -EMSGSIZE if capacity is smaller than the value. out_size and
+ * out_type may be NULL. */
+int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void *buf,
+                                 size_t capacity, size_t *out_size,
+                                 enum zmk_custom_setting_value_type *out_type);
+
+/* Write a BYTES or STRING setting from a runtime buffer instead of a
+ * compile-time-literal value. For STRING settings, size is measured before
+ * any truncation to CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. */
+int zmk_custom_setting_write_bytes(const struct zmk_custom_setting *setting, const void *data,
+                                   size_t size, enum zmk_custom_setting_write_mode mode);
+
+/* Typed scalar convenience wrappers over read_into/write. Return -EINVAL if
+ * the setting is not of the matching type. */
+int zmk_custom_setting_get_int32(const struct zmk_custom_setting *setting, int32_t *value);
+int zmk_custom_setting_set_int32(const struct zmk_custom_setting *setting, int32_t value,
+                                 enum zmk_custom_setting_write_mode mode);
+int zmk_custom_setting_get_bool(const struct zmk_custom_setting *setting, bool *value);
+int zmk_custom_setting_set_bool(const struct zmk_custom_setting *setting, bool value,
+                                enum zmk_custom_setting_write_mode mode);

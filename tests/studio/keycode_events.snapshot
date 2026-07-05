@@ -20,5 +20,6 @@ PASS: custom_settings_pop_back array[2]=3 size=2
 PASS: custom_settings_push_back array[2]=88 size=3
 PASS: custom_settings_save_all_active_array_items size=3
 PASS: custom_settings_push_back_full size=3
+PASS: custom_settings_view_api int=42 bytes=05060708
 PASS: custom_settings_chunked_rpc rpc=030201->090807 internal=070809
 PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809

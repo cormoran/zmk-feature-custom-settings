@@ -715,6 +715,108 @@ static int test_array_lifecycle(void) {
     return 0;
 }
 
+static void capture_int32_visitor(const struct zmk_custom_setting_value *value, void *user_data) {
+    *(int32_t *)user_data = value->int32_value;
+}
+
+static int test_view_based_api(void) {
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    const struct zmk_custom_setting *bytes_setting = zmk_custom_setting_find("test", "bytes_value");
+    if (!int_setting || !bytes_setting) {
+        LOG_ERR("View API test settings not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_reset(bytes_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* zmk_custom_setting_with_value: zero-copy borrow under the lock. */
+    int32_t seen = 0;
+    ret = zmk_custom_setting_with_value(int_setting, capture_int32_visitor, &seen);
+    if (ret < 0) {
+        return ret;
+    }
+    if (seen != 10) {
+        LOG_ERR("with_value visitor saw %d, expected default 10", seen);
+        return -EINVAL;
+    }
+
+    /* zmk_custom_setting_get_int32 / set_int32. */
+    int32_t int_value;
+    ret = zmk_custom_setting_get_int32(int_setting, &int_value);
+    if (ret < 0 || int_value != 10) {
+        LOG_ERR("get_int32 returned ret=%d value=%d, expected 10", ret, int_value);
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_set_int32(int_setting, 42, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_get_int32(int_setting, &int_value);
+    if (ret < 0 || int_value != 42) {
+        LOG_ERR("get_int32 after set_int32 returned ret=%d value=%d, expected 42", ret, int_value);
+        return -EINVAL;
+    }
+    /* Type mismatch must be rejected rather than silently reinterpreted. */
+    ret = zmk_custom_setting_get_int32(bytes_setting, &int_value);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected get_int32 on a bytes setting to fail, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* zmk_custom_setting_read_into with a right-sized buffer. */
+    uint8_t small_buf[3];
+    size_t out_size = 0;
+    enum zmk_custom_setting_value_type out_type;
+    ret = zmk_custom_setting_read_into(bytes_setting, small_buf, sizeof(small_buf), &out_size,
+                                       &out_type);
+    if (ret < 0 || out_size != 3 || out_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+        small_buf[0] != 1 || small_buf[1] != 2 || small_buf[2] != 3) {
+        LOG_ERR("read_into returned ret=%d size=%u type=%d, expected default bytes {1,2,3}", ret,
+                (unsigned)out_size, out_type);
+        return -EINVAL;
+    }
+    uint8_t too_small[2];
+    ret = zmk_custom_setting_read_into(bytes_setting, too_small, sizeof(too_small), NULL, NULL);
+    if (ret != -EMSGSIZE) {
+        LOG_ERR("Expected read_into with an undersized buffer to fail, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* zmk_custom_setting_write_bytes from a runtime buffer (not a
+     * compile-time-literal ZMK_CUSTOM_SETTING_VALUE_BYTES argument list). */
+    uint8_t runtime_bytes[] = {5, 6, 7, 8};
+    ret = zmk_custom_setting_write_bytes(bytes_setting, runtime_bytes, sizeof(runtime_bytes),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    uint8_t readback[4];
+    ret = zmk_custom_setting_read_into(bytes_setting, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != 4 || memcmp(readback, runtime_bytes, sizeof(runtime_bytes)) != 0) {
+        LOG_ERR("read_into after write_bytes did not return the written value");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_reset(bytes_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_view_api int=42 bytes=05060708");
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -736,7 +838,12 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    return test_array_lifecycle();
+    ret = test_array_lifecycle();
+    if (ret < 0) {
+        return ret;
+    }
+
+    return test_view_based_api();
 }
 
 SYS_INIT(custom_settings_test_init, APPLICATION, 99);

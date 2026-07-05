@@ -1034,6 +1034,170 @@ bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setti
     return has_unsaved;
 }
 
+int zmk_custom_setting_with_value(const struct zmk_custom_setting *setting,
+                                  zmk_custom_setting_value_visitor_t visitor, void *user_data) {
+    if (!setting || !visitor) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    if (zmk_custom_setting_is_array(setting) && setting->array_index >= setting->array_size) {
+        k_mutex_unlock(&settings_lock);
+        return -ENOENT;
+    }
+
+    visitor(effective_value(setting), user_data);
+    k_mutex_unlock(&settings_lock);
+
+    return 0;
+}
+
+struct read_into_context {
+    void *buf;
+    size_t capacity;
+    size_t out_size;
+    enum zmk_custom_setting_value_type out_type;
+    int ret;
+};
+
+static void read_into_visitor(const struct zmk_custom_setting_value *value, void *user_data) {
+    struct read_into_context *ctx = user_data;
+
+    const void *data;
+    size_t size;
+    switch (value->type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+        data = value->bytes_value;
+        size = value->size;
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        data = value->string_value;
+        size = value->size;
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        data = &value->int32_value;
+        size = sizeof(value->int32_value);
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        data = &value->bool_value;
+        size = sizeof(value->bool_value);
+        break;
+    default:
+        ctx->ret = -EINVAL;
+        return;
+    }
+
+    if (size > ctx->capacity) {
+        ctx->ret = -EMSGSIZE;
+        return;
+    }
+
+    memcpy(ctx->buf, data, size);
+    ctx->out_size = size;
+    ctx->out_type = value->type;
+    ctx->ret = 0;
+}
+
+int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void *buf,
+                                 size_t capacity, size_t *out_size,
+                                 enum zmk_custom_setting_value_type *out_type) {
+    if (!setting || (!buf && capacity > 0)) {
+        return -EINVAL;
+    }
+
+    struct read_into_context ctx = {.buf = buf, .capacity = capacity, .ret = -EIO};
+    int ret = zmk_custom_setting_with_value(setting, read_into_visitor, &ctx);
+    if (ret < 0) {
+        return ret;
+    }
+    if (ctx.ret < 0) {
+        return ctx.ret;
+    }
+
+    if (out_size) {
+        *out_size = ctx.out_size;
+    }
+    if (out_type) {
+        *out_type = ctx.out_type;
+    }
+    return 0;
+}
+
+int zmk_custom_setting_write_bytes(const struct zmk_custom_setting *setting, const void *data,
+                                   size_t size, enum zmk_custom_setting_write_mode mode) {
+    if (!setting || (!data && size > 0)) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting_value value = {.type = setting->value_type};
+    switch (setting->value_type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+        if (size > sizeof(value.bytes_value)) {
+            return -EMSGSIZE;
+        }
+        value.size = size;
+        memcpy(value.bytes_value, data, size);
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING: {
+        size_t len = MIN(size, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+        memcpy(value.string_value, data, len);
+        value.string_value[len] = '\0';
+        value.size = len;
+        break;
+    }
+    default:
+        return -EINVAL;
+    }
+
+    return zmk_custom_setting_write(setting, &value, mode);
+}
+
+int zmk_custom_setting_get_int32(const struct zmk_custom_setting *setting, int32_t *value) {
+    if (!setting || !value) {
+        return -EINVAL;
+    }
+
+    enum zmk_custom_setting_value_type type;
+    int ret = zmk_custom_setting_read_into(setting, value, sizeof(*value), NULL, &type);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return type == ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 ? 0 : -EINVAL;
+}
+
+int zmk_custom_setting_set_int32(const struct zmk_custom_setting *setting, int32_t value,
+                                 enum zmk_custom_setting_write_mode mode) {
+    if (!setting) {
+        return -EINVAL;
+    }
+
+    return zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(value), mode);
+}
+
+int zmk_custom_setting_get_bool(const struct zmk_custom_setting *setting, bool *value) {
+    if (!setting || !value) {
+        return -EINVAL;
+    }
+
+    enum zmk_custom_setting_value_type type;
+    int ret = zmk_custom_setting_read_into(setting, value, sizeof(*value), NULL, &type);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL ? 0 : -EINVAL;
+}
+
+int zmk_custom_setting_set_bool(const struct zmk_custom_setting *setting, bool value,
+                                enum zmk_custom_setting_write_mode mode) {
+    if (!setting) {
+        return -EINVAL;
+    }
+
+    return zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_BOOL(value), mode);
+}
+
 static int value_from_storage(struct zmk_custom_setting *setting, const void *data, size_t len) {
     struct zmk_custom_setting_value value = {.type = setting->value_type};
 
