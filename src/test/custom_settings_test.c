@@ -758,7 +758,8 @@ static int test_array_insert_remove(void) {
 
     /* Make room by growing max usage down to 2 active elements first. */
     struct zmk_custom_setting_value popped;
-    ret = zmk_custom_setting_array_pop_back(array_setting, &popped, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    ret = zmk_custom_setting_array_pop_back(array_setting, &popped,
+                                            ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -787,7 +788,8 @@ static int test_array_insert_remove(void) {
     LOG_INF("PASS: custom_settings_insert_at_middle array={1,99,2}");
 
     /* insert_at(index == size) behaves like push_back. */
-    ret = zmk_custom_setting_array_pop_back(array_setting, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    ret = zmk_custom_setting_array_pop_back(array_setting, NULL,
+                                            ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -885,13 +887,13 @@ static int test_array_storage_backward_compat(void) {
     const int32_t old_index_1 = 22;
     const uint32_t old_size = 2;
 
-    ret = test_settings_save(NULL, "custom_settings/test/array_value/0",
-                             (const char *)&old_index_0, sizeof(old_index_0));
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/0", (const char *)&old_index_0,
+                             sizeof(old_index_0));
     if (ret < 0) {
         return ret;
     }
-    ret = test_settings_save(NULL, "custom_settings/test/array_value/1",
-                             (const char *)&old_index_1, sizeof(old_index_1));
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/1", (const char *)&old_index_1,
+                             sizeof(old_index_1));
     if (ret < 0) {
         return ret;
     }

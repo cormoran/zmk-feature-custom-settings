@@ -337,7 +337,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
  * (<= _max_count). */
 #define ZMK_CUSTOM_SETTING_ARRAY_DEFINE(_name, _custom_subsystem_id, _key, _value_type,            \
                                         _max_count, _default_size, _defaults, _confidentiality,    \
-                                        _read_permission, _write_permission, _constraint)           \
+                                        _read_permission, _write_permission, _constraint)          \
     ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_CONSTRAINTS(                                              \
         _name, _custom_subsystem_id, _key, _value_type, _max_count, _default_size, _defaults,      \
         _confidentiality, _read_permission, _write_permission, _constraint)
@@ -379,7 +379,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .dirty = _name##_dirty,                                                                    \
         .has_persistent = _name##_has_persistent,                                                  \
         .max_size = (_max_count),                                                                  \
-        .default_size = (_default_size),                                                          \
+        .default_size = (_default_size),                                                           \
         .defaults = (_defaults),                                                                   \
     };                                                                                             \
     STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
@@ -408,8 +408,8 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
  * array's own initializer breaks strict -std=c11 constant-initializer
  * rules. */
 #define ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(_name, ...)                                  \
-    static const struct zmk_custom_setting_value _name[] = {ZMK_CUSTOM_SETTINGS_INT32_LIST(        \
-        __VA_ARGS__)}
+    static const struct zmk_custom_setting_value _name[] = {                                       \
+        ZMK_CUSTOM_SETTINGS_INT32_LIST(__VA_ARGS__)}
 
 #define ZMK_CUSTOM_SETTINGS_INT32_LIST(...)                                                        \
     FOR_EACH(ZMK_CUSTOM_SETTINGS_INT32_LIST_ITEM, (, ), __VA_ARGS__)
@@ -487,15 +487,13 @@ int zmk_custom_setting_array_pop_back(const struct zmk_custom_setting *setting,
  * like array_push_back. Fails with -ERANGE if the array is already at its
  * maximum size or index is past the (post-insert) end. */
 int zmk_custom_setting_array_insert_at(const struct zmk_custom_setting *array_setting_or_element,
-                                       uint32_t index,
-                                       const struct zmk_custom_setting_value *value,
+                                       uint32_t index, const struct zmk_custom_setting_value *value,
                                        enum zmk_custom_setting_write_mode mode);
 /* Remove the value at index, shifting later elements one slot earlier
  * (memmove) and shrinking the active length by one. Optionally returns the
  * removed value. Fails with -ENOENT if index is past the active length. */
 int zmk_custom_setting_array_remove_at(const struct zmk_custom_setting *array_setting_or_element,
-                                       uint32_t index,
-                                       struct zmk_custom_setting_value *out_value,
+                                       uint32_t index, struct zmk_custom_setting_value *out_value,
                                        enum zmk_custom_setting_write_mode mode);
 
 /* Save the current memory value to persistent storage. */

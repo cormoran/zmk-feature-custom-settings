@@ -901,10 +901,11 @@ static bool list_send_visitor(const struct zmk_custom_setting *item, void *user_
             "include_meta=%d",
             item->custom_subsystem_id, zmk_custom_setting_public_key(item),
             (uint32_t)(zmk_custom_setting_is_array(item) ? item->array_index
-                                                          : ZMK_CUSTOM_SETTING_ARRAY_NONE),
+                                                         : ZMK_CUSTOM_SETTING_ARRAY_NONE),
             can_include_value(item), ctx->include_meta);
     int ret = raise_setting_notification(
-        item, cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
+        item,
+        cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
         can_include_value(item), ctx->include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         LOG_WRN("Failed to raise custom settings list notification: %d", ret);
