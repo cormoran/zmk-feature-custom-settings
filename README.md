@@ -202,6 +202,27 @@ that subsystem's index from ZMK Studio and sends the index in setting requests.
 The custom Studio subsystem identifier for this module is
 `cormoran_custom_settings`.
 
+### Reading And Writing Large Values In Chunks
+
+`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC` (enabled by default alongside Studio
+RPC) adds `ReadValueChunk`/`WriteValueChunk` requests for bytes/string
+settings. Each response or request carries one chunk (bounded by the
+protobuf schema, independent of `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`),
+so a value can be moved across several RPC frames instead of needing to fit
+alongside its metadata in a single `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` frame:
+
+- Read: send `ReadValueChunkRequest{setting, offset}` starting at `offset =
+  0` and keep increasing `offset` by the returned chunk length until the
+  response reports `last = true`. Reads are stateless; chunks may be
+  re-read or read out of order.
+- Write: send `WriteValueChunkRequest{setting, total_size, offset, data,
+  commit, mode}` starting at `offset = 0`. Chunks for one transfer must
+  arrive in order; the value is validated and applied only when a chunk
+  sets `commit = true`, so a partially-sent value is never observable by
+  readers. Only one write transfer is staged at a time
+  (`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE`); starting a new
+  transfer (`offset = 0`) for any setting replaces an abandoned one.
+
 ### Array Settings
 
 Array settings are registered one element at a time up to the maximum supported

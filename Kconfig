@@ -91,6 +91,30 @@ config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
       Delay between batches of list-item notifications. See
       CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE.
 
+config ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
+    bool "Enable chunked read/write RPC for large setting values"
+    depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    default y
+    help
+      Adds ReadValueChunk/WriteValueChunk RPC requests that transfer a
+      bytes/string setting value across multiple frames. Useful when a
+      value plus request/response overhead does not fit
+      CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE, or ahead of a future increase to
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE beyond one frame.
+
+config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
+    int "Chunked write staging buffer size"
+    default ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
+    range 1 ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
+    depends on ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
+    help
+      Size of the single global buffer used to assemble a chunked write
+      before it is validated and applied on commit. One transfer session
+      is supported at a time. Values cannot exceed
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE regardless of this
+      setting, since the assembled value still has to fit the setting's
+      internal storage.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 
