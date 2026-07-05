@@ -17,3 +17,9 @@ cormoran.zmk.custom_settings.Setting.key max_size:48
 
 cormoran.zmk.custom_settings.ErrorResponse.message max_size:96
 cormoran.zmk.custom_settings.StatusResponse.message max_size:96
+
+# Chunk payload size is independent of the setting value size limit so a
+# value larger than one RPC frame can still be transferred over several
+# chunks once per-setting value capacity grows past CHUNK_MAX_SIZE.
+cormoran.zmk.custom_settings.WriteValueChunkRequest.data max_size:128
+cormoran.zmk.custom_settings.ValueChunkResponse.data max_size:128

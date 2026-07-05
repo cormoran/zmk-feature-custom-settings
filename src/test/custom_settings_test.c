@@ -5,6 +5,7 @@
  */
 
 #include <errno.h>
+#include <stddef.h>
 #include <string.h>
 
 #include <zephyr/init.h>
@@ -226,6 +227,28 @@ ZMK_CUSTOM_SETTING_DEFINE(test_behavior_id_setting, "test", "behavior_id",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_BEHAVIOR_ID);
 #endif
+
+struct test_profile {
+    int32_t speed;
+    bool invert;
+    char label[8];
+};
+
+ZMK_CUSTOM_SETTING_RECORD_RANGE_INT32_DEFINE(test_profile_speed_range, 0, 100);
+
+ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(
+    test_profile_schema, struct test_profile,
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32(struct test_profile, speed, 1, &test_profile_speed_range),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_BOOL(struct test_profile, invert, 2),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_STRING(struct test_profile, label, 3));
+
+/* Default value is just the TLV version byte (no fields), decodes to "no
+ * change" against caller-provided defaults. */
+ZMK_CUSTOM_SETTING_DEFINE(test_record_setting, "test", "record_value",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, ZMK_CUSTOM_SETTING_VALUE_BYTES(1),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
@@ -715,6 +738,317 @@ static int test_array_lifecycle(void) {
     return 0;
 }
 
+static void capture_int32_visitor(const struct zmk_custom_setting_value *value, void *user_data) {
+    *(int32_t *)user_data = value->int32_value;
+}
+
+static int test_view_based_api(void) {
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    const struct zmk_custom_setting *bytes_setting = zmk_custom_setting_find("test", "bytes_value");
+    if (!int_setting || !bytes_setting) {
+        LOG_ERR("View API test settings not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_reset(bytes_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* zmk_custom_setting_with_value: zero-copy borrow under the lock. */
+    int32_t seen = 0;
+    ret = zmk_custom_setting_with_value(int_setting, capture_int32_visitor, &seen);
+    if (ret < 0) {
+        return ret;
+    }
+    if (seen != 10) {
+        LOG_ERR("with_value visitor saw %d, expected default 10", seen);
+        return -EINVAL;
+    }
+
+    /* zmk_custom_setting_get_int32 / set_int32. */
+    int32_t int_value;
+    ret = zmk_custom_setting_get_int32(int_setting, &int_value);
+    if (ret < 0 || int_value != 10) {
+        LOG_ERR("get_int32 returned ret=%d value=%d, expected 10", ret, int_value);
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_set_int32(int_setting, 42, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_get_int32(int_setting, &int_value);
+    if (ret < 0 || int_value != 42) {
+        LOG_ERR("get_int32 after set_int32 returned ret=%d value=%d, expected 42", ret, int_value);
+        return -EINVAL;
+    }
+    /* Type mismatch must be rejected rather than silently reinterpreted. */
+    ret = zmk_custom_setting_get_int32(bytes_setting, &int_value);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected get_int32 on a bytes setting to fail, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* zmk_custom_setting_read_into with a right-sized buffer. */
+    uint8_t small_buf[3];
+    size_t out_size = 0;
+    enum zmk_custom_setting_value_type out_type;
+    ret = zmk_custom_setting_read_into(bytes_setting, small_buf, sizeof(small_buf), &out_size,
+                                       &out_type);
+    if (ret < 0 || out_size != 3 || out_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+        small_buf[0] != 1 || small_buf[1] != 2 || small_buf[2] != 3) {
+        LOG_ERR("read_into returned ret=%d size=%u type=%d, expected default bytes {1,2,3}", ret,
+                (unsigned)out_size, out_type);
+        return -EINVAL;
+    }
+    uint8_t too_small[2];
+    ret = zmk_custom_setting_read_into(bytes_setting, too_small, sizeof(too_small), NULL, NULL);
+    if (ret != -EMSGSIZE) {
+        LOG_ERR("Expected read_into with an undersized buffer to fail, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* zmk_custom_setting_write_bytes from a runtime buffer (not a
+     * compile-time-literal ZMK_CUSTOM_SETTING_VALUE_BYTES argument list). */
+    uint8_t runtime_bytes[] = {5, 6, 7, 8};
+    ret = zmk_custom_setting_write_bytes(bytes_setting, runtime_bytes, sizeof(runtime_bytes),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    uint8_t readback[4];
+    ret = zmk_custom_setting_read_into(bytes_setting, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != 4 || memcmp(readback, runtime_bytes, sizeof(runtime_bytes)) != 0) {
+        LOG_ERR("read_into after write_bytes did not return the written value");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_reset(bytes_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_view_api int=42 bytes=05060708");
+    return 0;
+}
+
+/* Exercises the shared temporary-override pool (CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS /
+ * CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE) that replaced a per-setting
+ * temporary_value copy. Assumes the default pool size of 2 slots; none of
+ * the test configs override it. */
+static int test_temporary_override_pool(void) {
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    const struct zmk_custom_setting *bytes_setting = zmk_custom_setting_find("test", "bytes_value");
+    const struct zmk_custom_setting *array_0 =
+        zmk_custom_setting_find_array_element("test", "array_value", 0);
+    const struct zmk_custom_setting *array_1 =
+        zmk_custom_setting_find_array_element("test", "array_value", 1);
+    if (!int_setting || !bytes_setting || !array_0 || !array_1) {
+        LOG_ERR("Temporary override pool test settings not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* A temporary override is visible via read() but does not change
+     * memory_value, and has_unsaved_value reports it. */
+    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 99);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!zmk_custom_setting_has_unsaved_value(int_setting)) {
+        LOG_ERR("Temporary override should report an unsaved value");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_rollback_temporary(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 10);
+    if (ret < 0) {
+        return ret;
+    }
+    if (zmk_custom_setting_has_unsaved_value(int_setting)) {
+        LOG_ERR("Rolled-back custom setting unexpectedly has unsaved value");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_temporary_rollback scalar=10");
+
+    /* A value larger than one pool slot cannot use temporary mode. */
+    uint8_t oversized[CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE + 1];
+    memset(oversized, 0xAA, sizeof(oversized));
+    struct zmk_custom_setting_value oversized_value = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+        .size = sizeof(oversized),
+    };
+    memcpy(oversized_value.bytes_value, oversized, sizeof(oversized));
+    ret = zmk_custom_setting_write(bytes_setting, &oversized_value,
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret != -EMSGSIZE) {
+        LOG_ERR("Expected an oversized temporary write to fail with -EMSGSIZE, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_temporary_oversized size=%u", (unsigned)sizeof(oversized));
+
+    /* Pool exhaustion: only CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS settings
+     * may have an active temporary override at once. */
+    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(array_0, &ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(array_1, &ZMK_CUSTOM_SETTING_VALUE_INT32(3),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret != -EBUSY) {
+        LOG_ERR("Expected the temporary override pool to be exhausted, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_temporary_pool_exhausted");
+
+    /* Freeing a slot lets a new override through. */
+    ret = zmk_custom_setting_rollback_temporary(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(array_1, &ZMK_CUSTOM_SETTING_VALUE_INT32(3),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_temporary_pool_reclaimed");
+
+    ret = zmk_custom_setting_rollback_temporary(array_0);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_rollback_temporary(array_1);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
+static int test_record_settings(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
+    if (!setting) {
+        LOG_ERR("Record test setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Nothing stored yet (default is just the TLV version byte), so
+     * caller-provided defaults must survive record_get untouched. */
+    struct test_profile profile = {.speed = 5, .invert = false, .label = "def"};
+    ret = zmk_custom_setting_record_get(setting, &test_profile_schema, &profile);
+    if (ret < 0) {
+        return ret;
+    }
+    if (profile.speed != 5 || profile.invert != false || strcmp(profile.label, "def") != 0) {
+        LOG_ERR("record_get on the default value changed caller-provided defaults");
+        return -EINVAL;
+    }
+
+    struct test_profile write_profile = {.speed = 42, .invert = true, .label = "abcdefg"};
+    ret = zmk_custom_setting_record_set(setting, &test_profile_schema, &write_profile,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct test_profile read_profile = {0};
+    ret = zmk_custom_setting_record_get(setting, &test_profile_schema, &read_profile);
+    if (ret < 0) {
+        return ret;
+    }
+    if (read_profile.speed != 42 || read_profile.invert != true ||
+        strcmp(read_profile.label, "abcdefg") != 0) {
+        LOG_ERR("Record round-trip mismatch: speed=%d invert=%d label=%s", read_profile.speed,
+                read_profile.invert, read_profile.label);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_record speed=42 invert=1 label=abcdefg");
+
+    /* A field constraint violation is rejected before anything is written. */
+    struct test_profile invalid_profile = {.speed = 999, .invert = false, .label = "x"};
+    ret = zmk_custom_setting_record_set(setting, &test_profile_schema, &invalid_profile,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected an out-of-range record field to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+    read_profile = (struct test_profile){0};
+    ret = zmk_custom_setting_record_get(setting, &test_profile_schema, &read_profile);
+    if (ret < 0 || read_profile.speed != 42) {
+        LOG_ERR("Rejected record write unexpectedly changed the stored value");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_record_constraint_rejected");
+
+    /* Schema evolution: decoding with a schema missing a field the data
+     * has (label) skips it and leaves the destination struct's own value
+     * for that field untouched. */
+    uint8_t encoded[32];
+    size_t encoded_size;
+    ret = zmk_custom_setting_record_encode(&test_profile_schema, &write_profile, encoded,
+                                           sizeof(encoded), &encoded_size);
+    if (ret < 0) {
+        return ret;
+    }
+    static const struct zmk_custom_setting_record_field speed_only_fields[] = {
+        {.field_id = 1,
+         .offset = offsetof(struct test_profile, speed),
+         .size = sizeof(int32_t),
+         .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+         .constraint = NULL},
+    };
+    static const struct zmk_custom_setting_record_schema speed_only_schema = {
+        .fields = speed_only_fields,
+        .fields_count = ARRAY_SIZE(speed_only_fields),
+        .record_size = sizeof(struct test_profile),
+    };
+    struct test_profile speed_only = {.speed = -1, .invert = false, .label = "kept"};
+    ret = zmk_custom_setting_record_decode(&speed_only_schema, encoded, encoded_size, &speed_only);
+    if (ret < 0 || speed_only.speed != 42 || strcmp(speed_only.label, "kept") != 0) {
+        LOG_ERR("Decoding with a narrower schema did not skip the unknown field correctly");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_record_schema_evolution speed=42 label=kept");
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -736,7 +1070,22 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    return test_array_lifecycle();
+    ret = test_array_lifecycle();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_view_based_api();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_temporary_override_pool();
+    if (ret < 0) {
+        return ret;
+    }
+
+    return test_record_settings();
 }
 
 SYS_INIT(custom_settings_test_init, APPLICATION, 99);

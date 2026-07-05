@@ -194,6 +194,59 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 ```
 
+### Record Settings (Structs)
+
+A record setting stores a C struct as a single `BYTES` setting, using a
+versioned, per-field TLV (tag, length, value) encoding declared through a
+field schema. Unlike a hand-written bytes converter, individual fields are
+validated separately, and the encoding tolerates schema evolution: a field
+added to the struct later does not invalidate previously stored data (it is
+just absent from old records, so the caller's own default for that field
+applies), and a field removed from the schema is silently skipped when
+decoding old data.
+
+```c
+struct my_profile {
+    int32_t speed;
+    bool invert;
+    char label[12];
+};
+
+ZMK_CUSTOM_SETTING_RECORD_RANGE_INT32_DEFINE(my_profile_speed_range, 0, 100);
+
+ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(
+    my_profile_schema, struct my_profile,
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32(struct my_profile, speed, /* field id */ 1,
+                                          &my_profile_speed_range),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_BOOL(struct my_profile, invert, /* field id */ 2),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_STRING(struct my_profile, label, /* field id */ 3));
+
+ZMK_CUSTOM_SETTING_DEFINE(my_profile_setting, "my_module", "profile",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, ZMK_CUSTOM_SETTING_VALUE_BYTES(1),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+struct my_profile profile = {.speed = 50, .invert = false, .label = "default"};
+zmk_custom_setting_record_get(my_profile_setting, &my_profile_schema, &profile);
+
+profile.speed = 80;
+int ret = zmk_custom_setting_record_set(my_profile_setting, &my_profile_schema, &profile,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+/* ret == -ERANGE if a field like speed violates its constraint; nothing is
+ * written in that case. */
+```
+
+Field ids are the stable identifiers for schema evolution, so keep them
+fixed once a field ships (like setting keys). `_id` values are single bytes
+(0-255) and only need to be unique within one schema.
+
+Field constraints are limited to none and a range on `INT32` fields
+(`zmk_custom_setting_record_set` returns `-ENOTSUP` for other constraint
+kinds on a field). There is no dedicated Studio RPC message for records yet:
+a record setting's RPC representation is its encoded bytes, so a Studio
+client sees an opaque blob rather than a generic per-field edit form.
+
 ### Studio RPC Access
 
 For RPC access, the setting namespace should match a Studio custom subsystem
@@ -201,6 +254,27 @@ identifier registered by the module that owns the setting. The web UI obtains
 that subsystem's index from ZMK Studio and sends the index in setting requests.
 The custom Studio subsystem identifier for this module is
 `cormoran_custom_settings`.
+
+### Reading And Writing Large Values In Chunks
+
+`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC` (enabled by default alongside Studio
+RPC) adds `ReadValueChunk`/`WriteValueChunk` requests for bytes/string
+settings. Each response or request carries one chunk (bounded by the
+protobuf schema, independent of `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`),
+so a value can be moved across several RPC frames instead of needing to fit
+alongside its metadata in a single `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` frame:
+
+- Read: send `ReadValueChunkRequest{setting, offset}` starting at `offset =
+  0` and keep increasing `offset` by the returned chunk length until the
+  response reports `last = true`. Reads are stateless; chunks may be
+  re-read or read out of order.
+- Write: send `WriteValueChunkRequest{setting, total_size, offset, data,
+  commit, mode}` starting at `offset = 0`. Chunks for one transfer must
+  arrive in order; the value is validated and applied only when a chunk
+  sets `commit = true`, so a partially-sent value is never observable by
+  readers. Only one write transfer is staged at a time
+  (`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE`); starting a new
+  transfer (`offset = 0`) for any setting replaces an abandoned one.
 
 ### Array Settings
 
@@ -266,6 +340,61 @@ zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
+
+`struct zmk_custom_setting_value` is sized by
+`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`, so declaring one on the stack
+just to read or write a small value, or to write a byte buffer whose size
+isn't known at compile time, is wasteful or impossible with the macros
+above. A view-based API avoids both:
+
+```c
+/* Read into a right-sized buffer instead of a full zmk_custom_setting_value. */
+int32_t speed;
+zmk_custom_setting_get_int32(setting, &speed);
+zmk_custom_setting_set_int32(setting, 20, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+/* zmk_custom_setting_get_bool/set_bool follow the same pattern. */
+
+/* Write bytes/string settings from a runtime buffer of dynamic length. */
+uint8_t payload[dynamic_len];
+zmk_custom_setting_write_bytes(blob_setting, payload, dynamic_len,
+                               ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+/* Copy any setting's raw payload into a caller-sized buffer; fails with
+ * -EMSGSIZE instead of overflowing if the buffer is too small. */
+uint8_t buf[8];
+size_t size;
+zmk_custom_setting_read_into(setting, buf, sizeof(buf), &size, NULL);
+
+/* Borrow the effective value with no copy at all; the callback runs while
+ * the settings lock is held, so keep it short and do not call back into
+ * other zmk_custom_setting_* functions from within it. */
+void log_speed(const struct zmk_custom_setting_value *value, void *user_data) {
+    ARG_UNUSED(user_data);
+    LOG_INF("speed=%d", value->int32_value);
+}
+zmk_custom_setting_with_value(setting, log_speed, NULL);
+```
+
+### Memory Notes
+
+Each setting keeps only its current in-memory value in RAM; the default
+value lives in flash and is referenced by pointer, and the persisted value is
+not cached separately:
+
+- `ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY` overrides come from a small
+  shared pool instead of a dedicated slot per setting
+  (`CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS`, default 2;
+  `CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE`, default 32 bytes). Writing a
+  value larger than the slot size in temporary mode fails with `-EMSGSIZE`;
+  writing while the pool is full fails with `-EBUSY`. Other write modes are
+  unaffected by either limit.
+- `zmk_custom_setting_discard` re-reads the previously saved value from flash
+  instead of restoring a RAM-cached copy. This is a rare, explicit user
+  action, so the flash read is not a concern; `zmk_custom_setting_has_unsaved_value`
+  stays a cheap flag check (it does not read flash) and reports "written
+  since the last save/discard/reset", which also means writing back the
+  already-saved value still reports unsaved until the next save/discard.
 
 ## Web UI
 

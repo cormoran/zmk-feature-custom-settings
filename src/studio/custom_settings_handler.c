@@ -36,7 +36,8 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define SUBSYSTEM_IDENTIFIER_STRING "cormoran_custom_settings"
-#define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
+#define LIST_SETTINGS_NOTIFICATION_DELAY                                                           \
+    K_MSEC(CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS)
 #define LIST_SETTINGS_RELAY_DELAY K_MSEC(20)
 #define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD 2
 #define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE                                                 \
@@ -545,7 +546,7 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     *dest = (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
 
     int ret;
-    LOG_INF("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
+    LOG_DBG("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
             "source=%u",
             setting->custom_subsystem_id, zmk_custom_setting_public_key(setting), include_value,
             include_meta, source);
@@ -564,20 +565,20 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     copy_string(dest->key, sizeof(dest->key), zmk_custom_setting_public_key(setting));
     dest->has_unsaved_value = zmk_custom_setting_has_unsaved_value(setting);
     dest->source = source;
-    LOG_INF("Custom settings proto base ready: subsystem=%s key=%s has_unsaved=%d",
+    LOG_DBG("Custom settings proto base ready: subsystem=%s key=%s has_unsaved=%d",
             setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
             dest->has_unsaved_value);
 
     if (include_meta) {
         dest->has_meta = true;
-        LOG_INF("Custom settings proto meta start: subsystem=%s key=%s",
+        LOG_DBG("Custom settings proto meta start: subsystem=%s key=%s",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_meta_to_proto(setting, &dest->meta);
         if (ret < 0) {
             dest->has_meta = false;
             return ret;
         }
-        LOG_INF("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
+        LOG_DBG("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)dest->meta.constraints_count);
     }
@@ -585,19 +586,19 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     if (include_value &&
         setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE) {
         dest->has_value = true;
-        LOG_INF("Custom settings proto value start: subsystem=%s key=%s",
+        LOG_DBG("Custom settings proto value start: subsystem=%s key=%s",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_value_to_proto(setting, &dest->value);
         if (ret < 0) {
             dest->has_value = false;
             return ret;
         }
-        LOG_INF("Custom settings proto value ready: subsystem=%s key=%s value_type=%u",
+        LOG_DBG("Custom settings proto value ready: subsystem=%s key=%s value_type=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)dest->value.which_value_type);
     }
 
-    LOG_INF("Custom settings proto complete: subsystem=%s key=%s", setting->custom_subsystem_id,
+    LOG_DBG("Custom settings proto complete: subsystem=%s key=%s", setting->custom_subsystem_id,
             zmk_custom_setting_public_key(setting));
     return 0;
 }
@@ -837,6 +838,7 @@ static void list_settings_work_handler(struct k_work *work) {
     k_mutex_unlock(&list_settings_lock);
 
     size_t index = 0;
+    size_t sent = 0;
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
         if (index++ < next_index || !setting_is_active(setting) ||
             !setting_matches_scope(setting, &scope)) {
@@ -847,7 +849,7 @@ static void list_settings_work_handler(struct k_work *work) {
         list_settings_next_index = index;
         k_mutex_unlock(&list_settings_lock);
 
-        LOG_INF("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
+        LOG_DBG("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
                 "include_meta=%d",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)(zmk_custom_setting_is_array(setting) ? setting->array_index
@@ -861,8 +863,12 @@ static void list_settings_work_handler(struct k_work *work) {
             LOG_WRN("Failed to raise custom settings list notification: %d", ret);
         }
 
-        schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
-        return;
+        /* Send a batch of items per work cycle instead of one item per
+         * delayed reschedule; each item is still one notification frame. */
+        if (++sent >= CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE) {
+            schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
+            return;
+        }
     }
 
     k_mutex_lock(&list_settings_lock, K_FOREVER);
@@ -1256,6 +1262,228 @@ static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArray
     }
 
     return handle_private_pop_back_array(&private_ref, req->mode, resp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+struct zmk_custom_settings_chunk_session {
+    bool active;
+    const struct zmk_custom_setting *setting;
+    uint32_t total_size;
+    uint32_t received;
+    cormoran_zmk_custom_settings_SettingWriteMode mode;
+    uint8_t buffer[CONFIG_ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE];
+};
+
+static K_MUTEX_DEFINE(chunk_session_lock);
+static struct zmk_custom_settings_chunk_session chunk_session;
+
+static bool chunk_value_type_supported(const struct zmk_custom_setting *setting) {
+    return setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+           setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
+}
+
+static void reset_chunk_session_locked(void) {
+    chunk_session = (struct zmk_custom_settings_chunk_session){0};
+}
+
+static int handle_private_read_value_chunk(const struct zmk_custom_settings_setting_ref *ref,
+                                           uint32_t offset,
+                                           cormoran_zmk_custom_settings_Response *resp) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+    if (!source_targets_local(setting_ref_source(ref))) {
+        return -ENOENT;
+    }
+
+    const struct zmk_custom_setting *setting = setting_for_ref(ref);
+    if (!setting) {
+        return -ENOENT;
+    }
+    if (!chunk_value_type_supported(setting)) {
+        return -ENOTSUP;
+    }
+    if (setting->confidentiality == ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE) {
+        return -ENOENT;
+    }
+    if (needs_unlock(setting->read_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    struct zmk_custom_setting_value value;
+    int ret = zmk_custom_setting_read(setting, &value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value rpc_value;
+    ret = zmk_custom_setting_serialize_rpc_value(setting, &value, &rpc_value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    const uint8_t *data;
+    uint32_t total_size;
+    if (rpc_value.type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
+        data = rpc_value.bytes_value;
+        total_size = rpc_value.size;
+    } else {
+        data = (const uint8_t *)rpc_value.string_value;
+        total_size =
+            bounded_strlen(rpc_value.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+    }
+
+    if (offset > total_size) {
+        return -EINVAL;
+    }
+
+    cormoran_zmk_custom_settings_ValueChunkResponse chunk =
+        cormoran_zmk_custom_settings_ValueChunkResponse_init_zero;
+    chunk.total_size = total_size;
+    chunk.offset = offset;
+    uint32_t chunk_len = MIN(total_size - offset, sizeof(chunk.data.bytes));
+    memcpy(chunk.data.bytes, data + offset, chunk_len);
+    chunk.data.size = chunk_len;
+    chunk.last = (offset + chunk_len) >= total_size;
+
+    resp->which_response_type = cormoran_zmk_custom_settings_Response_value_chunk_tag;
+    resp->response_type.value_chunk = chunk;
+    return 0;
+}
+
+static int
+handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *ref,
+                                 uint32_t total_size, uint32_t offset, const uint8_t *data,
+                                 size_t data_size, bool commit,
+                                 cormoran_zmk_custom_settings_SettingWriteMode write_mode,
+                                 cormoran_zmk_custom_settings_Response *resp) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    const struct zmk_custom_setting *setting = setting_for_ref(ref);
+    if (!setting) {
+        return -ENOENT;
+    }
+    if (!chunk_value_type_supported(setting)) {
+        return -ENOTSUP;
+    }
+    if (needs_unlock(setting->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    k_mutex_lock(&chunk_session_lock, K_FOREVER);
+
+    if (offset == 0) {
+        if (total_size > sizeof(chunk_session.buffer)) {
+            k_mutex_unlock(&chunk_session_lock);
+            return -EMSGSIZE;
+        }
+        reset_chunk_session_locked();
+        chunk_session.active = true;
+        chunk_session.setting = setting;
+        chunk_session.total_size = total_size;
+        chunk_session.mode = write_mode;
+    } else if (!chunk_session.active || chunk_session.setting != setting ||
+               offset != chunk_session.received) {
+        /* Out-of-order chunk, or a chunk for a different setting than the
+         * transfer that is currently in progress. */
+        k_mutex_unlock(&chunk_session_lock);
+        return -EINVAL;
+    }
+
+    if (data_size > chunk_session.total_size - chunk_session.received) {
+        reset_chunk_session_locked();
+        k_mutex_unlock(&chunk_session_lock);
+        return -EMSGSIZE;
+    }
+
+    memcpy(&chunk_session.buffer[chunk_session.received], data, data_size);
+    chunk_session.received += data_size;
+
+    if (!commit) {
+        set_status(resp, chunk_session.received, "Chunk received");
+        k_mutex_unlock(&chunk_session_lock);
+        return 0;
+    }
+
+    if (chunk_session.received != chunk_session.total_size) {
+        reset_chunk_session_locked();
+        k_mutex_unlock(&chunk_session_lock);
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting_value rpc_value = {.type = setting->value_type};
+    if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
+        rpc_value.size = chunk_session.total_size;
+        memcpy(rpc_value.bytes_value, chunk_session.buffer, chunk_session.total_size);
+    } else {
+        size_t len = MIN(chunk_session.total_size, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+        memcpy(rpc_value.string_value, chunk_session.buffer, len);
+        rpc_value.string_value[len] = '\0';
+        rpc_value.size = len;
+    }
+
+    enum zmk_custom_setting_write_mode mode =
+        chunk_session.mode ==
+                cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
+
+    struct zmk_custom_setting_value internal_value;
+    int ret = zmk_custom_setting_deserialize_rpc_value(setting, &rpc_value, &internal_value);
+    reset_chunk_session_locked();
+    k_mutex_unlock(&chunk_session_lock);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write(setting, &internal_value, mode);
+    if (ret < 0) {
+        return ret;
+    }
+
+    set_status(resp, 1, "Value written from chunks");
+    return 0;
+}
+#endif
+
+static int handle_read_value_chunk(const cormoran_zmk_custom_settings_ReadValueChunkRequest *req,
+                                   cormoran_zmk_custom_settings_Response *resp) {
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return handle_private_read_value_chunk(&private_ref, req->offset, resp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+static int handle_write_value_chunk(const cormoran_zmk_custom_settings_WriteValueChunkRequest *req,
+                                    cormoran_zmk_custom_settings_Response *resp) {
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return handle_private_write_value_chunk(&private_ref, req->total_size, req->offset,
+                                            req->data.bytes, req->data.size, req->commit, req->mode,
+                                            resp);
 #else
     return -ENOTSUP;
 #endif
@@ -1664,6 +1892,10 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
         return handle_push_back_array(&req->request_type.push_back_array, resp);
     case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
         return handle_pop_back_array(&req->request_type.pop_back_array, resp);
+    case cormoran_zmk_custom_settings_Request_read_value_chunk_tag:
+        return handle_read_value_chunk(&req->request_type.read_value_chunk, resp);
+    case cormoran_zmk_custom_settings_Request_write_value_chunk_tag:
+        return handle_write_value_chunk(&req->request_type.write_value_chunk, resp);
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);
@@ -2023,6 +2255,120 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
 }
 
 SYS_INIT(custom_settings_rpc_bytes_converter_test_init, APPLICATION, 99);
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) &&                                                 \
+    IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+static int custom_settings_chunked_rpc_test_init(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "bytes_value");
+    if (!setting) {
+        LOG_ERR("Chunked RPC test setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_settings_setting_ref ref = {
+        .has_custom_subsystem_id = true,
+        .has_key = true,
+        .has_source = true,
+        .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+    };
+    copy_string(ref.custom_subsystem_id, sizeof(ref.custom_subsystem_id), "test");
+    copy_string(ref.key, sizeof(ref.key), "bytes_value");
+
+    /* Write RPC bytes [9, 8, 7] (-> internal [7, 8, 9] via the reversing
+     * converter) across two chunks. */
+    uint8_t chunk1[] = {9, 8};
+    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_write_value_chunk(
+        &ref, 3, 0, chunk1, sizeof(chunk1), false,
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+    if (resp.which_response_type != cormoran_zmk_custom_settings_Response_status_tag ||
+        resp.response_type.status.affected_count != 2) {
+        LOG_ERR("Chunked RPC write did not report bytes received so far");
+        return -EINVAL;
+    }
+
+    uint8_t chunk2[] = {7};
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_write_value_chunk(
+        &ref, 3, 2, chunk2, sizeof(chunk2), true,
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value internal_value;
+    ret = zmk_custom_setting_read(setting, &internal_value);
+    if (ret < 0) {
+        return ret;
+    }
+    if (internal_value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES || internal_value.size != 3 ||
+        internal_value.bytes_value[0] != 7 || internal_value.bytes_value[1] != 8 ||
+        internal_value.bytes_value[2] != 9) {
+        LOG_ERR("Chunked RPC write did not assemble the expected value");
+        return -EINVAL;
+    }
+
+    /* Out-of-order chunk (wrong offset) must be rejected and must not
+     * disturb the value written above. */
+    uint8_t bad_chunk[] = {1};
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_write_value_chunk(
+        &ref, 3, 1, bad_chunk, sizeof(bad_chunk), false,
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected out-of-order chunk write to be rejected, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Read the value back in two overlapping-free chunks. */
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_read_value_chunk(&ref, 0, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+    if (resp.which_response_type != cormoran_zmk_custom_settings_Response_value_chunk_tag ||
+        resp.response_type.value_chunk.total_size != 3 ||
+        resp.response_type.value_chunk.offset != 0 ||
+        resp.response_type.value_chunk.data.size != 3 ||
+        resp.response_type.value_chunk.data.bytes[0] != 9 ||
+        resp.response_type.value_chunk.data.bytes[1] != 8 ||
+        resp.response_type.value_chunk.data.bytes[2] != 7 || !resp.response_type.value_chunk.last) {
+        LOG_ERR("Chunked RPC read did not return the expected value");
+        return -EINVAL;
+    }
+
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_read_value_chunk(&ref, 1, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+    if (resp.response_type.value_chunk.offset != 1 ||
+        resp.response_type.value_chunk.data.size != 2 ||
+        resp.response_type.value_chunk.data.bytes[0] != 8 ||
+        resp.response_type.value_chunk.data.bytes[1] != 7 || !resp.response_type.value_chunk.last) {
+        LOG_ERR("Chunked RPC partial read did not return the expected tail");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_chunked_rpc rpc=030201->090807 internal=070809");
+    return 0;
+}
+
+SYS_INIT(custom_settings_chunked_rpc_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
