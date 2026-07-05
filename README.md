@@ -278,38 +278,53 @@ alongside its metadata in a single `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` frame:
 
 ### Array Settings
 
-Array settings are registered one element at a time up to the maximum supported
-length. The active array length can be smaller than the maximum. The firmware
-storage key is expanded to `key/index`, but the public API and RPC protocol use
-the base key plus an explicit array index and active length. Flash storage saves
-the active length and only the active array items. RPC does not expose the
-maximum length; appending past it returns an error.
+Array settings are registered with a **single macro call** for the whole array:
+one descriptor owns one contiguous backing buffer sized for the maximum
+element count, instead of one registration per element. The active array
+length can be smaller than the maximum. The firmware storage key is expanded
+to `key/index` (plus a `key/_size` entry for the active length), but the
+public API and RPC protocol use the base key plus an explicit array index and
+active length. Flash storage saves the active length and only the active
+array items. RPC does not expose the maximum length; appending past it
+returns an error.
 
 ```c
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_0, "my_module", "layers", 0, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(0),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+/* Declare the per-index defaults first (a plain macro argument works for
+ * short literals like ZMK_CUSTOM_SETTING_VALUE_INT32(0) elsewhere in this
+ * guide, but an array of defaults needs its own declaration so it can be
+ * passed as a pointer - see the comment on
+ * ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE for why). */
+ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(my_layers_default, 0, 1, 2);
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_1, "my_module", "layers", 1, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
-
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_2, "my_module", "layers", 2, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(2),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+/* One registration for up to 3 elements, with active length starting at 3. */
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(my_layers, "my_module", "layers",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                /* max_count = */ 3, /* default_size = */ 3,
+                                my_layers_default,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
 ```
+
+`ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_CONSTRAINTS` and
+`ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS[_AND_CONSTRAINTS]`
+follow the same naming pattern as the scalar `ZMK_CUSTOM_SETTING_DEFINE*`
+macros for zero-or-more constraints and/or custom bytes RPC converters.
+
+> **Migrating from `ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE`**: older versions
+> of this module registered arrays one element at a time
+> (`ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(name, subsys, key, index,
+> max_size, ...)` called once per index, each with its own default). That
+> macro has been **removed**, not kept as a compatibility shim: independent
+> per-index macro expansions (e.g. a `LISTIFY`/`UTIL_LISTIFY` loop) have no
+> way to share the one contiguous buffer the new design requires, so there is
+> no mechanical way to keep the old call sites compiling. Replace each array's
+> N old registrations with one `ZMK_CUSTOM_SETTING_ARRAY_DEFINE` call, moving
+> each element's old default into one `ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_*`
+> declaration. The on-flash storage format is unchanged (`key/index` and
+> `key/_size` entries persist and load exactly as before), so existing user
+> data survives the migration with no extra code.
 
 ### Firmware API
 
@@ -339,6 +354,14 @@ const struct zmk_custom_setting *layers =
 zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+/* Insert/remove in the middle of the array. Both shift the remaining active
+ * elements over the array's single contiguous buffer, so they are cheap
+ * regardless of array length. */
+zmk_custom_setting_array_insert_at(layers, 1, &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+struct zmk_custom_setting_value removed;
+zmk_custom_setting_array_remove_at(layers, 1, &removed, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
 
 `struct zmk_custom_setting_value` is sized by

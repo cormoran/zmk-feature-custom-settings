@@ -183,29 +183,20 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     test_bytes_rpc_reverse, test_bytes_rpc_reverse, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_value", 0, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+/* One registration for the whole 3-element array, replacing the pre-P3
+ * ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0/1/2, ...)
+ * trio (see the removal note in custom_settings.h). Defaults {1, 2, 3}
+ * match the old per-element defaults exactly so existing assertions in
+ * test_array_lifecycle/test_temporary_override_pool keep working unchanged. */
+ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(test_array_setting_defaults, 1, 2, 3);
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_1, "test", "array_value", 1, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(2),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
-
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_2, "test", "array_value", 2, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(3),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_array_setting, "test", "array_value",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, 3, 3,
+                                test_array_setting_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
 ZMK_CUSTOM_SETTING_DEFINE(test_hid_usage_setting, "test", "hid_usage",
                           ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(4),
@@ -738,6 +729,212 @@ static int test_array_lifecycle(void) {
     return 0;
 }
 
+/* insert_at/remove_at: memmove-based shift over the array's single
+ * contiguous buffer (see zmk_custom_setting_array_insert_at/remove_at in
+ * custom_settings.c), instead of requiring one write per shifted element. */
+static int test_array_insert_remove(void) {
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array("test", "array_value");
+    if (!array_setting) {
+        LOG_ERR("Test custom array setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Defaults are {1, 2, 3} at size 3. */
+
+    /* Insert in the middle: {1, 2, 3} -> {1, 99, 2, 3}. */
+    ret = zmk_custom_setting_array_insert_at(array_setting, 1, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        /* array_value's max size is 3, so inserting into a full array must
+         * fail before anything else is asserted. */
+        LOG_ERR("Expected full custom array insert_at to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Make room by growing max usage down to 2 active elements first. */
+    struct zmk_custom_setting_value popped;
+    ret = zmk_custom_setting_array_pop_back(array_setting, &popped, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Active elements are now {1, 2}. */
+
+    ret = zmk_custom_setting_array_insert_at(array_setting, 1, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 3) {
+        LOG_ERR("insert_at did not grow the active array size");
+        return -EINVAL;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 0, 1);
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 1, 99);
+    }
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 2, 2);
+    }
+    if (ret < 0) {
+        LOG_ERR("insert_at(1, 99) did not shift the tail correctly");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_insert_at_middle array={1,99,2}");
+
+    /* insert_at(index == size) behaves like push_back. */
+    ret = zmk_custom_setting_array_pop_back(array_setting, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Active elements are now {1, 99}. */
+    ret = zmk_custom_setting_array_insert_at(array_setting, 2, &ZMK_CUSTOM_SETTING_VALUE_INT32(77),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 2, 77);
+    if (ret < 0) {
+        LOG_ERR("insert_at(size, ...) did not behave like push_back");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_insert_at_end array={1,99,77}");
+
+    /* insert_at past the (post-insert) end fails with -ERANGE and leaves the
+     * array untouched: index 4 > size 3, and inserting would also exceed
+     * max_size 3. */
+    ret = zmk_custom_setting_array_insert_at(array_setting, 4, &ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected out-of-range insert_at to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_insert_at_out_of_range");
+
+    /* remove_at in the middle: {1, 99, 77} -> {1, 77}, returns removed=99. */
+    struct zmk_custom_setting_value removed;
+    ret = zmk_custom_setting_array_remove_at(array_setting, 1, &removed,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    if (removed.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 || removed.int32_value != 99) {
+        LOG_ERR("remove_at did not return the removed value");
+        return -EINVAL;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 2) {
+        LOG_ERR("remove_at did not shrink the active array size");
+        return -EINVAL;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 0, 1);
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 1, 77);
+    }
+    if (ret < 0) {
+        LOG_ERR("remove_at(1) did not shift the tail correctly");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_remove_at_middle array={1,77} removed=99");
+
+    /* remove_at past the active length fails with -ENOENT. */
+    ret = zmk_custom_setting_array_remove_at(array_setting, 5, NULL,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected out-of-range remove_at to fail with -ENOENT, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_remove_at_out_of_range");
+
+    ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
+/* Backward-compat check for the storage schema: writes raw per-index
+ * records exactly as the pre-P3 one-registration-per-element design would
+ * have written them (custom_settings/test/array_value/0, .../1, .../_size),
+ * then verifies settings_load_subtree loads them into the correct in-RAM
+ * slots of the new single-buffer implementation. Storage naming itself did
+ * not change (see save_array_locked/custom_settings_handle_set), only how
+ * the in-RAM side is organized. */
+static int test_array_storage_backward_compat(void) {
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array("test", "array_value");
+    if (!array_setting) {
+        LOG_ERR("Test custom array setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Simulate what old per-element registrations would have persisted:
+     * size=2, index 0 = 11, index 1 = 22 (index 2 intentionally absent, as
+     * it would be for an inactive slot). Values must satisfy array_value's
+     * ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100) constraint. */
+    const int32_t old_index_0 = 11;
+    const int32_t old_index_1 = 22;
+    const uint32_t old_size = 2;
+
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/0",
+                             (const char *)&old_index_0, sizeof(old_index_0));
+    if (ret < 0) {
+        return ret;
+    }
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/1",
+                             (const char *)&old_index_1, sizeof(old_index_1));
+    if (ret < 0) {
+        return ret;
+    }
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/_size",
+                             (const char *)&old_size, sizeof(old_size));
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (zmk_custom_setting_array_size(array_setting) != old_size) {
+        LOG_ERR("Backward-compat load did not restore the old array size");
+        return -EINVAL;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 0, old_index_0);
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 1, old_index_1);
+    }
+    if (ret < 0) {
+        LOG_ERR("Backward-compat load did not populate the correct in-RAM slots");
+        return ret;
+    }
+    ret = zmk_custom_setting_read_array_by_key("test", "array_value", 2,
+                                               &(struct zmk_custom_setting_value){0});
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected index 2 to remain inactive after backward-compat load, got %d", ret);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_array_storage_backward_compat size=2 values={11,22}");
+
+    ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static void capture_int32_visitor(const struct zmk_custom_setting_value *value, void *user_data) {
     *(int32_t *)user_data = value->int32_value;
 }
@@ -1140,6 +1337,16 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_array_lifecycle();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_array_insert_remove();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_array_storage_backward_compat();
     if (ret < 0) {
         return ret;
     }
