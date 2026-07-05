@@ -115,6 +115,26 @@ config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
       setting, since the assembled value still has to fit the setting's
       internal storage.
 
+config ZMK_CUSTOM_SETTINGS_TEMP_SLOTS
+    int "Temporary override pool slot count"
+    default 2
+    range 1 8
+    help
+      Number of settings that may have an active
+      ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY override at once, shared
+      across all registered settings instead of one slot embedded in
+      every setting. Writing a new temporary override once all slots are
+      in use fails with -EBUSY.
+
+config ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE
+    int "Temporary override pool slot size"
+    default 32
+    range 1 ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
+    help
+      Maximum value size that can use ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY.
+      Writing a larger value in temporary mode fails with -EMSGSIZE; other
+      write modes are unaffected.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 

@@ -323,6 +323,26 @@ void log_speed(const struct zmk_custom_setting_value *value, void *user_data) {
 zmk_custom_setting_with_value(setting, log_speed, NULL);
 ```
 
+### Memory Notes
+
+Each setting keeps only its current in-memory value in RAM; the default
+value lives in flash and is referenced by pointer, and the persisted value is
+not cached separately:
+
+- `ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY` overrides come from a small
+  shared pool instead of a dedicated slot per setting
+  (`CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS`, default 2;
+  `CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE`, default 32 bytes). Writing a
+  value larger than the slot size in temporary mode fails with `-EMSGSIZE`;
+  writing while the pool is full fails with `-EBUSY`. Other write modes are
+  unaffected by either limit.
+- `zmk_custom_setting_discard` re-reads the previously saved value from flash
+  instead of restoring a RAM-cached copy. This is a rare, explicit user
+  action, so the flash read is not a concern; `zmk_custom_setting_has_unsaved_value`
+  stays a cheap flag check (it does not read flash) and reports "written
+  since the last save/discard/reset", which also means writing back the
+  already-saved value still reports unsaved until the next save/discard.
+
 ## Web UI
 
 The web UI in `web/` connects to a keyboard over serial, finds the

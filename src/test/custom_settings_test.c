@@ -817,6 +817,117 @@ static int test_view_based_api(void) {
     return 0;
 }
 
+/* Exercises the shared temporary-override pool (CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS /
+ * CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE) that replaced a per-setting
+ * temporary_value copy. Assumes the default pool size of 2 slots; none of
+ * the test configs override it. */
+static int test_temporary_override_pool(void) {
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    const struct zmk_custom_setting *bytes_setting = zmk_custom_setting_find("test", "bytes_value");
+    const struct zmk_custom_setting *array_0 =
+        zmk_custom_setting_find_array_element("test", "array_value", 0);
+    const struct zmk_custom_setting *array_1 =
+        zmk_custom_setting_find_array_element("test", "array_value", 1);
+    if (!int_setting || !bytes_setting || !array_0 || !array_1) {
+        LOG_ERR("Temporary override pool test settings not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* A temporary override is visible via read() but does not change
+     * memory_value, and has_unsaved_value reports it. */
+    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 99);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!zmk_custom_setting_has_unsaved_value(int_setting)) {
+        LOG_ERR("Temporary override should report an unsaved value");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_rollback_temporary(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(int_setting, 10);
+    if (ret < 0) {
+        return ret;
+    }
+    if (zmk_custom_setting_has_unsaved_value(int_setting)) {
+        LOG_ERR("Rolled-back custom setting unexpectedly has unsaved value");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_temporary_rollback scalar=10");
+
+    /* A value larger than one pool slot cannot use temporary mode. */
+    uint8_t oversized[CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE + 1];
+    memset(oversized, 0xAA, sizeof(oversized));
+    struct zmk_custom_setting_value oversized_value = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+        .size = sizeof(oversized),
+    };
+    memcpy(oversized_value.bytes_value, oversized, sizeof(oversized));
+    ret = zmk_custom_setting_write(bytes_setting, &oversized_value,
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret != -EMSGSIZE) {
+        LOG_ERR("Expected an oversized temporary write to fail with -EMSGSIZE, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_temporary_oversized size=%u", (unsigned)sizeof(oversized));
+
+    /* Pool exhaustion: only CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS settings
+     * may have an active temporary override at once. */
+    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(array_0, &ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(array_1, &ZMK_CUSTOM_SETTING_VALUE_INT32(3),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret != -EBUSY) {
+        LOG_ERR("Expected the temporary override pool to be exhausted, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_temporary_pool_exhausted");
+
+    /* Freeing a slot lets a new override through. */
+    ret = zmk_custom_setting_rollback_temporary(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(array_1, &ZMK_CUSTOM_SETTING_VALUE_INT32(3),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_temporary_pool_reclaimed");
+
+    ret = zmk_custom_setting_rollback_temporary(array_0);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_rollback_temporary(array_1);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -843,7 +954,12 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    return test_view_based_api();
+    ret = test_view_based_api();
+    if (ret < 0) {
+        return ret;
+    }
+
+    return test_temporary_override_pool();
 }
 
 SYS_INIT(custom_settings_test_init, APPLICATION, 99);

@@ -21,5 +21,9 @@ PASS: custom_settings_push_back array[2]=88 size=3
 PASS: custom_settings_save_all_active_array_items size=3
 PASS: custom_settings_push_back_full size=3
 PASS: custom_settings_view_api int=42 bytes=05060708
+PASS: custom_settings_temporary_rollback scalar=10
+PASS: custom_settings_temporary_oversized size=33
+PASS: custom_settings_temporary_pool_exhausted
+PASS: custom_settings_temporary_pool_reclaimed
 PASS: custom_settings_chunked_rpc rpc=030201->090807 internal=070809
 PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809
