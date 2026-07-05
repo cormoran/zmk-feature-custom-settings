@@ -36,7 +36,8 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #define SUBSYSTEM_IDENTIFIER_STRING "cormoran_custom_settings"
-#define LIST_SETTINGS_NOTIFICATION_DELAY K_MSEC(10)
+#define LIST_SETTINGS_NOTIFICATION_DELAY                                                           \
+    K_MSEC(CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS)
 #define LIST_SETTINGS_RELAY_DELAY K_MSEC(20)
 #define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD 2
 #define ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE                                                 \
@@ -837,6 +838,7 @@ static void list_settings_work_handler(struct k_work *work) {
     k_mutex_unlock(&list_settings_lock);
 
     size_t index = 0;
+    size_t sent = 0;
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
         if (index++ < next_index || !setting_is_active(setting) ||
             !setting_matches_scope(setting, &scope)) {
@@ -861,8 +863,12 @@ static void list_settings_work_handler(struct k_work *work) {
             LOG_WRN("Failed to raise custom settings list notification: %d", ret);
         }
 
-        schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
-        return;
+        /* Send a batch of items per work cycle instead of one item per
+         * delayed reschedule; each item is still one notification frame. */
+        if (++sent >= CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE) {
+            schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
+            return;
+        }
     }
 
     k_mutex_lock(&list_settings_lock, K_FOREVER);

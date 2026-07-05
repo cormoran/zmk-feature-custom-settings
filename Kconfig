@@ -71,6 +71,26 @@ config ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE
       Maximum number of setting change notifications that can wait for
       low-priority workqueue processing.
 
+config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE
+    int "List item notifications sent per low-priority work cycle"
+    default 4
+    range 1 32
+    help
+      Number of list-item notifications raised back-to-back before the
+      list work item waits CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
+      for the next batch. Each item is still one notification frame;
+      raising this only reduces how many delayed work reschedules a full
+      listing takes. Higher values list large registries faster at the
+      cost of bursting more notifications through the transport at once.
+
+config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
+    int "Delay between custom settings list notification batches (ms)"
+    default 10
+    range 1 1000
+    help
+      Delay between batches of list-item notifications. See
+      CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 
