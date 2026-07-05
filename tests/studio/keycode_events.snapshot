@@ -32,6 +32,9 @@ PASS: custom_settings_temporary_oversized size=33
 PASS: custom_settings_temporary_pool_exhausted
 PASS: custom_settings_temporary_pool_reclaimed
 PASS: custom_settings_boot_default_override
+PASS: custom_settings_runtime_register_loads_persisted value=123
+PASS: custom_settings_runtime_register_save_scope value=55
+PASS: custom_settings_runtime_register_reset_scope value=7
 PASS: custom_settings_record speed=42 invert=1 label=abcdefg
 PASS: custom_settings_record_constraint_rejected
 PASS: custom_settings_record_schema_evolution speed=42 label=kept

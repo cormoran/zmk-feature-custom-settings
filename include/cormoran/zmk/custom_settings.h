@@ -187,6 +187,19 @@ struct zmk_custom_setting {
      * see array_view_pool in custom_settings.c. */
     int8_t temp_slot;
     struct zmk_custom_setting_value memory_value;
+
+    /*
+     * Intrusive singly-linked list pointer used only by
+     * zmk_custom_settings_register() (P5a) for settings registered at
+     * runtime instead of via the compile-time ZMK_CUSTOM_SETTING_DEFINE/
+     * ZMK_CUSTOM_SETTING_ARRAY_DEFINE macros (STRUCT_SECTION_ITERABLE).
+     * NULL for every compile-time-registered setting; ZMK_CUSTOM_SETTING_FOREACH
+     * walks the compile-time section followed by this list, so callers do
+     * not need to distinguish the two registration styles. Left as a plain
+     * struct field (rather than a private companion table) so registration
+     * stays heap-free: the caller's own static storage for the descriptor
+     * is threaded directly into the list. */
+    struct zmk_custom_setting *_runtime_next;
 };
 
 struct zmk_custom_setting_changed {
@@ -416,7 +429,56 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTINGS_INT32_LIST_ITEM(_value)                                                \
     {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_value)}
 
-#define ZMK_CUSTOM_SETTING_FOREACH(_var) STRUCT_SECTION_FOREACH(zmk_custom_setting, _var)
+/*
+ * Iterate every registered setting: compile-time (STRUCT_SECTION_ITERABLE,
+ * via ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE) entries
+ * first, then any settings added at runtime via
+ * zmk_custom_settings_register() (P5a). Every call site that previously
+ * assumed ZMK_CUSTOM_SETTING_FOREACH == STRUCT_SECTION_FOREACH (find,
+ * find_array, apply_scope, the Studio RPC list handler,
+ * custom_settings_init, scope_has_permission) picks up runtime-registered
+ * settings for free through this macro instead of needing its own
+ * modification.
+ *
+ * Implemented as a virtual-iterator function pair rather than trying to
+ * splice two independent `for` loops (one over the linker section, one over
+ * the runtime list) so that a single shared loop variable and trailing
+ * `{ body }` block works the same way STRUCT_SECTION_FOREACH's callers
+ * already expect.
+ */
+#define ZMK_CUSTOM_SETTING_FOREACH(_var)                                                           \
+    for (const struct zmk_custom_setting *_var = zmk_custom_settings_foreach_first();              \
+         _var != NULL; _var = zmk_custom_settings_foreach_next(_var))
+
+/* Iterator internals for ZMK_CUSTOM_SETTING_FOREACH; not intended to be
+ * called directly. */
+const struct zmk_custom_setting *zmk_custom_settings_foreach_first(void);
+const struct zmk_custom_setting *
+zmk_custom_settings_foreach_next(const struct zmk_custom_setting *current);
+
+/*
+ * Register a setting at runtime instead of through the compile-time
+ * ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE macros (P5a) -
+ * for drivers whose setting count depends on devicetree instance data or
+ * other runtime probing that macros can't express. `desc` must point at
+ * caller-owned storage (typically static/BSS) that outlives the
+ * registration; only the pointer is stored, so this stays heap-free. The
+ * descriptor's `_runtime_next` field must be zero (e.g. a plain
+ * `static struct zmk_custom_setting my_setting = {...};` with `_runtime_next`
+ * left unset) - it is used internally to link registered settings together
+ * and must not be touched by the caller afterwards.
+ *
+ * Initializes the descriptor's mutable state (memory_value from
+ * default_value, has_persistent_value/dirty/temp_slot/etc.) the same way
+ * custom_settings_init() does for compile-time settings, then - since
+ * registration can happen after this module's own settings_load() already
+ * ran at boot - loads any already-persisted value for this setting via
+ * settings_load_subtree() so it does not silently fall back to the default
+ * for the rest of this boot. Returns -EINVAL for a NULL/malformed
+ * descriptor, -EEXIST if a setting with the same subsystem id + key (or
+ * array key) is already registered.
+ */
+int zmk_custom_settings_register(struct zmk_custom_setting *desc);
 
 const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subsystem_id,
                                                          const char *key);

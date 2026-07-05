@@ -2011,33 +2011,146 @@ static int custom_settings_handle_set(const char *name, size_t len, settings_rea
 SETTINGS_STATIC_HANDLER_DEFINE(custom_settings, SETTINGS_SUBTREE, NULL, custom_settings_handle_set,
                                NULL, NULL);
 
+/* Reset one setting's mutable state to its just-registered, nothing-loaded-
+ * yet state: defaults copied in, no persistent/dirty/temporary flags set.
+ * Shared by custom_settings_init() (every compile-time setting, at boot)
+ * and zmk_custom_settings_register() (one runtime setting, registered after
+ * boot) so the two initialization paths cannot drift apart. Caller must
+ * hold settings_lock if called after boot (custom_settings_init runs before
+ * any other thread can contend for it, so it does not bother). */
+static void init_setting_state_locked(struct zmk_custom_setting *setting) {
+    if (zmk_custom_setting_is_array(setting)) {
+        /* One call covers the whole array (there is exactly one registered
+         * descriptor per array - see ZMK_CUSTOM_SETTING_ARRAY_DEFINE):
+         * initialize every element slot from its own per-index default
+         * instead of walking "sibling" registrations. */
+        struct zmk_custom_setting_array_state *array_state = setting->array_state;
+        for (uint32_t index = 0; index < array_state->max_size; index++) {
+            copy_value(&array_state->values[index], &array_state->defaults[index]);
+            array_state->has_persistent[index] = false;
+            array_state->dirty[index] = false;
+        }
+        array_state->persistent_size = array_state->default_size;
+        array_state->size = array_state->default_size;
+    } else {
+        copy_value(&setting->memory_value, setting->default_value);
+        setting->has_persistent_value = false;
+        setting->dirty = false;
+    }
+    setting->temp_slot = -1;
+    setting->temporary_active = false;
+    setting->initialized = true;
+}
+
 static int custom_settings_init(void) {
     ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (zmk_custom_setting_is_array(setting)) {
-            /* One iteration covers the whole array (there is exactly one
-             * registered descriptor per array - see
-             * ZMK_CUSTOM_SETTING_ARRAY_DEFINE): initialize every element
-             * slot from its own per-index default instead of walking
-             * "sibling" registrations. */
-            struct zmk_custom_setting_array_state *array_state = setting->array_state;
-            for (uint32_t index = 0; index < array_state->max_size; index++) {
-                copy_value(&array_state->values[index], &array_state->defaults[index]);
-                array_state->has_persistent[index] = false;
-                array_state->dirty[index] = false;
-            }
-            array_state->persistent_size = array_state->default_size;
-            array_state->size = array_state->default_size;
-        } else {
-            copy_value(&setting->memory_value, setting->default_value);
-            setting->has_persistent_value = false;
-            setting->dirty = false;
-        }
-        setting->temp_slot = -1;
-        setting->temporary_active = false;
-        setting->initialized = true;
+        init_setting_state_locked((struct zmk_custom_setting *)setting);
     }
 
     return 0;
 }
 
 SYS_INIT(custom_settings_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+
+/*
+ * P5a: runtime registration and the combined compile-time-section +
+ * runtime-list iterator (ZMK_CUSTOM_SETTING_FOREACH in the header).
+ */
+
+static struct zmk_custom_setting *runtime_settings_head;
+
+const struct zmk_custom_setting *zmk_custom_settings_foreach_first(void) {
+    STRUCT_SECTION_FOREACH(zmk_custom_setting, first) { return first; }
+
+    return runtime_settings_head;
+}
+
+const struct zmk_custom_setting *
+zmk_custom_settings_foreach_next(const struct zmk_custom_setting *current) {
+    if (!current) {
+        return NULL;
+    }
+
+    /* Still inside the compile-time section: STRUCT_SECTION_ITERABLE
+     * instances are laid out contiguously by the linker, so the "next"
+     * compile-time entry is simply the next array slot - mirroring what
+     * STRUCT_SECTION_FOREACH's own `iterator++` does - until the section
+     * end is reached, at which point iteration continues into the runtime
+     * list. */
+    STRUCT_SECTION_START_EXTERN(zmk_custom_setting);
+    STRUCT_SECTION_END_EXTERN(zmk_custom_setting);
+    if (current >= STRUCT_SECTION_START(zmk_custom_setting) &&
+        current < STRUCT_SECTION_END(zmk_custom_setting)) {
+        const struct zmk_custom_setting *next = current + 1;
+        if (next < STRUCT_SECTION_END(zmk_custom_setting)) {
+            return next;
+        }
+        return runtime_settings_head;
+    }
+
+    /* Otherwise current is a runtime-registered setting; follow the
+     * intrusive list. */
+    return current->_runtime_next;
+}
+
+int zmk_custom_settings_register(struct zmk_custom_setting *desc) {
+    if (!desc || !desc->custom_subsystem_id || (!desc->key && !desc->array_key)) {
+        return -EINVAL;
+    }
+
+    const char *lookup_key = zmk_custom_setting_is_array(desc) ? desc->array_key : desc->key;
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+
+    ZMK_CUSTOM_SETTING_FOREACH(existing) {
+        if (strncmp(existing->custom_subsystem_id, desc->custom_subsystem_id,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN) == 0 &&
+            strncmp(zmk_custom_setting_public_key(existing), lookup_key,
+                    CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN) == 0) {
+            k_mutex_unlock(&settings_lock);
+            return -EEXIST;
+        }
+    }
+
+    desc->_runtime_next = NULL;
+    init_setting_state_locked(desc);
+
+    if (!runtime_settings_head) {
+        runtime_settings_head = desc;
+    } else {
+        struct zmk_custom_setting *tail = runtime_settings_head;
+        while (tail->_runtime_next) {
+            tail = tail->_runtime_next;
+        }
+        tail->_runtime_next = desc;
+    }
+
+    k_mutex_unlock(&settings_lock);
+
+    /*
+     * settings_load() (called once from main(), which always runs after
+     * every SYS_INIT) may or may not have already happened by the time this
+     * function runs, depending on whether the caller registers from its own
+     * SYS_INIT (before) or from later application/driver code such as an
+     * event handler (after) - there is no reliable flag to distinguish the
+     * two from inside this module. Unconditionally loading just this
+     * setting's own subtree resolves this without needing one:
+     *   - If settings_load() already ran, this is the only chance for a
+     *     previously-persisted value to reach this setting instead of it
+     *     silently sticking at the default for the rest of the boot.
+     *   - If settings_load() has not run yet, no store is registered yet
+     *     either (that also happens in/around main()), so this call is a
+     *     harmless no-op (SYS_SLIST_FOR_EACH_CONTAINER over an empty list of
+     *     stores); settings_load() will pick up this setting normally once
+     *     it runs, the same as any compile-time setting.
+     * Either way the call is scoped to this one setting's storage name, so
+     * it cannot trigger a larger reload of unrelated settings.
+     */
+    char name[SETTINGS_MAX_NAME_LEN];
+    int ret = setting_storage_name(desc, name, sizeof(name));
+    if (ret == 0) {
+        settings_load_subtree(name);
+    }
+
+    return 0;
+}

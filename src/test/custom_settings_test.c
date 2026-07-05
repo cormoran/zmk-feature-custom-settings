@@ -1219,6 +1219,122 @@ static int test_boot_default_override(void) {
     return 0;
 }
 
+/* P5a: a setting registered at runtime (e.g. a driver whose channel count
+ * depends on devicetree instance data) instead of via
+ * ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE. Registers from
+ * a SYS_INIT-equivalent hook (this test itself already runs from one, at a
+ * priority after custom_settings_init - the same situation a real runtime
+ * caller would be in if it registered from its own late SYS_INIT or from
+ * application code after boot) and confirms the result behaves exactly
+ * like a compile-time setting: find-able, writable, covered by save/
+ * discard/reset scope operations, and - the P5a-specific requirement -
+ * that a value persisted *before* registration (simulating a value saved on
+ * a previous boot) is not silently lost; zmk_custom_settings_register()
+ * must load it via settings_load_subtree() since custom_settings_init()'s
+ * own settings_load() already ran before this call. */
+static struct zmk_custom_setting_value runtime_setting_default = ZMK_CUSTOM_SETTING_VALUE_INT32(7);
+static struct zmk_custom_setting runtime_int_setting;
+
+static int test_runtime_registration(void) {
+    /* Seed a persisted value as if a previous boot had saved one, before
+     * this setting is registered - this is the scenario
+     * zmk_custom_settings_register()'s unconditional settings_load_subtree()
+     * call exists for. */
+    const int32_t persisted_value = 123;
+    int ret = test_settings_save(NULL, "custom_settings/test/runtime_int",
+                                 (const char *)&persisted_value, sizeof(persisted_value));
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (zmk_custom_setting_find("test", "runtime_int") != NULL) {
+        LOG_ERR("Runtime test setting was already registered before the test ran");
+        return -EINVAL;
+    }
+
+    runtime_int_setting = (struct zmk_custom_setting){
+        .custom_subsystem_id = "test",
+        .key = "runtime_int",
+        .array_key = NULL,
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
+        .array_state = NULL,
+        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .constraints = NULL,
+        .constraints_count = 0,
+        .default_value = &runtime_setting_default,
+        .temp_slot = -1,
+    };
+
+    ret = zmk_custom_settings_register(&runtime_int_setting);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_register failed: %d", ret);
+        return ret;
+    }
+
+    /* Registering the same subsystem/key again must fail. */
+    struct zmk_custom_setting duplicate = runtime_int_setting;
+    ret = zmk_custom_settings_register(&duplicate);
+    if (ret != -EEXIST) {
+        LOG_ERR("Expected duplicate runtime registration to fail with -EEXIST, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Find-able like any compile-time setting. */
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "runtime_int");
+    if (!setting) {
+        LOG_ERR("Runtime-registered setting is not find-able");
+        return -ENOENT;
+    }
+
+    /* The seeded pre-registration value was loaded, not the compile-time
+     * default (7). */
+    ret = expect_int_value(setting, persisted_value);
+    if (ret < 0) {
+        LOG_ERR("Runtime registration did not load a pre-existing persisted value");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_runtime_register_loads_persisted value=%d", persisted_value);
+
+    /* Covered by ZMK_CUSTOM_SETTING_FOREACH-based iteration: apply_scope
+     * (save/discard/reset_scope) reaches it like any other setting. */
+    ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(55),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    uint32_t affected_count = 0;
+    ret = zmk_custom_settings_save_scope("test", "runtime_int", NULL, &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 1) {
+        LOG_ERR("Expected save_scope to affect exactly the runtime setting, got %u",
+                affected_count);
+        return -EINVAL;
+    }
+    if (!test_settings_has_record("custom_settings/test/runtime_int")) {
+        LOG_ERR("Runtime setting save did not persist");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_runtime_register_save_scope value=55");
+
+    ret = zmk_custom_settings_reset_scope("test", "runtime_int", NULL, &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(setting, 7);
+    if (ret < 0) {
+        LOG_ERR("Runtime setting reset did not restore its compile-time default");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_runtime_register_reset_scope value=7");
+
+    return 0;
+}
+
 static int test_record_settings(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
     if (!setting) {
@@ -1364,6 +1480,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_boot_default_override();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_runtime_registration();
     if (ret < 0) {
         return ret;
     }

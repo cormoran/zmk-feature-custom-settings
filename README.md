@@ -326,6 +326,60 @@ macros for zero-or-more constraints and/or custom bytes RPC converters.
 > `key/_size` entries persist and load exactly as before), so existing user
 > data survives the migration with no extra code.
 
+### Runtime Registration
+
+`ZMK_CUSTOM_SETTING_DEFINE`/`ZMK_CUSTOM_SETTING_ARRAY_DEFINE` need the
+setting's shape (subsystem, key, type, count) to be known at compile time.
+For a driver whose setting count depends on devicetree instance data or
+other runtime probing, register a setting directly with
+`zmk_custom_settings_register()` instead:
+
+```c
+static struct zmk_custom_setting_value my_driver_default =
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0);
+
+/* Caller-owned storage: static (or per-devicetree-instance) so it outlives
+ * the registration. No heap is used anywhere in this API. */
+static struct zmk_custom_setting my_driver_setting;
+
+static int my_driver_init(void) {
+    my_driver_setting = (struct zmk_custom_setting){
+        .custom_subsystem_id = "my_module",
+        .key = "channel_gain",
+        .array_key = NULL,
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
+        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .default_value = &my_driver_default,
+        .temp_slot = -1,
+    };
+
+    return zmk_custom_settings_register(&my_driver_setting);
+}
+SYS_INIT(my_driver_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+```
+
+A runtime-registered setting behaves exactly like a compile-time one
+afterwards: it is find-able (`zmk_custom_setting_find`), shows up in
+`ZMK_CUSTOM_SETTING_FOREACH`, participates in save/discard/reset scope
+operations, and is listed/read/written over Studio RPC. If registration
+happens after this module's own boot-time settings load (the common case
+for anything registering outside its own early `SYS_INIT`),
+`zmk_custom_settings_register()` also loads any value already persisted
+under this setting's storage key from a previous boot, so a user's saved
+value is not silently replaced by the compile-time default. Registering
+the same subsystem id + key twice fails with `-EEXIST`; a malformed
+descriptor fails with `-EINVAL`.
+
+Only the descriptor struct itself needs to be filled in by hand this
+way - array settings still need a `struct zmk_custom_setting_array_state`
+(see `ZMK_CUSTOM_SETTING_ARRAY_DEFINE`'s expansion in
+`include/cormoran/zmk/custom_settings.h` for the exact shape) if a runtime
+array is needed; register its descriptor with `.array_key` set and
+`.array_state` pointing at that state the same way the macro does.
+
 ### Firmware API
 
 Read or update settings from firmware:
