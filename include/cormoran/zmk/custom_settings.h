@@ -167,11 +167,14 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_NO_CONSTRAINT                                                           \
     ((struct zmk_custom_setting_constraint){.type = ZMK_CUSTOM_SETTING_CONSTRAINT_NONE})
 
+/* Field initializers (not compound literals) so this expands to a constant
+ * expression usable in a static initializer even under strict -std=c11; GCC
+ * rejects an outer compound literal that nests another compound literal. */
 #define ZMK_CUSTOM_SETTING_RANGE_INT32(_min, _max)                                                 \
     ((struct zmk_custom_setting_constraint){                                                       \
         .type = ZMK_CUSTOM_SETTING_CONSTRAINT_RANGE,                                               \
-        .range = {.min = ZMK_CUSTOM_SETTING_VALUE_INT32(_min),                                     \
-                  .max = ZMK_CUSTOM_SETTING_VALUE_INT32(_max)}})
+        .range = {.min = {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_min)},     \
+                  .max = {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_max)}}})
 
 #define ZMK_CUSTOM_SETTING_HID_USAGE(_usage_page, _usage_min, _usage_max)                          \
     ((struct zmk_custom_setting_constraint){.type = ZMK_CUSTOM_SETTING_CONSTRAINT_HID_USAGE,       \

@@ -545,7 +545,7 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     *dest = (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
 
     int ret;
-    LOG_INF("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
+    LOG_DBG("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
             "source=%u",
             setting->custom_subsystem_id, zmk_custom_setting_public_key(setting), include_value,
             include_meta, source);
@@ -564,20 +564,20 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     copy_string(dest->key, sizeof(dest->key), zmk_custom_setting_public_key(setting));
     dest->has_unsaved_value = zmk_custom_setting_has_unsaved_value(setting);
     dest->source = source;
-    LOG_INF("Custom settings proto base ready: subsystem=%s key=%s has_unsaved=%d",
+    LOG_DBG("Custom settings proto base ready: subsystem=%s key=%s has_unsaved=%d",
             setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
             dest->has_unsaved_value);
 
     if (include_meta) {
         dest->has_meta = true;
-        LOG_INF("Custom settings proto meta start: subsystem=%s key=%s",
+        LOG_DBG("Custom settings proto meta start: subsystem=%s key=%s",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_meta_to_proto(setting, &dest->meta);
         if (ret < 0) {
             dest->has_meta = false;
             return ret;
         }
-        LOG_INF("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
+        LOG_DBG("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)dest->meta.constraints_count);
     }
@@ -585,19 +585,19 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
     if (include_value &&
         setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE) {
         dest->has_value = true;
-        LOG_INF("Custom settings proto value start: subsystem=%s key=%s",
+        LOG_DBG("Custom settings proto value start: subsystem=%s key=%s",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_value_to_proto(setting, &dest->value);
         if (ret < 0) {
             dest->has_value = false;
             return ret;
         }
-        LOG_INF("Custom settings proto value ready: subsystem=%s key=%s value_type=%u",
+        LOG_DBG("Custom settings proto value ready: subsystem=%s key=%s value_type=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)dest->value.which_value_type);
     }
 
-    LOG_INF("Custom settings proto complete: subsystem=%s key=%s", setting->custom_subsystem_id,
+    LOG_DBG("Custom settings proto complete: subsystem=%s key=%s", setting->custom_subsystem_id,
             zmk_custom_setting_public_key(setting));
     return 0;
 }
@@ -847,7 +847,7 @@ static void list_settings_work_handler(struct k_work *work) {
         list_settings_next_index = index;
         k_mutex_unlock(&list_settings_lock);
 
-        LOG_INF("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
+        LOG_DBG("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
                 "include_meta=%d",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)(zmk_custom_setting_is_array(setting) ? setting->array_index
