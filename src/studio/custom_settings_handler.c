@@ -1334,6 +1334,187 @@ static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArray
 #endif
 }
 
+/*
+ * P5b: CreateSetting/DeleteSetting - RPC-creatable keyspace entries (see
+ * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE in custom_settings.h). Unlike every
+ * other request above, these resolve their target through
+ * zmk_custom_settings_keyspace_find_for_key(subsystem, key) - a keyspace,
+ * not a single struct zmk_custom_setting - since the whole point is that the
+ * key does not exist as a setting yet (create) or is looked up by its
+ * literal persisted key rather than a compile-time descriptor (delete).
+ */
+
+static int handle_private_create_setting(const struct zmk_custom_settings_setting_ref *ref,
+                                         const struct zmk_custom_setting_value *value,
+                                         cormoran_zmk_custom_settings_SettingWriteMode write_mode,
+                                         cormoran_zmk_custom_settings_Response *resp,
+                                         bool value_uses_rpc_format) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    struct zmk_custom_setting_keyspace *keyspace = zmk_custom_settings_keyspace_find_for_key(
+        setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
+    if (!keyspace) {
+        set_error(resp, "No keyspace registered for this key");
+        return 0;
+    }
+
+    if (needs_unlock(keyspace->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    enum zmk_custom_setting_write_mode mode =
+        write_mode == cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
+
+    /* Deserialize against the keyspace's shared value_type/converters -
+     * there is no live struct zmk_custom_setting to deserialize against yet
+     * (that is exactly what this call creates), so build a throwaway
+     * descriptor with just the fields zmk_custom_setting_deserialize_rpc_value
+     * reads (value_type, rpc_deserializer). */
+    struct zmk_custom_setting_value internal_value;
+    int ret = 0;
+    if (value_uses_rpc_format) {
+        struct zmk_custom_setting keyspace_value_shape = {
+            .value_type = keyspace->value_type,
+            .rpc_deserializer = keyspace->rpc_deserializer,
+        };
+        ret =
+            zmk_custom_setting_deserialize_rpc_value(&keyspace_value_shape, value, &internal_value);
+        if (ret < 0) {
+            return ret;
+        }
+        value = &internal_value;
+    }
+
+    const struct zmk_custom_setting *created = NULL;
+    ret = zmk_custom_setting_keyspace_create(keyspace, setting_ref_key(ref), value, mode, &created);
+    if (ret == -ENOSPC) {
+        set_error(resp, "Keyspace is full");
+        return 0;
+    }
+    if (ret == -EEXIST) {
+        set_error(resp, "Key already exists");
+        return 0;
+    }
+    if (ret == -ENAMETOOLONG) {
+        set_error(resp, "Key is too long for this keyspace");
+        return 0;
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (created) {
+        raise_setting_notification(
+            created,
+            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED,
+            can_include_value(created), false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    }
+
+    set_status(resp, 1, "Setting created");
+    return 0;
+}
+
+static int handle_create_setting(const cormoran_zmk_custom_settings_CreateSettingRequest *req,
+                                 cormoran_zmk_custom_settings_Response *resp) {
+#if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value value;
+    bool value_is_array = false;
+    uint32_t array_index = 0;
+    uint32_t array_size = 0;
+    ret = proto_to_value(&req->value, &value, &value_is_array, &array_index, &array_size);
+    if (ret < 0) {
+        return ret;
+    }
+    if (value_is_array) {
+        return -EINVAL;
+    }
+
+    return handle_private_create_setting(&private_ref, &value, req->mode, resp, true);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+static int handle_private_delete_setting(const struct zmk_custom_settings_setting_ref *ref,
+                                         cormoran_zmk_custom_settings_Response *resp) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    struct zmk_custom_setting_keyspace *keyspace = zmk_custom_settings_keyspace_find_for_key(
+        setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
+    if (!keyspace) {
+        return -ENOENT;
+    }
+
+    if (needs_unlock(keyspace->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    /* Notify before releasing the slot: raise_setting_notification (the
+     * same helper list/create/write use, so encoding/relay behavior stays
+     * consistent) reads the setting's key straight out of the slot's own
+     * key buffer, which zmk_custom_setting_keyspace_delete is about to hand
+     * back to the pool for reuse. */
+    const struct zmk_custom_setting *setting =
+        zmk_custom_setting_keyspace_find(keyspace, setting_ref_key(ref));
+    if (setting) {
+        raise_setting_notification(
+            setting,
+            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_DISCARDED,
+            false, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    }
+
+    int ret = zmk_custom_setting_keyspace_delete(keyspace, setting_ref_key(ref));
+    if (ret == -ENOENT) {
+        set_error(resp, "Key does not exist");
+        return 0;
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    set_status(resp, 1, "Setting deleted");
+    return 0;
+}
+
+static int handle_delete_setting(const cormoran_zmk_custom_settings_DeleteSettingRequest *req,
+                                 cormoran_zmk_custom_settings_Response *resp) {
+#if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return handle_private_delete_setting(&private_ref, resp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 struct zmk_custom_settings_chunk_session {
     bool active;
@@ -1963,6 +2144,10 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
         return handle_read_value_chunk(&req->request_type.read_value_chunk, resp);
     case cormoran_zmk_custom_settings_Request_write_value_chunk_tag:
         return handle_write_value_chunk(&req->request_type.write_value_chunk, resp);
+    case cormoran_zmk_custom_settings_Request_create_setting_tag:
+        return handle_create_setting(&req->request_type.create_setting, resp);
+    case cormoran_zmk_custom_settings_Request_delete_setting_tag:
+        return handle_delete_setting(&req->request_type.delete_setting, resp);
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);

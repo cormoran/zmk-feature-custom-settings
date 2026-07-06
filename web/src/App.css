@@ -101,7 +101,8 @@
 }
 
 .settings-list-header span,
-.empty-message {
+.empty-message,
+.hint-text {
   color: #555;
 }
 

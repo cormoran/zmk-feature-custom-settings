@@ -241,6 +241,24 @@ ZMK_CUSTOM_SETTING_DEFINE(test_record_setting, "test", "record_value",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+/* P5b: an RPC-creatable keyspace for user-created entries under the
+ * "macro/" prefix. max_key_len (16) is a keyspace-local limit deliberately
+ * smaller than CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (48, see
+ * native_sim.conf) to exercise that the two are independent - "macro/" (6)
+ * plus a short suffix plus NUL comfortably fits 16 but would not fit a
+ * hypothetical much-smaller max_key_len. */
+static const struct zmk_custom_setting_value test_keyspace_default =
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0);
+
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_macro_keyspace, "test", "macro/",
+                                   ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                   /* max_size = */ sizeof(int32_t), /* max_key_len = */ 16,
+                                   /* max_entries = */ 3, test_keyspace_default,
+                                   ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
     int ret = zmk_custom_setting_read(setting, &value);
@@ -1335,6 +1353,251 @@ static int test_runtime_registration(void) {
     return 0;
 }
 
+/* P5b: RPC-creatable keyspaces. Exercises the whole lifecycle: register the
+ * keyspace, create entries (quota enforcement, prefix mismatch), confirm
+ * they are find-able/listable/covered by scope operations via the same
+ * ZMK_CUSTOM_SETTING_FOREACH leverage point P5a established, delete one and
+ * confirm its slot is reusable, and - the trickiest and most important part
+ * - confirm persisted entries seeded directly in the fake settings backend
+ * (as if created by a CreateSetting RPC in a previous boot session, with no
+ * zmk_custom_settings_register_keyspace-time knowledge of their keys) come
+ * back as live, listable, deletable settings after a settings_load pass,
+ * with no CreateSetting call ever happening for them this boot. */
+static int test_keyspace_lifecycle(void) {
+    int ret = zmk_custom_settings_register_keyspace(&test_macro_keyspace);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_register_keyspace failed: %d", ret);
+        return ret;
+    }
+
+    /* Registering the same keyspace object twice fails. */
+    ret = zmk_custom_settings_register_keyspace(&test_macro_keyspace);
+    if (ret != -EEXIST) {
+        LOG_ERR("Expected duplicate keyspace registration to fail with -EEXIST, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* A key that does not start with the keyspace's prefix is rejected. */
+    const struct zmk_custom_setting *created = NULL;
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "not_macro/foo",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected a prefix-mismatched key to fail with -EINVAL, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* A key that does not fit max_key_len (16, including NUL) is rejected. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/this-name-is-too-long",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret != -ENAMETOOLONG) {
+        LOG_ERR("Expected an oversized key to fail with -ENAMETOOLONG, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Create up to max_entries (3) entries. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/one",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0 || !created) {
+        LOG_ERR("Failed to create macro/one: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/two",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
+    if (ret < 0) {
+        LOG_ERR("Failed to create macro/two: %d", ret);
+        return ret;
+    }
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/three",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(3),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0) {
+        LOG_ERR("Failed to create macro/three: %d", ret);
+        return ret;
+    }
+
+    /* Creating the same key twice fails. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/one",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+    if (ret != -EEXIST) {
+        LOG_ERR("Expected re-creating macro/one to fail with -EEXIST, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* The pool is full (3/3): a 4th create fails cleanly with -ENOSPC. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/four",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+    if (ret != -ENOSPC) {
+        LOG_ERR("Expected create on a full keyspace to fail with -ENOSPC, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Created entries are find-able like any other setting. */
+    ret = expect_int_value_by_key("test", "macro/one", 1);
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/two", 2);
+    }
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/three", 3);
+    }
+    if (ret < 0) {
+        LOG_ERR("Created keyspace entries are not readable by key");
+        return ret;
+    }
+
+    /* zmk_custom_setting_keyspace_find resolves the same literal key
+     * without going through the generic subsystem+key registry walk. */
+    if (zmk_custom_setting_keyspace_find(&test_macro_keyspace, "macro/one") == NULL) {
+        LOG_ERR("zmk_custom_setting_keyspace_find did not find macro/one");
+        return -ENOENT;
+    }
+    if (zmk_custom_setting_keyspace_find(&test_macro_keyspace, "macro/nonexistent") != NULL) {
+        LOG_ERR("zmk_custom_setting_keyspace_find found a nonexistent key");
+        return -EINVAL;
+    }
+
+    /* Discovery: the existing key_prefix scope filter (used by list/save/
+     * discard/reset) sees exactly the 3 live entries under "macro/" -
+     * ZMK_CUSTOM_SETTING_FOREACH + zmk_custom_setting_matches, with zero
+     * keyspace-specific code in apply_scope. */
+    uint32_t affected_count = 0;
+    ret = zmk_custom_settings_save_scope("test", NULL, "macro/", &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 3) {
+        LOG_ERR("Expected key_prefix scope to match exactly 3 macro/ entries, got %u",
+                affected_count);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_keyspace_create_and_scope_discovery count=3");
+
+    /* Delete one entry: its slot is released and reusable, and its
+     * persisted record (macro/two was saved above) is erased. */
+    ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/two");
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_setting_keyspace_delete failed: %d", ret);
+        return ret;
+    }
+    if (zmk_custom_setting_find("test", "macro/two") != NULL) {
+        LOG_ERR("Deleted keyspace entry is still find-able");
+        return -EINVAL;
+    }
+    if (test_settings_has_record("custom_settings/test/macro/two")) {
+        LOG_ERR("Deleted keyspace entry's persisted record was not erased");
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/two");
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected deleting an already-deleted key to fail with -ENOENT, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* The freed slot is reusable by a new create. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/four",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+    if (ret < 0) {
+        LOG_ERR("Failed to reuse a freed keyspace slot: %d", ret);
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_keyspace_delete_frees_slot");
+
+    /* Clean up in-RAM state so the settings-load re-binding test below
+     * starts from an empty pool. */
+    zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/one");
+    zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/three");
+    zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/four");
+
+    /*
+     * Settings-load re-binding: seed 3 persisted records directly in the
+     * fake settings backend, as if a CreateSetting RPC had created and saved
+     * them in a previous boot session - crucially, with NO
+     * zmk_custom_setting_keyspace_create call happening this boot at all.
+     * settings_load_subtree then drives the exact same
+     * SETTINGS_STATIC_HANDLER_DEFINE callback path as the real boot-time
+     * settings_load() in main() (this test itself runs from a SYS_INIT
+     * before that call, so it must trigger the load explicitly the same way
+     * test_array_storage_backward_compat does). custom_settings_handle_set
+     * must recognize each key matches test_macro_keyspace's "macro/" prefix,
+     * auto-bind a free slot for it, and apply the loaded value - all before
+     * this call returns, since settings_load() only visits each record
+     * once, not in any registration order.
+     */
+    const int32_t reloaded_a = 111;
+    const int32_t reloaded_b = 222;
+    const int32_t reloaded_c = 333;
+    ret = test_settings_save(NULL, "custom_settings/test/macro/reload-a", (const char *)&reloaded_a,
+                             sizeof(reloaded_a));
+    if (ret == 0) {
+        ret = test_settings_save(NULL, "custom_settings/test/macro/reload-b",
+                                 (const char *)&reloaded_b, sizeof(reloaded_b));
+    }
+    if (ret == 0) {
+        ret = test_settings_save(NULL, "custom_settings/test/macro/reload-c",
+                                 (const char *)&reloaded_c, sizeof(reloaded_c));
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (zmk_custom_setting_find("test", "macro/reload-a") != NULL) {
+        LOG_ERR("Reload-test keyspace entry was already bound before settings_load_subtree ran");
+        return -EINVAL;
+    }
+
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = expect_int_value_by_key("test", "macro/reload-a", reloaded_a);
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/reload-b", reloaded_b);
+    }
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/reload-c", reloaded_c);
+    }
+    if (ret < 0) {
+        LOG_ERR("Persisted keyspace entries were not re-bound by settings_load_subtree");
+        return ret;
+    }
+
+    /* Re-bound entries are full citizens: listable via key_prefix, and
+     * deletable, exactly like ones created via CreateSetting this boot. */
+    affected_count = 0;
+    ret = zmk_custom_settings_save_scope("test", NULL, "macro/", &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 3) {
+        LOG_ERR("Expected key_prefix scope to match exactly 3 re-bound macro/ entries, got %u",
+                affected_count);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/reload-a");
+    if (ret == 0) {
+        ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/reload-b");
+    }
+    if (ret == 0) {
+        ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/reload-c");
+    }
+    if (ret < 0) {
+        LOG_ERR("Failed to delete a re-bound keyspace entry: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_settings_load_rebind a=111 b=222 c=333");
+
+    return 0;
+}
+
 static int test_record_settings(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
     if (!setting) {
@@ -1485,6 +1748,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_runtime_registration();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_lifecycle();
     if (ret < 0) {
         return ret;
     }

@@ -19,6 +19,9 @@ web UI.
 - Mark values as device-private, RPC-personal, or RPC-public.
 - Require Studio unlock independently for reads and writes.
 - Notify Studio clients when values change.
+- Let RPC clients create and delete user-named entries (profiles, macros, ...)
+  at runtime through a fixed-size keyspace slot pool, with no heap and no
+  per-entry module code required to survive a reboot.
 
 ## Module User Guide
 
@@ -380,6 +383,75 @@ way - array settings still need a `struct zmk_custom_setting_array_state`
 array is needed; register its descriptor with `.array_key` set and
 `.array_state` pointing at that state the same way the macro does.
 
+### RPC-Creatable Keyspaces
+
+For entries whose *keys* are not known at compile time either - user-created
+profiles, named macros, and similar - register a **keyspace**: a fixed-size
+pool of slots under a shared key prefix, with entries created and deleted at
+runtime by RPC clients (or firmware) instead of by `ZMK_CUSTOM_SETTING_DEFINE`.
+No heap is used: `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE` statically allocates
+`max_entries` slots, each with its own `max_key_len`-sized key buffer -
+independent of `CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN`, so a keyspace for
+short suffixes (e.g. `macro/<name>`) does not pay for a buffer sized for the
+global maximum key length.
+
+```c
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(
+    my_macros, "my_module", /* key prefix = */ "macro/",
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    /* max_size = */ sizeof(int32_t), /* max_key_len = */ 16,
+    /* max_entries = */ 8, ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+static int my_module_init(void) {
+    return zmk_custom_settings_register_keyspace(&my_macros);
+}
+SYS_INIT(my_module_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+```
+
+Register the keyspace before `settings_load()` runs (i.e. from a `SYS_INIT`,
+like any other setting) so persisted entries are picked up correctly - see
+below.
+
+Create and delete entries with `zmk_custom_setting_keyspace_create` /
+`zmk_custom_setting_keyspace_delete`, or over Studio RPC with the
+`CreateSetting` / `DeleteSetting` requests (`setting.key` must start with the
+keyspace's prefix and fit `max_key_len`, including the NUL terminator):
+
+```c
+const struct zmk_custom_setting *created;
+int ret = zmk_custom_setting_keyspace_create(
+    &my_macros, "macro/my-macro-1", &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+    ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
+/* -ENOSPC if every slot is in use, -EEXIST if the key already has a live
+ * slot, -ENAMETOOLONG if the key does not fit, -EINVAL for a mismatched
+ * prefix or value type. */
+
+zmk_custom_setting_keyspace_delete(&my_macros, "macro/my-macro-1");
+/* -ENOENT if the key has no live slot. */
+```
+
+Once created, an entry is a full citizen of the registry: it is find-able
+(`zmk_custom_setting_find("my_module", "macro/my-macro-1")`), discoverable via
+the existing `key_prefix` scope filter (`ListSettingsRequest{scope:{key_prefix:
+"macro/"}}` returns every live entry), and covered by save/discard/reset scope
+operations - all for free through the same `ZMK_CUSTOM_SETTING_FOREACH`
+virtual iterator that runtime-registered settings use (see Runtime
+Registration above), since `zmk_custom_setting_keyspace_create` registers each
+slot's descriptor through the same mechanism.
+
+Persisted entries survive a reboot with **no module code running on their
+behalf**: while `settings_load()` is loading `custom_settings/my_module/*`
+records, any key matching a registered keyspace's prefix that is not yet
+bound to a live slot is automatically bound to a free one before its loaded
+value is applied. If more entries were persisted than `max_entries` allows
+(e.g. after lowering `max_entries` across a firmware update), the extras are
+silently left unbound rather than failing boot; deleting some entries and
+raising `max_entries` again makes room for them.
+
 ### Firmware API
 
 Read or update settings from firmware:
@@ -479,7 +551,11 @@ The web UI in `web/` connects to a keyboard over serial, finds the
 `cormoran_custom_settings` subsystem, and sends typed read/write/save/discard/reset
 requests. It can also export all RPC-readable setting values as JSON and import
 that JSON back to the device using the selected write mode. Array values can be
-written by index or changed with push-back/pop-back commands.
+written by index or changed with push-back/pop-back commands. A "Create
+Setting" panel sends `CreateSetting` for a registered keyspace's prefix (see
+RPC-Creatable Keyspaces above), and any selected setting - including a
+keyspace entry - can be removed with the "Delete" button, which sends
+`DeleteSetting`.
 
 ```bash
 cd web
