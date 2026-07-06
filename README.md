@@ -377,6 +377,60 @@ larger `max_size` too.
 > peripheral's large value. Register large settings on the half whose RPC client
 > (Studio) talks to them.
 
+### Shared Large-Value Pools
+
+`ZMK_CUSTOM_SETTING_DEFINE_SIZED` gives every large setting its own dedicated
+backing buffer, sized for `max_size` bytes whether or not the setting is ever
+written. That is wasteful when a module has *many* large settings that are
+not all expected to hold their maximum value at the same time (e.g. one
+`BYTES` setting per user-defined macro body) — reserving `max_size` bytes for
+each would cost `N * max_size` bytes of RAM even while most of them are empty
+or short. `ZMK_CUSTOM_SETTING_DEFINE_POOLED` lets a group of `BYTES`/`STRING`
+settings share one fixed-size budget instead:
+
+```c
+/* One 4 KiB budget shared by every macro body. */
+ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(macro_body_pool, 4096);
+
+/* Each of these can hold up to 512 bytes, but only actually consumes pool
+ * space while it holds a non-empty value. */
+ZMK_CUSTOM_SETTING_DEFINE_POOLED(
+    macro_body_0,
+    /* max_size = */ 512, macro_body_pool,
+    "runtime_macro", "macro/0/body",
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+```
+
+Use `DEFINE_POOLED` when several large settings share a budget and are not
+all expected to be full at once; use `DEFINE_SIZED` for one standalone large
+setting that should always have its own guaranteed capacity.
+
+A pooled setting with an empty value costs zero pool bytes (a `STRING`'s
+trailing NUL still costs one byte even when empty, since it is stored inside
+the pool region alongside the payload). Writing a value moves it into a
+right-sized region inside the pool, relocating other members as needed to
+keep the pool free of gaps — this is invisible to every reader, since a
+setting's storage pointer is only ever dereferenced while holding the
+settings lock, never cached across it. If the pool has no room for a write
+even after that compaction, the write fails with `-ENOSPC` and the setting's
+previous value is left untouched; `max_size` is still capped by
+`CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE` per setting, but is **not**
+checked against the pool's total size at compile time, since an
+over-committed pool (the sum of every member's `max_size` exceeding the pool)
+is the normal, expected way to use one — it only becomes a real problem once
+enough members are simultaneously non-empty to exhaust it. A persisted value
+that no longer fits its pool on boot (e.g. after shrinking the pool across a
+firmware update) is skipped with a `LOG_WRN` instead of failing boot, the
+same policy already used for keyspace-pool exhaustion.
+
+`zmk_custom_setting_large_pool_used(&pool)` returns the pool's current total
+usage, useful for a UI showing remaining budget.
+
 ### Reading And Writing Large Values In Chunks
 
 `CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC` (enabled by default alongside Studio
