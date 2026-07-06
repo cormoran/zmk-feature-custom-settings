@@ -20,6 +20,9 @@ web UI.
 - Mark values as device-private, RPC-personal, or RPC-public.
 - Require Studio unlock independently for reads and writes.
 - Notify Studio clients when values change.
+- Let RPC clients create and delete user-named entries (profiles, macros, ...)
+  at runtime through a fixed-size keyspace slot pool, with no heap and no
+  per-entry module code required to survive a reboot.
 
 ## Module User Guide
 
@@ -323,38 +326,176 @@ alongside its metadata in a single `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` frame:
 
 ### Array Settings
 
-Array settings are registered one element at a time up to the maximum supported
-length. The active array length can be smaller than the maximum. The firmware
-storage key is expanded to `key/index`, but the public API and RPC protocol use
-the base key plus an explicit array index and active length. Flash storage saves
-the active length and only the active array items. RPC does not expose the
-maximum length; appending past it returns an error.
+Array settings are registered with a **single macro call** for the whole array:
+one descriptor owns one contiguous backing buffer sized for the maximum
+element count, instead of one registration per element. The active array
+length can be smaller than the maximum. The firmware storage key is expanded
+to `key/index` (plus a `key/_size` entry for the active length), but the
+public API and RPC protocol use the base key plus an explicit array index and
+active length. Flash storage saves the active length and only the active
+array items. RPC does not expose the maximum length; appending past it
+returns an error.
 
 ```c
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_0, "my_module", "layers", 0, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(0),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+/* Declare the per-index defaults first (a plain macro argument works for
+ * short literals like ZMK_CUSTOM_SETTING_VALUE_INT32(0) elsewhere in this
+ * guide, but an array of defaults needs its own declaration so it can be
+ * passed as a pointer - see the comment on
+ * ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE for why). */
+ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(my_layers_default, 0, 1, 2);
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_1, "my_module", "layers", 1, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
-
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(my_layer_2, "my_module", "layers", 2, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(2),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
+/* One registration for up to 3 elements, with active length starting at 3. */
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(my_layers, "my_module", "layers",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                /* max_count = */ 3, /* default_size = */ 3,
+                                my_layers_default,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_SECURE,
+                                ZMK_CUSTOM_SETTING_RANGE_INT32(0, 31));
 ```
+
+`ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_CONSTRAINTS` and
+`ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS[_AND_CONSTRAINTS]`
+follow the same naming pattern as the scalar `ZMK_CUSTOM_SETTING_DEFINE*`
+macros for zero-or-more constraints and/or custom bytes RPC converters.
+
+> **Migrating from `ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE`**: older versions
+> of this module registered arrays one element at a time
+> (`ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(name, subsys, key, index,
+> max_size, ...)` called once per index, each with its own default). That
+> macro has been **removed**, not kept as a compatibility shim: independent
+> per-index macro expansions (e.g. a `LISTIFY`/`UTIL_LISTIFY` loop) have no
+> way to share the one contiguous buffer the new design requires, so there is
+> no mechanical way to keep the old call sites compiling. Replace each array's
+> N old registrations with one `ZMK_CUSTOM_SETTING_ARRAY_DEFINE` call, moving
+> each element's old default into one `ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_*`
+> declaration. The on-flash storage format is unchanged (`key/index` and
+> `key/_size` entries persist and load exactly as before), so existing user
+> data survives the migration with no extra code.
+
+### Runtime Registration
+
+`ZMK_CUSTOM_SETTING_DEFINE`/`ZMK_CUSTOM_SETTING_ARRAY_DEFINE` need the
+setting's shape (subsystem, key, type, count) to be known at compile time.
+For a driver whose setting count depends on devicetree instance data or
+other runtime probing, register a setting directly with
+`zmk_custom_settings_register()` instead:
+
+```c
+static struct zmk_custom_setting_value my_driver_default =
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0);
+
+/* Caller-owned storage: static (or per-devicetree-instance) so it outlives
+ * the registration. No heap is used anywhere in this API. */
+static struct zmk_custom_setting my_driver_setting;
+
+static int my_driver_init(void) {
+    my_driver_setting = (struct zmk_custom_setting){
+        .custom_subsystem_id = "my_module",
+        .key = "channel_gain",
+        .array_key = NULL,
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
+        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .default_value = &my_driver_default,
+        .temp_slot = -1,
+    };
+
+    return zmk_custom_settings_register(&my_driver_setting);
+}
+SYS_INIT(my_driver_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+```
+
+A runtime-registered setting behaves exactly like a compile-time one
+afterwards: it is find-able (`zmk_custom_setting_find`), shows up in
+`ZMK_CUSTOM_SETTING_FOREACH`, participates in save/discard/reset scope
+operations, and is listed/read/written over Studio RPC. If registration
+happens after this module's own boot-time settings load (the common case
+for anything registering outside its own early `SYS_INIT`),
+`zmk_custom_settings_register()` also loads any value already persisted
+under this setting's storage key from a previous boot, so a user's saved
+value is not silently replaced by the compile-time default. Registering
+the same subsystem id + key twice fails with `-EEXIST`; a malformed
+descriptor fails with `-EINVAL`.
+
+Only the descriptor struct itself needs to be filled in by hand this
+way - array settings still need a `struct zmk_custom_setting_array_state`
+(see `ZMK_CUSTOM_SETTING_ARRAY_DEFINE`'s expansion in
+`include/cormoran/zmk/custom_settings.h` for the exact shape) if a runtime
+array is needed; register its descriptor with `.array_key` set and
+`.array_state` pointing at that state the same way the macro does.
+
+### RPC-Creatable Keyspaces
+
+For entries whose *keys* are not known at compile time either - user-created
+profiles, named macros, and similar - register a **keyspace**: a fixed-size
+pool of slots under a shared key prefix, with entries created and deleted at
+runtime by RPC clients (or firmware) instead of by `ZMK_CUSTOM_SETTING_DEFINE`.
+No heap is used: `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE` statically allocates
+`max_entries` slots, each with its own `max_key_len`-sized key buffer -
+independent of `CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN`, so a keyspace for
+short suffixes (e.g. `macro/<name>`) does not pay for a buffer sized for the
+global maximum key length.
+
+```c
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(
+    my_macros, "my_module", /* key prefix = */ "macro/",
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+    /* max_size = */ sizeof(int32_t), /* max_key_len = */ 16,
+    /* max_entries = */ 8, ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+static int my_module_init(void) {
+    return zmk_custom_settings_register_keyspace(&my_macros);
+}
+SYS_INIT(my_module_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+```
+
+Register the keyspace before `settings_load()` runs (i.e. from a `SYS_INIT`,
+like any other setting) so persisted entries are picked up correctly - see
+below.
+
+Create and delete entries with `zmk_custom_setting_keyspace_create` /
+`zmk_custom_setting_keyspace_delete`, or over Studio RPC with the
+`CreateSetting` / `DeleteSetting` requests (`setting.key` must start with the
+keyspace's prefix and fit `max_key_len`, including the NUL terminator):
+
+```c
+const struct zmk_custom_setting *created;
+int ret = zmk_custom_setting_keyspace_create(
+    &my_macros, "macro/my-macro-1", &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+    ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
+/* -ENOSPC if every slot is in use, -EEXIST if the key already has a live
+ * slot, -ENAMETOOLONG if the key does not fit, -EINVAL for a mismatched
+ * prefix or value type. */
+
+zmk_custom_setting_keyspace_delete(&my_macros, "macro/my-macro-1");
+/* -ENOENT if the key has no live slot. */
+```
+
+Once created, an entry is a full citizen of the registry: it is find-able
+(`zmk_custom_setting_find("my_module", "macro/my-macro-1")`), discoverable via
+the existing `key_prefix` scope filter (`ListSettingsRequest{scope:{key_prefix:
+"macro/"}}` returns every live entry), and covered by save/discard/reset scope
+operations - all for free through the same `ZMK_CUSTOM_SETTING_FOREACH`
+virtual iterator that runtime-registered settings use (see Runtime
+Registration above), since `zmk_custom_setting_keyspace_create` registers each
+slot's descriptor through the same mechanism.
+
+Persisted entries survive a reboot with **no module code running on their
+behalf**: while `settings_load()` is loading `custom_settings/my_module/*`
+records, any key matching a registered keyspace's prefix that is not yet
+bound to a live slot is automatically bound to a free one before its loaded
+value is applied. If more entries were persisted than `max_entries` allows
+(e.g. after lowering `max_entries` across a firmware update), the extras are
+silently left unbound rather than failing boot; deleting some entries and
+raising `max_entries` again makes room for them.
 
 ### Firmware API
 
@@ -384,6 +525,14 @@ const struct zmk_custom_setting *layers =
 zmk_custom_setting_array_push_back(layers, &ZMK_CUSTOM_SETTING_VALUE_INT32(5),
                                    ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 zmk_custom_setting_array_pop_back(layers, NULL, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+/* Insert/remove in the middle of the array. Both shift the remaining active
+ * elements over the array's single contiguous buffer, so they are cheap
+ * regardless of array length. */
+zmk_custom_setting_array_insert_at(layers, 1, &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+struct zmk_custom_setting_value removed;
+zmk_custom_setting_array_remove_at(layers, 1, &removed, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
 ```
 
 `struct zmk_custom_setting_value` is sized by
@@ -447,7 +596,11 @@ The web UI in `web/` connects to a keyboard over serial, finds the
 `cormoran_custom_settings` subsystem, and sends typed read/write/save/discard/reset
 requests. It can also export all RPC-readable setting values as JSON and import
 that JSON back to the device using the selected write mode. Array values can be
-written by index or changed with push-back/pop-back commands.
+written by index or changed with push-back/pop-back commands. A "Create
+Setting" panel sends `CreateSetting` for a registered keyspace's prefix (see
+RPC-Creatable Keyspaces above), and any selected setting - including a
+keyspace entry - can be removed with the "Delete" button, which sends
+`DeleteSetting`.
 
 ```bash
 cd web

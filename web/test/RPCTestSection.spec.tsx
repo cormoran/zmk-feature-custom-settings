@@ -100,19 +100,25 @@ describe("RPCTestSection Component", () => {
       );
       await userEvent.click(settingButton);
 
-      expect(
-        screen.getByRole("heading", { name: "Update Value" })
-      ).toBeInTheDocument();
-      expect(screen.getByText("int32")).toBeInTheDocument();
+      const updateValueHeading = screen.getByRole("heading", {
+        name: "Update Value",
+      });
+      expect(updateValueHeading).toBeInTheDocument();
+      const updateValuePanel = updateValueHeading.closest(
+        "section"
+      ) as HTMLElement;
+      expect(within(updateValuePanel).getByText("int32")).toBeInTheDocument();
       expect(screen.queryByText("Array Index")).not.toBeInTheDocument();
       expect(screen.queryByText("Array Size")).not.toBeInTheDocument();
-      const input = screen.getByLabelText(/Value/i) as HTMLInputElement;
+      const input = within(updateValuePanel).getByLabelText(
+        /Value/i
+      ) as HTMLInputElement;
       expect(input.value).toBe("42");
       expect(
-        screen.queryByRole("button", { name: "Push Back" })
+        within(updateValuePanel).queryByRole("button", { name: "Push Back" })
       ).not.toBeInTheDocument();
       expect(
-        screen.queryByRole("button", { name: "Pop Back" })
+        within(updateValuePanel).queryByRole("button", { name: "Pop Back" })
       ).not.toBeInTheDocument();
 
       await userEvent.click(settingButton);
@@ -310,6 +316,73 @@ describe("RPCTestSection Component", () => {
       const request = lastCustomSettingsRequest();
 
       expect(request.saveSettings?.scope?.source).toBe(0xffffffff);
+    });
+
+    it("should create a keyspace entry from the Create Setting panel", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(1));
+      await screen.findByText("Listed 0 settings");
+
+      await userEvent.type(screen.getByLabelText(/^Subsystem$/i), "test");
+      await userEvent.type(screen.getByLabelText(/^Key$/i), "macro/my-macro-1");
+      const createValueInput = screen.getByLabelText(
+        "Value"
+      ) as HTMLInputElement;
+      await userEvent.clear(createValueInput);
+      await userEvent.type(createValueInput, "5");
+      await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+
+      expect(request.createSetting?.setting).toMatchObject({
+        customSubsystemIndex: 1,
+        key: "macro/my-macro-1",
+      });
+      expect(request.createSetting?.value).toEqual({ int32Value: 5 });
+    });
+
+    it("should delete the selected setting", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        key: "macro/my-macro-1",
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/macro/my-macro-1" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+      await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+
+      expect(request.deleteSetting?.setting).toMatchObject({
+        customSubsystemIndex: 1,
+        key: "macro/my-macro-1",
+      });
     });
   });
 

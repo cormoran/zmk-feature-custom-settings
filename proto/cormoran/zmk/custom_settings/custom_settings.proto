@@ -168,6 +168,22 @@ message PopBackArrayRequest {
     SettingWriteMode mode = 2;
 }
 
+// Create one entry in an RPC-creatable keyspace (see
+// ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE). setting.key must start with the
+// target keyspace's key_prefix and fit its max_key_len; setting.array_index
+// is unused. Fails with an ErrorResponse if the keyspace is full, the key is
+// already in use, or the key does not match any registered keyspace prefix.
+message CreateSettingRequest {
+    SettingRef setting = 1;
+    SettingValue value = 2;
+    SettingWriteMode mode = 3;
+}
+
+// Delete one entry previously created by CreateSettingRequest (or persisted
+// by one in an earlier session). Fails with an ErrorResponse if setting.key
+// has no live entry.
+message DeleteSettingRequest { SettingRef setting = 1; }
+
 message SaveSettingsRequest { SettingScope scope = 1; }
 
 message DiscardSettingsRequest { SettingScope scope = 1; }
@@ -210,6 +226,8 @@ message Request {
         PopBackArrayRequest pop_back_array = 8;
         ReadValueChunkRequest read_value_chunk = 9;
         WriteValueChunkRequest write_value_chunk = 10;
+        CreateSettingRequest create_setting = 11;
+        DeleteSettingRequest delete_setting = 12;
     }
 }
 

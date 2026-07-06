@@ -827,6 +827,67 @@ static bool can_include_value(const struct zmk_custom_setting *setting) {
            !needs_unlock(setting->read_permission);
 }
 
+static bool setting_matches_scope(const struct zmk_custom_setting *setting,
+                                  const struct zmk_custom_settings_setting_scope *scope) {
+    return zmk_custom_setting_matches(setting, setting_scope_custom_subsystem_id(scope),
+                                      setting_scope_key(scope), setting_scope_key_prefix(scope));
+}
+
+/*
+ * Since P3, ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered
+ * zmk_custom_setting per array (the descriptor, with array_index ==
+ * ZMK_CUSTOM_SETTING_ARRAY_NONE) instead of one per active element, so list
+ * enumeration (which is one notification per element, matching the pre-P3
+ * per-element registrations that Studio/the web UI expect) has to expand
+ * each array descriptor into its active elements itself instead of relying
+ * on the registry walk to do it. setting_is_active() above already reports
+ * false for a bare array descriptor (ZMK_CUSTOM_SETTING_ARRAY_NONE is never
+ * < any array_size), so a plain ZMK_CUSTOM_SETTING_FOREACH would silently
+ * skip every array setting entirely - this callback-based walk fixes that
+ * for both the "how many items match" count and the "send the Nth item"
+ * paths without duplicating the expansion logic between them.
+ *
+ * Returns false from the visitor to stop iterating early (used for
+ * resuming a batched send at a specific flattened index).
+ */
+typedef bool (*list_item_visitor_t)(const struct zmk_custom_setting *item, void *user_data);
+
+static bool for_each_list_item(const struct zmk_custom_settings_setting_scope *scope,
+                               list_item_visitor_t visitor, void *user_data) {
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (zmk_custom_setting_is_array(setting) &&
+            setting->array_index == ZMK_CUSTOM_SETTING_ARRAY_NONE) {
+            uint32_t active_size = zmk_custom_setting_array_size(setting);
+            for (uint32_t i = 0; i < active_size; i++) {
+                const struct zmk_custom_setting *element = zmk_custom_setting_find_array_element(
+                    setting->custom_subsystem_id, setting->array_key, i);
+                if (!element || !setting_matches_scope(element, scope)) {
+                    continue;
+                }
+                if (!visitor(element, user_data)) {
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        if (!setting_is_active(setting) || !setting_matches_scope(setting, scope)) {
+            continue;
+        }
+        if (!visitor(setting, user_data)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool list_count_visitor(const struct zmk_custom_setting *item, void *user_data) {
+    ARG_UNUSED(item);
+    (*(uint32_t *)user_data)++;
+    return true;
+}
+
 static void list_settings_work_handler(struct k_work *work);
 
 K_WORK_DELAYABLE_DEFINE(list_settings_work, list_settings_work_handler);
@@ -840,10 +901,46 @@ static int schedule_list_settings_work(k_timeout_t delay) {
     return k_work_schedule_for_queue(zmk_workqueue_lowprio_work_q(), &list_settings_work, delay);
 }
 
-static bool setting_matches_scope(const struct zmk_custom_setting *setting,
-                                  const struct zmk_custom_settings_setting_scope *scope) {
-    return zmk_custom_setting_matches(setting, setting_scope_custom_subsystem_id(scope),
-                                      setting_scope_key(scope), setting_scope_key_prefix(scope));
+struct list_send_context {
+    size_t index;
+    size_t next_index;
+    size_t sent;
+    bool include_meta;
+};
+
+static bool list_send_visitor(const struct zmk_custom_setting *item, void *user_data) {
+    struct list_send_context *ctx = user_data;
+
+    if (ctx->index++ < ctx->next_index) {
+        return true;
+    }
+
+    k_mutex_lock(&list_settings_lock, K_FOREVER);
+    list_settings_next_index = ctx->index;
+    k_mutex_unlock(&list_settings_lock);
+
+    LOG_DBG("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
+            "include_meta=%d",
+            item->custom_subsystem_id, zmk_custom_setting_public_key(item),
+            (uint32_t)(zmk_custom_setting_is_array(item) ? item->array_index
+                                                         : ZMK_CUSTOM_SETTING_ARRAY_NONE),
+            can_include_value(item), ctx->include_meta);
+    int ret = raise_setting_notification(
+        item,
+        cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
+        can_include_value(item), ctx->include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        LOG_WRN("Failed to raise custom settings list notification: %d", ret);
+    }
+
+    /* Send a batch of items per work cycle instead of one item per delayed
+     * reschedule; each item is still one notification frame. */
+    if (++ctx->sent >= CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE) {
+        schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
+        return false;
+    }
+
+    return true;
 }
 
 static void list_settings_work_handler(struct k_work *work) {
@@ -859,38 +956,14 @@ static void list_settings_work_handler(struct k_work *work) {
     bool include_meta = list_settings_include_meta;
     k_mutex_unlock(&list_settings_lock);
 
-    size_t index = 0;
-    size_t sent = 0;
-    ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (index++ < next_index || !setting_is_active(setting) ||
-            !setting_matches_scope(setting, &scope)) {
-            continue;
-        }
-
-        k_mutex_lock(&list_settings_lock, K_FOREVER);
-        list_settings_next_index = index;
-        k_mutex_unlock(&list_settings_lock);
-
-        LOG_DBG("Custom settings list item: subsystem=%s key=%s index=%u include_value=%d "
-                "include_meta=%d",
-                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
-                (uint32_t)(zmk_custom_setting_is_array(setting) ? setting->array_index
-                                                                : ZMK_CUSTOM_SETTING_ARRAY_NONE),
-                can_include_value(setting), include_meta);
-        int ret = raise_setting_notification(
-            setting,
-            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
-            can_include_value(setting), include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
-        if (ret < 0) {
-            LOG_WRN("Failed to raise custom settings list notification: %d", ret);
-        }
-
-        /* Send a batch of items per work cycle instead of one item per
-         * delayed reschedule; each item is still one notification frame. */
-        if (++sent >= CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE) {
-            schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
-            return;
-        }
+    struct list_send_context ctx = {
+        .next_index = next_index,
+        .include_meta = include_meta,
+    };
+    if (!for_each_list_item(&scope, list_send_visitor, &ctx)) {
+        /* Stopped early because a batch was sent and the next work cycle
+         * was already scheduled by list_send_visitor. */
+        return;
     }
 
     k_mutex_lock(&list_settings_lock, K_FOREVER);
@@ -987,13 +1060,7 @@ static int handle_private_list_settings(const struct zmk_custom_settings_setting
         return 0;
     }
 
-    ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (!setting_is_active(setting) || !setting_matches_scope(setting, scope)) {
-            continue;
-        }
-
-        count++;
-    }
+    for_each_list_item(scope, list_count_visitor, &count);
 
     if (count > 0) {
         schedule_list_settings(scope, require_meta);
@@ -1284,6 +1351,187 @@ static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArray
     }
 
     return handle_private_pop_back_array(&private_ref, req->mode, resp);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+/*
+ * P5b: CreateSetting/DeleteSetting - RPC-creatable keyspace entries (see
+ * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE in custom_settings.h). Unlike every
+ * other request above, these resolve their target through
+ * zmk_custom_settings_keyspace_find_for_key(subsystem, key) - a keyspace,
+ * not a single struct zmk_custom_setting - since the whole point is that the
+ * key does not exist as a setting yet (create) or is looked up by its
+ * literal persisted key rather than a compile-time descriptor (delete).
+ */
+
+static int handle_private_create_setting(const struct zmk_custom_settings_setting_ref *ref,
+                                         const struct zmk_custom_setting_value *value,
+                                         cormoran_zmk_custom_settings_SettingWriteMode write_mode,
+                                         cormoran_zmk_custom_settings_Response *resp,
+                                         bool value_uses_rpc_format) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    struct zmk_custom_setting_keyspace *keyspace = zmk_custom_settings_keyspace_find_for_key(
+        setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
+    if (!keyspace) {
+        set_error(resp, "No keyspace registered for this key");
+        return 0;
+    }
+
+    if (needs_unlock(keyspace->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    enum zmk_custom_setting_write_mode mode =
+        write_mode == cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
+
+    /* Deserialize against the keyspace's shared value_type/converters -
+     * there is no live struct zmk_custom_setting to deserialize against yet
+     * (that is exactly what this call creates), so build a throwaway
+     * descriptor with just the fields zmk_custom_setting_deserialize_rpc_value
+     * reads (value_type, rpc_deserializer). */
+    struct zmk_custom_setting_value internal_value;
+    int ret = 0;
+    if (value_uses_rpc_format) {
+        struct zmk_custom_setting keyspace_value_shape = {
+            .value_type = keyspace->value_type,
+            .rpc_deserializer = keyspace->rpc_deserializer,
+        };
+        ret =
+            zmk_custom_setting_deserialize_rpc_value(&keyspace_value_shape, value, &internal_value);
+        if (ret < 0) {
+            return ret;
+        }
+        value = &internal_value;
+    }
+
+    const struct zmk_custom_setting *created = NULL;
+    ret = zmk_custom_setting_keyspace_create(keyspace, setting_ref_key(ref), value, mode, &created);
+    if (ret == -ENOSPC) {
+        set_error(resp, "Keyspace is full");
+        return 0;
+    }
+    if (ret == -EEXIST) {
+        set_error(resp, "Key already exists");
+        return 0;
+    }
+    if (ret == -ENAMETOOLONG) {
+        set_error(resp, "Key is too long for this keyspace");
+        return 0;
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (created) {
+        raise_setting_notification(
+            created,
+            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED,
+            can_include_value(created), false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    }
+
+    set_status(resp, 1, "Setting created");
+    return 0;
+}
+
+static int handle_create_setting(const cormoran_zmk_custom_settings_CreateSettingRequest *req,
+                                 cormoran_zmk_custom_settings_Response *resp) {
+#if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_setting_value value;
+    bool value_is_array = false;
+    uint32_t array_index = 0;
+    uint32_t array_size = 0;
+    ret = proto_to_value(&req->value, &value, &value_is_array, &array_index, &array_size);
+    if (ret < 0) {
+        return ret;
+    }
+    if (value_is_array) {
+        return -EINVAL;
+    }
+
+    return handle_private_create_setting(&private_ref, &value, req->mode, resp, true);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+static int handle_private_delete_setting(const struct zmk_custom_settings_setting_ref *ref,
+                                         cormoran_zmk_custom_settings_Response *resp) {
+    if (!ref->has_key) {
+        return -EINVAL;
+    }
+
+    if (!source_targets_local(setting_ref_source(ref))) {
+        set_status(resp, 0, "No local setting matched source");
+        return 0;
+    }
+
+    struct zmk_custom_setting_keyspace *keyspace = zmk_custom_settings_keyspace_find_for_key(
+        setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
+    if (!keyspace) {
+        return -ENOENT;
+    }
+
+    if (needs_unlock(keyspace->write_permission)) {
+        set_error(resp, "Unlock required");
+        return 0;
+    }
+
+    /* Notify before releasing the slot: raise_setting_notification (the
+     * same helper list/create/write use, so encoding/relay behavior stays
+     * consistent) reads the setting's key straight out of the slot's own
+     * key buffer, which zmk_custom_setting_keyspace_delete is about to hand
+     * back to the pool for reuse. */
+    const struct zmk_custom_setting *setting =
+        zmk_custom_setting_keyspace_find(keyspace, setting_ref_key(ref));
+    if (setting) {
+        raise_setting_notification(
+            setting,
+            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_DISCARDED,
+            false, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    }
+
+    int ret = zmk_custom_setting_keyspace_delete(keyspace, setting_ref_key(ref));
+    if (ret == -ENOENT) {
+        set_error(resp, "Key does not exist");
+        return 0;
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    set_status(resp, 1, "Setting deleted");
+    return 0;
+}
+
+static int handle_delete_setting(const cormoran_zmk_custom_settings_DeleteSettingRequest *req,
+                                 cormoran_zmk_custom_settings_Response *resp) {
+#if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+    struct zmk_custom_settings_setting_ref private_ref;
+    int ret = setting_ref_to_private(&req->setting, &private_ref);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return handle_private_delete_setting(&private_ref, resp);
 #else
     return -ENOTSUP;
 #endif
@@ -1918,6 +2166,10 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
         return handle_read_value_chunk(&req->request_type.read_value_chunk, resp);
     case cormoran_zmk_custom_settings_Request_write_value_chunk_tag:
         return handle_write_value_chunk(&req->request_type.write_value_chunk, resp);
+    case cormoran_zmk_custom_settings_Request_create_setting_tag:
+        return handle_create_setting(&req->request_type.create_setting, resp);
+    case cormoran_zmk_custom_settings_Request_delete_setting_tag:
+        return handle_delete_setting(&req->request_type.delete_setting, resp);
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);
@@ -2277,6 +2529,70 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
 }
 
 SYS_INIT(custom_settings_rpc_bytes_converter_test_init, APPLICATION, 99);
+
+/* Since P3, ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered
+ * zmk_custom_setting per array (see for_each_list_item's comment); this
+ * regression-tests that handle_private_list_settings still reports one
+ * counted item per *active array element* (matching the pre-P3 per-element
+ * registrations that the web UI/Studio protocol expect), not zero (which is
+ * what a naive ZMK_CUSTOM_SETTING_FOREACH-only count would now produce,
+ * since a bare array descriptor's array_index is never < its own size) and
+ * not one (counting the descriptor itself as a single list item). */
+static int custom_settings_list_array_test_init(void) {
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array("test", "array_value");
+    if (!array_setting) {
+        LOG_ERR("List array test setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    uint32_t active_size = zmk_custom_setting_array_size(array_setting);
+    if (active_size == 0) {
+        LOG_ERR("List array test setting has no active elements after reset");
+        return -EINVAL;
+    }
+
+    struct zmk_custom_settings_setting_scope scope = {
+        .has_custom_subsystem_id = true,
+        .has_key = true,
+        .has_source = true,
+        .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+    };
+    copy_string(scope.custom_subsystem_id, sizeof(scope.custom_subsystem_id), "test");
+    copy_string(scope.key, sizeof(scope.key), "array_value");
+
+    uint32_t count = 0;
+    for_each_list_item(&scope, list_count_visitor, &count);
+    if (count != active_size) {
+        LOG_ERR("List array test expected %u list items, got %u", active_size, count);
+        return -EINVAL;
+    }
+
+    /* Send-side (list_send_visitor/for_each_list_item together) must walk
+     * the same active_size flattened items, and each one must resolve to a
+     * distinct, correctly-indexed element. */
+    struct list_send_context ctx = {0};
+    bool completed = for_each_list_item(&scope, list_send_visitor, &ctx);
+    if (!completed || ctx.sent != active_size) {
+        LOG_ERR("List array test send visited %u items (completed=%d), expected %u", ctx.sent,
+                completed, active_size);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_list_array_expands_to_elements count=%u", active_size);
+    return 0;
+}
+
+SYS_INIT(custom_settings_list_array_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) &&                                                 \

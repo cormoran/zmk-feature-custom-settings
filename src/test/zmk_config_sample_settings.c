@@ -289,29 +289,23 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_value) = 
 };
 #endif
 
-#define ZMK_CONFIG_SAMPLE_ARRAY_SETTING(_name, _index, _default)                                   \
-    static const struct zmk_custom_setting_value _name##_default_value = {                         \
-        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_default)};                   \
-    STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
-        .custom_subsystem_id = "zmk_config_sample",                                                \
-        .key = "array_value/" ZMK_CUSTOM_SETTINGS_STRINGIFY(_index),                               \
-        .array_key = "array_value",                                                                \
-        .array_index = (_index),                                                                   \
-        .array_max_size = 4,                                                                       \
-        .default_array_size = 4,                                                                   \
-        .array_size = 4,                                                                           \
-        .persistent_array_size = 4,                                                                \
-        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,                                         \
-        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,                          \
-        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,                                 \
-        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,                                \
-        .constraints = zmk_config_sample_range_0_100,                                              \
-        .constraints_count = ARRAY_SIZE(zmk_config_sample_range_0_100),                            \
-        .default_value = &_name##_default_value,                                                   \
-        .temp_slot = -1,                                                                           \
-    }
+/*
+ * P3 rework: array settings now own a single contiguous backing buffer plus
+ * per-slot bookkeeping (struct zmk_custom_setting_array_state) instead of
+ * plain scalar-sized fields duplicated onto one STRUCT_SECTION_ITERABLE
+ * instance per element - hand-building that state here would just
+ * reimplement what ZMK_CUSTOM_SETTING_ARRAY_DEFINE already does, without
+ * adding meaningful extra test coverage over the hand-built scalar
+ * STRUCT_SECTION_ITERABLE instances above. Use the macro for the array case
+ * instead; the scalar settings above still exercise the "hand-built
+ * STRUCT_SECTION_ITERABLE instead of macros" path.
+ */
+ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(zmk_config_sample_array_defaults, 10, 20, 30, 40);
 
-ZMK_CONFIG_SAMPLE_ARRAY_SETTING(zmk_config_sample_array_0, 0, 10);
-ZMK_CONFIG_SAMPLE_ARRAY_SETTING(zmk_config_sample_array_1, 1, 20);
-ZMK_CONFIG_SAMPLE_ARRAY_SETTING(zmk_config_sample_array_2, 2, 30);
-ZMK_CONFIG_SAMPLE_ARRAY_SETTING(zmk_config_sample_array_3, 3, 40);
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(zmk_config_sample_array, "zmk_config_sample", "array_value",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, 4, 4,
+                                zmk_config_sample_array_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));

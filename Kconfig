@@ -135,6 +135,20 @@ config ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE
       Writing a larger value in temporary mode fails with -EMSGSIZE; other
       write modes are unaffected.
 
+config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
+    int "Array element index view pool size"
+    default 16
+    range 1 64
+    help
+      Number of struct zmk_custom_setting "index view" instances shared
+      across all array settings. zmk_custom_setting_find_array_element
+      hands out a view keyed by (array descriptor, index) from this pool
+      instead of registering one struct per element (see
+      ZMK_CUSTOM_SETTING_ARRAY_DEFINE). Views are cached and reused for the
+      same (array, index) pair, so this only needs to cover how many
+      distinct array elements are referenced at once (RPC handling, list
+      enumeration, tests); it does not bound array length.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 

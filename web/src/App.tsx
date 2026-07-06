@@ -106,6 +106,15 @@ export function RPCTestSection() {
   const [filterKeyPrefix, setFilterKeyPrefix] = useState("");
   const [editorCustomSubsystemId, setEditorCustomSubsystemId] = useState("");
   const [editorSettingKey, setEditorSettingKey] = useState("");
+  const [createCustomSubsystemId, setCreateCustomSubsystemId] = useState("");
+  const [createSettingKey, setCreateSettingKey] = useState("");
+  const [createValueType, setCreateValueType] = useState<EditorValueType>(
+    EditorValueType.Int32
+  );
+  const [createValue, setCreateValue] = useState("0");
+  const [createWriteMode, setCreateWriteMode] = useState<SettingWriteMode>(
+    SettingWriteMode.SETTING_WRITE_MODE_MEMORY
+  );
   const [valueType, setValueType] = useState<EditorValueType>(
     EditorValueType.Int32
   );
@@ -153,21 +162,8 @@ export function RPCTestSection() {
     source: SOURCE_ALL,
   };
 
-  const parseScalarValue = (): SettingScalarValue => {
-    switch (valueType) {
-      case EditorValueType.Bytes:
-        return { bytesValue: parseBytesValue(value) };
-      case EditorValueType.Bool:
-        return { boolValue: value === "true" || value === "1" };
-      case EditorValueType.String:
-        return { stringValue: value };
-      case EditorValueType.Behavior:
-        return { behaviorValue: parseBehaviorValue(value) };
-      case EditorValueType.Int32:
-      default:
-        return { int32Value: Number.parseInt(value, 10) || 0 };
-    }
-  };
+  const parseScalarValue = (): SettingScalarValue =>
+    parseScalarValueOf(valueType, value);
 
   const parseValue = (): SettingValue => {
     const scalarValue = parseScalarValue();
@@ -514,6 +510,59 @@ export function RPCTestSection() {
       })
     );
 
+  const trimmedCreateCustomSubsystemId = createCustomSubsystemId.trim();
+  const createSubsystem = trimmedCreateCustomSubsystemId
+    ? zmkApp?.findSubsystem(trimmedCreateCustomSubsystemId)
+    : undefined;
+
+  const createSetting = async () => {
+    setIsLoading(true);
+    setResponse(null);
+
+    try {
+      if (trimmedCreateCustomSubsystemId && !createSubsystem) {
+        throw new Error(
+          `Custom subsystem not found: ${trimmedCreateCustomSubsystemId}`
+        );
+      }
+
+      const resp = await callCustomRequest(
+        Request.create({
+          createSetting: {
+            setting: {
+              customSubsystemIndex: createSubsystem?.index,
+              key: createSettingKey,
+            },
+            value: parseScalarValueOf(createValueType, createValue),
+            mode: createWriteMode,
+          },
+        })
+      );
+      if (resp.error) {
+        throw new Error(resp.error.message || "Create failed");
+      }
+      setResponse(
+        `${resp.status?.message || "Created"} (${resp.status?.affectedCount ?? 1})`
+      );
+    } catch (error) {
+      console.error("Create setting failed:", error);
+      setResponse(
+        `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const deleteSetting = () =>
+    sendRequest(
+      Request.create({
+        deleteSetting: {
+          setting: settingRef,
+        },
+      })
+    );
+
   const saveSettings = () =>
     sendRequest(Request.create({ saveSettings: { scope: settingScope } }));
 
@@ -768,6 +817,13 @@ export function RPCTestSection() {
             </button>
           </>
         )}
+        <button
+          className="btn btn-danger"
+          disabled={isLoading}
+          onClick={deleteSetting}
+        >
+          Delete
+        </button>
       </div>
     </section>
   ) : null;
@@ -831,6 +887,77 @@ export function RPCTestSection() {
             onClick={resetSettings}
           >
             Reset
+          </button>
+        </div>
+      </section>
+
+      <section className="settings-panel">
+        <h3>Create Setting</h3>
+        <p className="hint-text">
+          Creates a new entry in an RPC-creatable keyspace (e.g. a module
+          registering `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE` with prefix
+          "macro/"). The key must start with a registered keyspace's prefix.
+        </p>
+        <div className="form-grid">
+          <label htmlFor="create-custom-subsystem-input">Subsystem</label>
+          <input
+            id="create-custom-subsystem-input"
+            value={createCustomSubsystemId}
+            onChange={(e) => setCreateCustomSubsystemId(e.target.value)}
+          />
+
+          <label htmlFor="create-key-input">Key</label>
+          <input
+            id="create-key-input"
+            value={createSettingKey}
+            onChange={(e) => setCreateSettingKey(e.target.value)}
+            placeholder="macro/my-macro-1"
+          />
+
+          <label htmlFor="create-type-input">Type</label>
+          <select
+            id="create-type-input"
+            value={createValueType}
+            onChange={(e) =>
+              setCreateValueType(e.target.value as EditorValueType)
+            }
+          >
+            <option value={EditorValueType.Int32}>int32</option>
+            <option value={EditorValueType.Bool}>bool</option>
+            <option value={EditorValueType.String}>string</option>
+            <option value={EditorValueType.Bytes}>bytes</option>
+            <option value={EditorValueType.Behavior}>behavior</option>
+          </select>
+
+          <label htmlFor="create-value-input">Value</label>
+          <input
+            id="create-value-input"
+            value={createValue}
+            onChange={(e) => setCreateValue(e.target.value)}
+          />
+
+          <label htmlFor="create-mode-input">Write Mode</label>
+          <select
+            id="create-mode-input"
+            value={createWriteMode}
+            onChange={(e) => setCreateWriteMode(Number(e.target.value))}
+          >
+            <option value={SettingWriteMode.SETTING_WRITE_MODE_MEMORY}>
+              memory
+            </option>
+            <option value={SettingWriteMode.SETTING_WRITE_MODE_PERSIST}>
+              persist
+            </option>
+          </select>
+        </div>
+
+        <div className="toolbar">
+          <button
+            className="btn btn-primary"
+            disabled={isLoading || createSettingKey.trim().length === 0}
+            onClick={createSetting}
+          >
+            Create
           </button>
         </div>
       </section>
@@ -1046,6 +1173,25 @@ function formatBytesValue(value: Uint8Array): string {
     .join(" ");
 }
 
+function parseScalarValueOf(
+  type: EditorValueType,
+  raw: string
+): SettingScalarValue {
+  switch (type) {
+    case EditorValueType.Bytes:
+      return { bytesValue: parseBytesValue(raw) };
+    case EditorValueType.Bool:
+      return { boolValue: raw === "true" || raw === "1" };
+    case EditorValueType.String:
+      return { stringValue: raw };
+    case EditorValueType.Behavior:
+      return { behaviorValue: parseBehaviorValue(raw) };
+    case EditorValueType.Int32:
+    default:
+      return { int32Value: Number.parseInt(raw, 10) || 0 };
+  }
+}
+
 function settingGroupKey(setting: Setting): string {
   const arrayIndex = setting.value?.arrayValue?.index ?? "scalar";
   return `${setting.customSubsystemIndex}:${setting.key}:${arrayIndex}`;
@@ -1190,6 +1336,20 @@ function requestSummary(request: Request): Record<string, unknown> {
       kind: "popBackArray",
       setting: refSummary(request.popBackArray.setting),
       mode: request.popBackArray.mode,
+    };
+  }
+  if (request.createSetting) {
+    return {
+      kind: "createSetting",
+      setting: refSummary(request.createSetting.setting),
+      valueKind: valueKind(request.createSetting.value),
+      mode: request.createSetting.mode,
+    };
+  }
+  if (request.deleteSetting) {
+    return {
+      kind: "deleteSetting",
+      setting: refSummary(request.deleteSetting.setting),
     };
   }
 

@@ -188,29 +188,20 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     test_bytes_rpc_reverse, test_bytes_rpc_reverse, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0, "test", "array_value", 0, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(1),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+/* One registration for the whole 3-element array, replacing the pre-P3
+ * ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0/1/2, ...)
+ * trio (see the removal note in custom_settings.h). Defaults {1, 2, 3}
+ * match the old per-element defaults exactly so existing assertions in
+ * test_array_lifecycle/test_temporary_override_pool keep working unchanged. */
+ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(test_array_setting_defaults, 1, 2, 3);
 
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_1, "test", "array_value", 1, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(2),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
-
-ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_2, "test", "array_value", 2, 3,
-                                        ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-                                        ZMK_CUSTOM_SETTING_VALUE_INT32(3),
-                                        ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-                                        ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_array_setting, "test", "array_value",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, 3, 3,
+                                test_array_setting_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
 ZMK_CUSTOM_SETTING_DEFINE(test_hid_usage_setting, "test", "hid_usage",
                           ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(4),
@@ -261,6 +252,24 @@ ZMK_CUSTOM_SETTING_DEFINE(test_record_setting, "test", "record_value",
                           ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/* P5b: an RPC-creatable keyspace for user-created entries under the
+ * "macro/" prefix. max_key_len (16) is a keyspace-local limit deliberately
+ * smaller than CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (48, see
+ * native_sim.conf) to exercise that the two are independent - "macro/" (6)
+ * plus a short suffix plus NUL comfortably fits 16 but would not fit a
+ * hypothetical much-smaller max_key_len. */
+static const struct zmk_custom_setting_value test_keyspace_default =
+    ZMK_CUSTOM_SETTING_VALUE_INT32(0);
+
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_macro_keyspace, "test", "macro/",
+                                   ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+                                   /* max_size = */ sizeof(int32_t), /* max_key_len = */ 16,
+                                   /* max_entries = */ 3, test_keyspace_default,
+                                   ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
@@ -772,6 +781,214 @@ static int test_array_lifecycle(void) {
     return 0;
 }
 
+/* insert_at/remove_at: memmove-based shift over the array's single
+ * contiguous buffer (see zmk_custom_setting_array_insert_at/remove_at in
+ * custom_settings.c), instead of requiring one write per shifted element. */
+static int test_array_insert_remove(void) {
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array("test", "array_value");
+    if (!array_setting) {
+        LOG_ERR("Test custom array setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Defaults are {1, 2, 3} at size 3. */
+
+    /* Insert in the middle: {1, 2, 3} -> {1, 99, 2, 3}. */
+    ret = zmk_custom_setting_array_insert_at(array_setting, 1, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        /* array_value's max size is 3, so inserting into a full array must
+         * fail before anything else is asserted. */
+        LOG_ERR("Expected full custom array insert_at to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Make room by growing max usage down to 2 active elements first. */
+    struct zmk_custom_setting_value popped;
+    ret = zmk_custom_setting_array_pop_back(array_setting, &popped,
+                                            ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Active elements are now {1, 2}. */
+
+    ret = zmk_custom_setting_array_insert_at(array_setting, 1, &ZMK_CUSTOM_SETTING_VALUE_INT32(99),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 3) {
+        LOG_ERR("insert_at did not grow the active array size");
+        return -EINVAL;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 0, 1);
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 1, 99);
+    }
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 2, 2);
+    }
+    if (ret < 0) {
+        LOG_ERR("insert_at(1, 99) did not shift the tail correctly");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_insert_at_middle array={1,99,2}");
+
+    /* insert_at(index == size) behaves like push_back. */
+    ret = zmk_custom_setting_array_pop_back(array_setting, NULL,
+                                            ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    /* Active elements are now {1, 99}. */
+    ret = zmk_custom_setting_array_insert_at(array_setting, 2, &ZMK_CUSTOM_SETTING_VALUE_INT32(77),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 2, 77);
+    if (ret < 0) {
+        LOG_ERR("insert_at(size, ...) did not behave like push_back");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_insert_at_end array={1,99,77}");
+
+    /* insert_at past the (post-insert) end fails with -ERANGE and leaves the
+     * array untouched: index 4 > size 3, and inserting would also exceed
+     * max_size 3. */
+    ret = zmk_custom_setting_array_insert_at(array_setting, 4, &ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ERANGE) {
+        LOG_ERR("Expected out-of-range insert_at to fail with -ERANGE, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_insert_at_out_of_range");
+
+    /* remove_at in the middle: {1, 99, 77} -> {1, 77}, returns removed=99. */
+    struct zmk_custom_setting_value removed;
+    ret = zmk_custom_setting_array_remove_at(array_setting, 1, &removed,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    if (removed.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 || removed.int32_value != 99) {
+        LOG_ERR("remove_at did not return the removed value");
+        return -EINVAL;
+    }
+    if (zmk_custom_setting_array_size(array_setting) != 2) {
+        LOG_ERR("remove_at did not shrink the active array size");
+        return -EINVAL;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 0, 1);
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 1, 77);
+    }
+    if (ret < 0) {
+        LOG_ERR("remove_at(1) did not shift the tail correctly");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_remove_at_middle array={1,77} removed=99");
+
+    /* remove_at past the active length fails with -ENOENT. */
+    ret = zmk_custom_setting_array_remove_at(array_setting, 5, NULL,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected out-of-range remove_at to fail with -ENOENT, got %d", ret);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_remove_at_out_of_range");
+
+    ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
+/* Backward-compat check for the storage schema: writes raw per-index
+ * records exactly as the pre-P3 one-registration-per-element design would
+ * have written them (custom_settings/test/array_value/0, .../1, .../_size),
+ * then verifies settings_load_subtree loads them into the correct in-RAM
+ * slots of the new single-buffer implementation. Storage naming itself did
+ * not change (see save_array_locked/custom_settings_handle_set), only how
+ * the in-RAM side is organized. */
+static int test_array_storage_backward_compat(void) {
+    const struct zmk_custom_setting *array_setting =
+        zmk_custom_setting_find_array("test", "array_value");
+    if (!array_setting) {
+        LOG_ERR("Test custom array setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Simulate what old per-element registrations would have persisted:
+     * size=2, index 0 = 11, index 1 = 22 (index 2 intentionally absent, as
+     * it would be for an inactive slot). Values must satisfy array_value's
+     * ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100) constraint. */
+    const int32_t old_index_0 = 11;
+    const int32_t old_index_1 = 22;
+    const uint32_t old_size = 2;
+
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/0", (const char *)&old_index_0,
+                             sizeof(old_index_0));
+    if (ret < 0) {
+        return ret;
+    }
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/1", (const char *)&old_index_1,
+                             sizeof(old_index_1));
+    if (ret < 0) {
+        return ret;
+    }
+    ret = test_settings_save(NULL, "custom_settings/test/array_value/_size",
+                             (const char *)&old_size, sizeof(old_size));
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (zmk_custom_setting_array_size(array_setting) != old_size) {
+        LOG_ERR("Backward-compat load did not restore the old array size");
+        return -EINVAL;
+    }
+    ret = expect_array_int_value_by_key("test", "array_value", 0, old_index_0);
+    if (ret == 0) {
+        ret = expect_array_int_value_by_key("test", "array_value", 1, old_index_1);
+    }
+    if (ret < 0) {
+        LOG_ERR("Backward-compat load did not populate the correct in-RAM slots");
+        return ret;
+    }
+    ret = zmk_custom_setting_read_array_by_key("test", "array_value", 2,
+                                               &(struct zmk_custom_setting_value){0});
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected index 2 to remain inactive after backward-compat load, got %d", ret);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_array_storage_backward_compat size=2 values={11,22}");
+
+    ret = zmk_custom_setting_reset(array_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return 0;
+}
+
 static void capture_int32_visitor(const struct zmk_custom_setting_value *value, void *user_data) {
     *(int32_t *)user_data = value->int32_value;
 }
@@ -1054,6 +1271,367 @@ static int test_boot_default_override(void) {
     return 0;
 }
 
+/* P5a: a setting registered at runtime (e.g. a driver whose channel count
+ * depends on devicetree instance data) instead of via
+ * ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE. Registers from
+ * a SYS_INIT-equivalent hook (this test itself already runs from one, at a
+ * priority after custom_settings_init - the same situation a real runtime
+ * caller would be in if it registered from its own late SYS_INIT or from
+ * application code after boot) and confirms the result behaves exactly
+ * like a compile-time setting: find-able, writable, covered by save/
+ * discard/reset scope operations, and - the P5a-specific requirement -
+ * that a value persisted *before* registration (simulating a value saved on
+ * a previous boot) is not silently lost; zmk_custom_settings_register()
+ * must load it via settings_load_subtree() since custom_settings_init()'s
+ * own settings_load() already ran before this call. */
+static struct zmk_custom_setting_value runtime_setting_default = ZMK_CUSTOM_SETTING_VALUE_INT32(7);
+static struct zmk_custom_setting runtime_int_setting;
+
+static int test_runtime_registration(void) {
+    /* Seed a persisted value as if a previous boot had saved one, before
+     * this setting is registered - this is the scenario
+     * zmk_custom_settings_register()'s unconditional settings_load_subtree()
+     * call exists for. */
+    const int32_t persisted_value = 123;
+    int ret = test_settings_save(NULL, "custom_settings/test/runtime_int",
+                                 (const char *)&persisted_value, sizeof(persisted_value));
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (zmk_custom_setting_find("test", "runtime_int") != NULL) {
+        LOG_ERR("Runtime test setting was already registered before the test ran");
+        return -EINVAL;
+    }
+
+    runtime_int_setting = (struct zmk_custom_setting){
+        .custom_subsystem_id = "test",
+        .key = "runtime_int",
+        .array_key = NULL,
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
+        .array_state = NULL,
+        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .constraints = NULL,
+        .constraints_count = 0,
+        .default_value = &runtime_setting_default,
+        .temp_slot = -1,
+    };
+
+    ret = zmk_custom_settings_register(&runtime_int_setting);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_register failed: %d", ret);
+        return ret;
+    }
+
+    /* Registering the same subsystem/key again must fail. */
+    struct zmk_custom_setting duplicate = runtime_int_setting;
+    ret = zmk_custom_settings_register(&duplicate);
+    if (ret != -EEXIST) {
+        LOG_ERR("Expected duplicate runtime registration to fail with -EEXIST, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Find-able like any compile-time setting. */
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "runtime_int");
+    if (!setting) {
+        LOG_ERR("Runtime-registered setting is not find-able");
+        return -ENOENT;
+    }
+
+    /* The seeded pre-registration value was loaded, not the compile-time
+     * default (7). */
+    ret = expect_int_value(setting, persisted_value);
+    if (ret < 0) {
+        LOG_ERR("Runtime registration did not load a pre-existing persisted value");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_runtime_register_loads_persisted value=%d", persisted_value);
+
+    /* Covered by ZMK_CUSTOM_SETTING_FOREACH-based iteration: apply_scope
+     * (save/discard/reset_scope) reaches it like any other setting. */
+    ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(55),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    uint32_t affected_count = 0;
+    ret = zmk_custom_settings_save_scope("test", "runtime_int", NULL, &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 1) {
+        LOG_ERR("Expected save_scope to affect exactly the runtime setting, got %u",
+                affected_count);
+        return -EINVAL;
+    }
+    if (!test_settings_has_record("custom_settings/test/runtime_int")) {
+        LOG_ERR("Runtime setting save did not persist");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_runtime_register_save_scope value=55");
+
+    ret = zmk_custom_settings_reset_scope("test", "runtime_int", NULL, &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(setting, 7);
+    if (ret < 0) {
+        LOG_ERR("Runtime setting reset did not restore its compile-time default");
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_runtime_register_reset_scope value=7");
+
+    return 0;
+}
+
+/* P5b: RPC-creatable keyspaces. Exercises the whole lifecycle: register the
+ * keyspace, create entries (quota enforcement, prefix mismatch), confirm
+ * they are find-able/listable/covered by scope operations via the same
+ * ZMK_CUSTOM_SETTING_FOREACH leverage point P5a established, delete one and
+ * confirm its slot is reusable, and - the trickiest and most important part
+ * - confirm persisted entries seeded directly in the fake settings backend
+ * (as if created by a CreateSetting RPC in a previous boot session, with no
+ * zmk_custom_settings_register_keyspace-time knowledge of their keys) come
+ * back as live, listable, deletable settings after a settings_load pass,
+ * with no CreateSetting call ever happening for them this boot. */
+static int test_keyspace_lifecycle(void) {
+    int ret = zmk_custom_settings_register_keyspace(&test_macro_keyspace);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_register_keyspace failed: %d", ret);
+        return ret;
+    }
+
+    /* Registering the same keyspace object twice fails. */
+    ret = zmk_custom_settings_register_keyspace(&test_macro_keyspace);
+    if (ret != -EEXIST) {
+        LOG_ERR("Expected duplicate keyspace registration to fail with -EEXIST, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* A key that does not start with the keyspace's prefix is rejected. */
+    const struct zmk_custom_setting *created = NULL;
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "not_macro/foo",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected a prefix-mismatched key to fail with -EINVAL, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* A key that does not fit max_key_len (16, including NUL) is rejected. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/this-name-is-too-long",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret != -ENAMETOOLONG) {
+        LOG_ERR("Expected an oversized key to fail with -ENAMETOOLONG, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Create up to max_entries (3) entries. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/one",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0 || !created) {
+        LOG_ERR("Failed to create macro/one: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/two",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(2),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
+    if (ret < 0) {
+        LOG_ERR("Failed to create macro/two: %d", ret);
+        return ret;
+    }
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/three",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(3),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0) {
+        LOG_ERR("Failed to create macro/three: %d", ret);
+        return ret;
+    }
+
+    /* Creating the same key twice fails. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/one",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+    if (ret != -EEXIST) {
+        LOG_ERR("Expected re-creating macro/one to fail with -EEXIST, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* The pool is full (3/3): a 4th create fails cleanly with -ENOSPC. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/four",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+    if (ret != -ENOSPC) {
+        LOG_ERR("Expected create on a full keyspace to fail with -ENOSPC, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Created entries are find-able like any other setting. */
+    ret = expect_int_value_by_key("test", "macro/one", 1);
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/two", 2);
+    }
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/three", 3);
+    }
+    if (ret < 0) {
+        LOG_ERR("Created keyspace entries are not readable by key");
+        return ret;
+    }
+
+    /* zmk_custom_setting_keyspace_find resolves the same literal key
+     * without going through the generic subsystem+key registry walk. */
+    if (zmk_custom_setting_keyspace_find(&test_macro_keyspace, "macro/one") == NULL) {
+        LOG_ERR("zmk_custom_setting_keyspace_find did not find macro/one");
+        return -ENOENT;
+    }
+    if (zmk_custom_setting_keyspace_find(&test_macro_keyspace, "macro/nonexistent") != NULL) {
+        LOG_ERR("zmk_custom_setting_keyspace_find found a nonexistent key");
+        return -EINVAL;
+    }
+
+    /* Discovery: the existing key_prefix scope filter (used by list/save/
+     * discard/reset) sees exactly the 3 live entries under "macro/" -
+     * ZMK_CUSTOM_SETTING_FOREACH + zmk_custom_setting_matches, with zero
+     * keyspace-specific code in apply_scope. */
+    uint32_t affected_count = 0;
+    ret = zmk_custom_settings_save_scope("test", NULL, "macro/", &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 3) {
+        LOG_ERR("Expected key_prefix scope to match exactly 3 macro/ entries, got %u",
+                affected_count);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_keyspace_create_and_scope_discovery count=3");
+
+    /* Delete one entry: its slot is released and reusable, and its
+     * persisted record (macro/two was saved above) is erased. */
+    ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/two");
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_setting_keyspace_delete failed: %d", ret);
+        return ret;
+    }
+    if (zmk_custom_setting_find("test", "macro/two") != NULL) {
+        LOG_ERR("Deleted keyspace entry is still find-able");
+        return -EINVAL;
+    }
+    if (test_settings_has_record("custom_settings/test/macro/two")) {
+        LOG_ERR("Deleted keyspace entry's persisted record was not erased");
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/two");
+    if (ret != -ENOENT) {
+        LOG_ERR("Expected deleting an already-deleted key to fail with -ENOENT, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* The freed slot is reusable by a new create. */
+    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "macro/four",
+                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(4),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+    if (ret < 0) {
+        LOG_ERR("Failed to reuse a freed keyspace slot: %d", ret);
+        return ret;
+    }
+    LOG_INF("PASS: custom_settings_keyspace_delete_frees_slot");
+
+    /* Clean up in-RAM state so the settings-load re-binding test below
+     * starts from an empty pool. */
+    zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/one");
+    zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/three");
+    zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/four");
+
+    /*
+     * Settings-load re-binding: seed 3 persisted records directly in the
+     * fake settings backend, as if a CreateSetting RPC had created and saved
+     * them in a previous boot session - crucially, with NO
+     * zmk_custom_setting_keyspace_create call happening this boot at all.
+     * settings_load_subtree then drives the exact same
+     * SETTINGS_STATIC_HANDLER_DEFINE callback path as the real boot-time
+     * settings_load() in main() (this test itself runs from a SYS_INIT
+     * before that call, so it must trigger the load explicitly the same way
+     * test_array_storage_backward_compat does). custom_settings_handle_set
+     * must recognize each key matches test_macro_keyspace's "macro/" prefix,
+     * auto-bind a free slot for it, and apply the loaded value - all before
+     * this call returns, since settings_load() only visits each record
+     * once, not in any registration order.
+     */
+    const int32_t reloaded_a = 111;
+    const int32_t reloaded_b = 222;
+    const int32_t reloaded_c = 333;
+    ret = test_settings_save(NULL, "custom_settings/test/macro/reload-a", (const char *)&reloaded_a,
+                             sizeof(reloaded_a));
+    if (ret == 0) {
+        ret = test_settings_save(NULL, "custom_settings/test/macro/reload-b",
+                                 (const char *)&reloaded_b, sizeof(reloaded_b));
+    }
+    if (ret == 0) {
+        ret = test_settings_save(NULL, "custom_settings/test/macro/reload-c",
+                                 (const char *)&reloaded_c, sizeof(reloaded_c));
+    }
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (zmk_custom_setting_find("test", "macro/reload-a") != NULL) {
+        LOG_ERR("Reload-test keyspace entry was already bound before settings_load_subtree ran");
+        return -EINVAL;
+    }
+
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = expect_int_value_by_key("test", "macro/reload-a", reloaded_a);
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/reload-b", reloaded_b);
+    }
+    if (ret == 0) {
+        ret = expect_int_value_by_key("test", "macro/reload-c", reloaded_c);
+    }
+    if (ret < 0) {
+        LOG_ERR("Persisted keyspace entries were not re-bound by settings_load_subtree");
+        return ret;
+    }
+
+    /* Re-bound entries are full citizens: listable via key_prefix, and
+     * deletable, exactly like ones created via CreateSetting this boot. */
+    affected_count = 0;
+    ret = zmk_custom_settings_save_scope("test", NULL, "macro/", &affected_count);
+    if (ret < 0) {
+        return ret;
+    }
+    if (affected_count != 3) {
+        LOG_ERR("Expected key_prefix scope to match exactly 3 re-bound macro/ entries, got %u",
+                affected_count);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/reload-a");
+    if (ret == 0) {
+        ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/reload-b");
+    }
+    if (ret == 0) {
+        ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/reload-c");
+    }
+    if (ret < 0) {
+        LOG_ERR("Failed to delete a re-bound keyspace entry: %d", ret);
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_settings_load_rebind a=111 b=222 c=333");
+
+    return 0;
+}
+
 static int test_record_settings(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
     if (!setting) {
@@ -1271,6 +1849,16 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
+    ret = test_array_insert_remove();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_array_storage_backward_compat();
+    if (ret < 0) {
+        return ret;
+    }
+
     ret = test_view_based_api();
     if (ret < 0) {
         return ret;
@@ -1282,6 +1870,16 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_boot_default_override();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_runtime_registration();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_lifecycle();
     if (ret < 0) {
         return ret;
     }
