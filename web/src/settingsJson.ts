@@ -7,7 +7,7 @@ import {
 const SETTINGS_EXPORT_FORMAT = "zmk-custom-settings";
 const SETTINGS_EXPORT_VERSION = 1;
 
-type ExportedSettingType = "bytes" | "int32" | "bool" | "string";
+type ExportedSettingType = "bytes" | "int32" | "bool" | "string" | "behavior";
 
 export interface ExportedSetting {
   customSubsystemId: string;
@@ -229,6 +229,7 @@ function scalarValueType(
   if (value.int32Value !== undefined) return "int32";
   if (value.boolValue !== undefined) return "bool";
   if (value.stringValue !== undefined) return "string";
+  if (value.behaviorValue !== undefined) return "behavior";
   return null;
 }
 
@@ -245,6 +246,14 @@ function scalarValueToJsonValue(
       return value.boolValue;
     case "string":
       return value.stringValue;
+    case "behavior":
+      return value.behaviorValue
+        ? [
+            value.behaviorValue.behaviorId,
+            value.behaviorValue.param1,
+            value.behaviorValue.param2,
+          ]
+        : undefined;
   }
 }
 
@@ -278,6 +287,15 @@ function exportedScalarValueToProto(setting: ExportedSetting): SettingValue {
         );
       }
       return { stringValue: setting.value };
+    case "behavior": {
+      if (!Array.isArray(setting.value) || setting.value.length !== 3) {
+        throw new Error(
+          `${setting.customSubsystemId}/${setting.key} behavior value must be a [behaviorId, param1, param2] array`
+        );
+      }
+      const [behaviorId, param1, param2] = setting.value as number[];
+      return { behaviorValue: { behaviorId, param1, param2 } };
+    }
   }
 }
 
@@ -327,7 +345,8 @@ function readSettingType(value: unknown, label: string): ExportedSettingType {
     value === "bytes" ||
     value === "int32" ||
     value === "bool" ||
-    value === "string"
+    value === "string" ||
+    value === "behavior"
   ) {
     return value;
   }
@@ -364,6 +383,17 @@ function readSettingValue(
         throw new Error(`${label}.value must be a string`);
       }
       return value;
+    case "behavior":
+      if (
+        !Array.isArray(value) ||
+        value.length !== 3 ||
+        value.some((n) => !Number.isInteger(n) || n < 0)
+      ) {
+        throw new Error(
+          `${label}.value must be a [behaviorId, param1, param2] array of non-negative integers`
+        );
+      }
+      return value as number[];
   }
 }
 

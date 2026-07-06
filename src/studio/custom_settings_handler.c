@@ -303,6 +303,12 @@ static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScala
             bounded_strlen(src->value_type.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
         copy_string(dest->string_value, sizeof(dest->string_value), src->value_type.string_value);
         return 0;
+    case cormoran_zmk_custom_settings_SettingScalarValue_behavior_value_tag:
+        dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR;
+        dest->behavior_value.behavior_id = src->value_type.behavior_value.behavior_id;
+        dest->behavior_value.param1 = src->value_type.behavior_value.param1;
+        dest->behavior_value.param2 = src->value_type.behavior_value.param2;
+        return 0;
     default:
         return -EINVAL;
     }
@@ -317,7 +323,8 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
     case cormoran_zmk_custom_settings_SettingValue_bytes_value_tag:
     case cormoran_zmk_custom_settings_SettingValue_int32_value_tag:
     case cormoran_zmk_custom_settings_SettingValue_bool_value_tag:
-    case cormoran_zmk_custom_settings_SettingValue_string_value_tag: {
+    case cormoran_zmk_custom_settings_SettingValue_string_value_tag:
+    case cormoran_zmk_custom_settings_SettingValue_behavior_value_tag: {
         cormoran_zmk_custom_settings_SettingScalarValue scalar =
             cormoran_zmk_custom_settings_SettingScalarValue_init_zero;
         switch (src->which_value_type) {
@@ -343,6 +350,11 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
                 cormoran_zmk_custom_settings_SettingScalarValue_string_value_tag;
             copy_string(scalar.value_type.string_value, sizeof(scalar.value_type.string_value),
                         src->value_type.string_value);
+            break;
+        case cormoran_zmk_custom_settings_SettingValue_behavior_value_tag:
+            scalar.which_value_type =
+                cormoran_zmk_custom_settings_SettingScalarValue_behavior_value_tag;
+            scalar.value_type.behavior_value = src->value_type.behavior_value;
             break;
         default:
             return -EINVAL;
@@ -388,6 +400,12 @@ static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
         dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_string_value_tag;
         copy_string(dest->value_type.string_value, sizeof(dest->value_type.string_value),
                     src->string_value);
+        return 0;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_behavior_value_tag;
+        dest->value_type.behavior_value.behavior_id = src->behavior_value.behavior_id;
+        dest->value_type.behavior_value.param1 = src->behavior_value.param1;
+        dest->value_type.behavior_value.param2 = src->behavior_value.param2;
         return 0;
     default:
         return -EINVAL;
@@ -441,6 +459,10 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
         dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_string_value_tag;
         copy_string(dest->value_type.string_value, sizeof(dest->value_type.string_value),
                     scalar.value_type.string_value);
+        return 0;
+    case cormoran_zmk_custom_settings_SettingScalarValue_behavior_value_tag:
+        dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_behavior_value_tag;
+        dest->value_type.behavior_value = scalar.value_type.behavior_value;
         return 0;
     default:
         return -EINVAL;

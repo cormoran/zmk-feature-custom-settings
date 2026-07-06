@@ -31,12 +31,21 @@ enum SettingNotificationKind {
     SETTING_NOTIFICATION_KIND_RESET = 4;
 }
 
+// A ZMK behavior binding: the behavior's local ID (see
+// CONFIG_ZMK_BEHAVIOR_LOCAL_IDS) plus its two binding parameters.
+message SettingBehaviorValue {
+    uint32 behavior_id = 1;
+    uint32 param1 = 2;
+    uint32 param2 = 3;
+}
+
 message SettingScalarValue {
     oneof value_type {
         bytes bytes_value = 1;
         int32 int32_value = 2;
         bool bool_value = 3;
         string string_value = 4;
+        SettingBehaviorValue behavior_value = 5;
     }
 }
 
@@ -56,6 +65,7 @@ message SettingValue {
         bool bool_value = 3;
         string string_value = 4;
         SettingArrayValue array_value = 5;
+        SettingBehaviorValue behavior_value = 6;
     }
 }
 
