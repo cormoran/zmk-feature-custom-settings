@@ -384,6 +384,163 @@ describe("RPCTestSection Component", () => {
         key: "macro/my-macro-1",
       });
     });
+
+    it("renders an options dropdown and submits the chosen value", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        key: "mode",
+        value: { int32Value: 1 },
+        meta: {
+          confidentiality: 0,
+          readPermission: 0,
+          writePermission: 0,
+          constraints: [
+            {
+              options: {
+                values: [{ int32Value: 1 }, { int32Value: 2 }],
+                labels: ["Low", "High"],
+              },
+            },
+          ],
+        },
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/mode" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+
+      const panel = getUpdatePanel();
+      const select = within(panel).getByLabelText("Value") as HTMLSelectElement;
+      expect(select.tagName).toBe("SELECT");
+      expect(
+        within(select).getByRole("option", { name: "Low" })
+      ).toBeInTheDocument();
+      expect(
+        within(select).getByRole("option", { name: "High" })
+      ).toBeInTheDocument();
+
+      await userEvent.selectOptions(select, "2");
+      await userEvent.click(screen.getByRole("button", { name: "Write" }));
+
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+      expect(request.writeSetting?.value).toEqual({ int32Value: 2 });
+    });
+
+    it("warns when an options list may be truncated", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        key: "mode",
+        value: { int32Value: 0 },
+        meta: {
+          confidentiality: 0,
+          readPermission: 0,
+          writePermission: 0,
+          constraints: [
+            {
+              options: {
+                values: Array.from({ length: 8 }, (_, i) => ({
+                  int32Value: i,
+                })),
+                labels: Array.from({ length: 8 }, (_, i) => `opt-${i}`),
+              },
+            },
+          ],
+        },
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/mode" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+
+      expect(
+        screen.getByText(/Option list may be truncated/i)
+      ).toBeInTheDocument();
+    });
+
+    it("renders a range control and blocks out-of-range submits", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        key: "level",
+        value: { int32Value: 5 },
+        meta: {
+          confidentiality: 0,
+          readPermission: 0,
+          writePermission: 0,
+          constraints: [
+            {
+              range: { min: { int32Value: 0 }, max: { int32Value: 10 } },
+            },
+          ],
+        },
+      });
+
+      const settingButton = await screen.findByRole(
+        "button",
+        { name: "test/level" },
+        { timeout: 2000 }
+      );
+      await userEvent.click(settingButton);
+
+      const panel = getUpdatePanel();
+      const input = within(panel).getByLabelText("Value") as HTMLInputElement;
+      expect(input.type).toBe("number");
+      expect(input.min).toBe("0");
+      expect(input.max).toBe("10");
+
+      await userEvent.clear(input);
+      await userEvent.type(input, "20");
+      expect(within(panel).getByRole("alert")).toHaveTextContent(/≤ 10/);
+      expect(screen.getByRole("button", { name: "Write" })).toBeDisabled();
+
+      await userEvent.clear(input);
+      await userEvent.type(input, "8");
+      expect(within(panel).queryByRole("alert")).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: "Write" }));
+      await waitFor(() => expect(call_rpc).toHaveBeenCalledTimes(2));
+      const request = lastCustomSettingsRequest();
+      expect(request.writeSetting?.value).toEqual({ int32Value: 8 });
+    });
   });
 
   describe("Without Subsystem", () => {
@@ -448,6 +605,12 @@ function emitListItem(
       })
     ).finish(),
   });
+}
+
+function getUpdatePanel(): HTMLElement {
+  return screen
+    .getByRole("heading", { name: "Update Value" })
+    .closest("section") as HTMLElement;
 }
 
 function lastCustomSettingsRequest(): Request {

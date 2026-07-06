@@ -24,6 +24,13 @@ import {
   exportedSettingValueToProto,
   parseSettingsExportJson,
 } from "./settingsJson";
+import {
+  getActiveConstraint,
+  isOptionsPossiblyTruncated,
+  optionEntries,
+  scalarValueToNumber,
+  validateConstraintValue,
+} from "./constraints";
 
 export const SUBSYSTEM_IDENTIFIER = "cormoran_custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
@@ -713,6 +720,186 @@ export function RPCTestSection() {
     ? sourceOptionsForSetting(setting, listedSettings)
     : [];
   const settingGroups = groupSettings(listedSettings);
+  const activeConstraint = getActiveConstraint(setting?.meta);
+  const constraintError = validateConstraintValue(activeConstraint, value);
+  const renderValueEditor = () => {
+    const options = activeConstraint?.options;
+    if (options) {
+      const entries = optionEntries(options);
+      const hasCurrent = entries.some((entry) => entry.value === value);
+      return (
+        <>
+          <label htmlFor="value-input">Value</label>
+          <div className="constraint-control">
+            <select
+              id="value-input"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            >
+              {!hasCurrent && (
+                <option value={value}>
+                  {value === "" ? "-- select --" : `(current: ${value})`}
+                </option>
+              )}
+              {entries.map((entry) => (
+                <option key={entry.value} value={entry.value}>
+                  {entry.label}
+                </option>
+              ))}
+            </select>
+            {isOptionsPossiblyTruncated(options) && (
+              <p className="hint-text">
+                Option list may be truncated to 8 entries by RPC.
+              </p>
+            )}
+            {constraintError && (
+              <p className="constraint-error" role="alert">
+                {constraintError}
+              </p>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    const range = activeConstraint?.range;
+    if (range) {
+      const min = scalarValueToNumber(range.min);
+      const max = scalarValueToNumber(range.max);
+      const sliderValue =
+        Number.isNaN(Number(value)) || value.trim() === ""
+          ? `${min ?? 0}`
+          : value;
+      return (
+        <>
+          <label htmlFor="value-input">Value</label>
+          <div className="constraint-control">
+            <input
+              id="value-input"
+              type="number"
+              min={min}
+              max={max}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+            {min !== undefined && max !== undefined && (
+              <input
+                type="range"
+                aria-label="Value slider"
+                min={min}
+                max={max}
+                value={sliderValue}
+                onChange={(e) => setValue(e.target.value)}
+              />
+            )}
+            <p className="hint-text">
+              Allowed range: {min ?? "?"} – {max ?? "?"}.
+            </p>
+            {constraintError && (
+              <p className="constraint-error" role="alert">
+                {constraintError}
+              </p>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    const hidUsage = activeConstraint?.hidUsage;
+    if (hidUsage) {
+      return (
+        <>
+          <label htmlFor="value-input">Value</label>
+          <div className="constraint-control">
+            <input
+              id="value-input"
+              type="number"
+              min={hidUsage.usageMin}
+              max={hidUsage.usageMax > 0 ? hidUsage.usageMax : undefined}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+            <p className="hint-text">
+              HID usage page {hidUsage.usagePage}; usage {hidUsage.usageMin}
+              {hidUsage.usageMax > 0 ? ` – ${hidUsage.usageMax}` : "+"}.
+            </p>
+            {constraintError && (
+              <p className="constraint-error" role="alert">
+                {constraintError}
+              </p>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    if (activeConstraint?.layerId) {
+      return (
+        <>
+          <label htmlFor="value-input">Value</label>
+          <div className="constraint-control">
+            <input
+              id="value-input"
+              type="number"
+              min={0}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+            />
+            <p className="hint-text">
+              Layer index. No layer list is available over RPC, so enter the
+              layer number directly.
+            </p>
+            {constraintError && (
+              <p className="constraint-error" role="alert">
+                {constraintError}
+              </p>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    if (activeConstraint?.behaviorId) {
+      return (
+        <>
+          <label htmlFor="value-input">Value</label>
+          <div className="constraint-control">
+            <input
+              id="value-input"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="behaviorId,param1,param2"
+            />
+            <p className="hint-text">
+              Behavior binding. No behavior list is available over RPC, so enter
+              behaviorId,param1,param2 directly.
+            </p>
+            {constraintError && (
+              <p className="constraint-error" role="alert">
+                {constraintError}
+              </p>
+            )}
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <label htmlFor="value-input">Value</label>
+        <input
+          id="value-input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={
+            valueType === EditorValueType.Behavior
+              ? "behaviorId,param1,param2"
+              : undefined
+          }
+        />
+      </>
+    );
+  };
   const updateValuePanel = setting ? (
     <section className="settings-panel settings-editor-panel">
       <h3>Update Value</h3>
@@ -765,17 +952,7 @@ export function RPCTestSection() {
           </>
         )}
 
-        <label htmlFor="value-input">Value</label>
-        <input
-          id="value-input"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={
-            valueType === EditorValueType.Behavior
-              ? "behaviorId,param1,param2"
-              : undefined
-          }
-        />
+        {renderValueEditor()}
 
         <label htmlFor="mode-input">Write Mode</label>
         <select
@@ -798,7 +975,9 @@ export function RPCTestSection() {
         </button>
         <button
           className="btn btn-primary"
-          disabled={isLoading || selectedSettingValueHidden}
+          disabled={
+            isLoading || selectedSettingValueHidden || constraintError !== null
+          }
           onClick={writeSetting}
         >
           Write
@@ -807,7 +986,11 @@ export function RPCTestSection() {
           <>
             <button
               className="btn"
-              disabled={isLoading || selectedSettingValueHidden}
+              disabled={
+                isLoading ||
+                selectedSettingValueHidden ||
+                constraintError !== null
+              }
               onClick={pushBackArray}
             >
               Push Back
