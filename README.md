@@ -283,14 +283,14 @@ itself rejects (e.g. an out-of-range HID usage for `&kp`), fails with
 `CONFIG_ZMK_BEHAVIOR_LOCAL_IDS`; without it, writes fail with `-ENOTSUP`.
 
 Internally (both in the temporary-override pool and on flash), a behavior
-value is packed as three back-to-back ULEB128 varints instead of a fixed
-3x `uint32_t` layout, since real bindings overwhelmingly use small ids and
-parameters (keycodes, layer indices). This bounds worst case at 13 bytes
-while using as little as 3 bytes for the common case. There is no dedicated
-Studio RPC message for the encoded bytes: `SettingBehaviorValue` in the
-Studio RPC protocol carries `behavior_id`/`param1`/`param2` as plain
-`uint32` fields, and the compact encoding is purely an internal storage
-detail.
+value is stored the same way ZMK's own keymap settings storage persists
+behavior bindings: a packed `{behavior_id: uint16, param1: uint32, param2:
+uint32}` struct with trailing all-zero params truncated before writing (10
+bytes down to as little as 2 when both params are zero), since most
+bindings only use one or zero params. There is no dedicated Studio RPC
+message for the encoded bytes: `SettingBehaviorValue` in the Studio RPC
+protocol carries `behavior_id`/`param1`/`param2` as plain `uint32` fields,
+and the compact encoding is purely an internal storage detail.
 
 ### Studio RPC Access
 

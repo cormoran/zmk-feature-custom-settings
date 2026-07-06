@@ -96,52 +96,20 @@ static struct zmk_custom_settings_temp_slot temp_slots[CONFIG_ZMK_CUSTOM_SETTING
 static struct zmk_custom_setting_value temp_scratch_value;
 
 /*
- * BEHAVIOR values (behavior_id, param1, param2) are stored/cached as ULEB128
- * varints back-to-back instead of a fixed 3x uint32_t layout: real behavior
- * bindings overwhelmingly use small ids and parameters (keycodes, layer
- * indices), so this is smaller than a fixed encoding in the common case
- * while still bounded (13 bytes worst case: up to 3 bytes for a 16-bit
- * behavior_id plus up to 5 bytes each for full-range uint32_t params).
+ * BEHAVIOR values are stored/cached the same way ZMK's own keymap settings
+ * storage persists behavior bindings (struct zmk_behavior_binding_setting in
+ * dependencies/zmk's app/src/keymap.c): a packed struct with trailing
+ * all-zero params truncated off before writing, since most bindings only use
+ * one or zero params. Reading zero-initializes the struct first, so a
+ * truncated stored value naturally decodes back to param1/param2 == 0.
  */
-#define BEHAVIOR_VALUE_ENCODED_MAX_SIZE 13
+struct zmk_custom_setting_behavior_storage {
+    zmk_behavior_local_id_t behavior_id;
+    uint32_t param1;
+    uint32_t param2;
+} __packed;
 
-static size_t encode_uvarint(uint32_t value, uint8_t *out) {
-    size_t pos = 0;
-
-    do {
-        uint8_t byte = value & 0x7f;
-        value >>= 7;
-        if (value) {
-            byte |= 0x80;
-        }
-        out[pos++] = byte;
-    } while (value);
-
-    return pos;
-}
-
-static int decode_uvarint(const uint8_t *in, size_t in_size, uint32_t *out, size_t *consumed) {
-    uint32_t result = 0;
-    size_t pos = 0;
-    unsigned int shift = 0;
-
-    for (;;) {
-        if (pos >= in_size || shift > 28) {
-            return -EINVAL;
-        }
-
-        uint8_t byte = in[pos++];
-        result |= (uint32_t)(byte & 0x7f) << shift;
-        if (!(byte & 0x80)) {
-            break;
-        }
-        shift += 7;
-    }
-
-    *out = result;
-    *consumed = pos;
-    return 0;
-}
+#define BEHAVIOR_VALUE_ENCODED_MAX_SIZE sizeof(struct zmk_custom_setting_behavior_storage)
 
 static int encode_behavior_value(const struct zmk_custom_setting_behavior_value *behavior,
                                  uint8_t *out, size_t out_capacity, size_t *out_size) {
@@ -149,32 +117,39 @@ static int encode_behavior_value(const struct zmk_custom_setting_behavior_value 
         return -EMSGSIZE;
     }
 
-    size_t pos = 0;
-    pos += encode_uvarint(behavior->behavior_id, &out[pos]);
-    pos += encode_uvarint(behavior->param1, &out[pos]);
-    pos += encode_uvarint(behavior->param2, &out[pos]);
-    *out_size = pos;
+    struct zmk_custom_setting_behavior_storage storage = {
+        .behavior_id = (zmk_behavior_local_id_t)behavior->behavior_id,
+        .param1 = behavior->param1,
+        .param2 = behavior->param2,
+    };
+
+    size_t len = sizeof(storage);
+    if (storage.param2 == 0) {
+        len -= sizeof(storage.param2);
+
+        if (storage.param1 == 0) {
+            len -= sizeof(storage.param1);
+        }
+    }
+
+    memcpy(out, &storage, len);
+    *out_size = len;
     return 0;
 }
 
 static int decode_behavior_value(const uint8_t *data, size_t size,
                                  struct zmk_custom_setting_behavior_value *behavior) {
-    size_t pos = 0;
-    size_t consumed;
-
-    int ret = decode_uvarint(&data[pos], size - pos, &behavior->behavior_id, &consumed);
-    if (ret < 0) {
-        return ret;
+    if (size > BEHAVIOR_VALUE_ENCODED_MAX_SIZE) {
+        return -EMSGSIZE;
     }
-    pos += consumed;
 
-    ret = decode_uvarint(&data[pos], size - pos, &behavior->param1, &consumed);
-    if (ret < 0) {
-        return ret;
-    }
-    pos += consumed;
+    struct zmk_custom_setting_behavior_storage storage = {0};
+    memcpy(&storage, data, size);
 
-    return decode_uvarint(&data[pos], size - pos, &behavior->param2, &consumed);
+    behavior->behavior_id = storage.behavior_id;
+    behavior->param1 = storage.param1;
+    behavior->param2 = storage.param2;
+    return 0;
 }
 
 /* Shared scratch buffer for encode_behavior_value() output. Safe as a single
