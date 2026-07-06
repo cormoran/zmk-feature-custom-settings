@@ -602,6 +602,29 @@ RPC-Creatable Keyspaces above), and any selected setting - including a
 keyspace entry - can be removed with the "Delete" button, which sends
 `DeleteSetting`.
 
+### Constraint-aware editing
+
+When a setting is listed or read with **Include Metadata** checked, the firmware
+advertises the setting's constraints over RPC and the value editor renders a
+matching control instead of a plain text box:
+
+- **Options** - a dropdown of the advertised choices, showing each human label
+  and submitting the underlying value. If the list reaches the RPC cap of 8
+  entries a "may be truncated" hint is shown (the transport truncates longer
+  lists; this is a firmware/proto limit, not fixed here).
+- **Range** - a bounded number input plus a slider using the advertised
+  min/max.
+- **HID usage** - a number input bounded by the advertised usage-page/usage
+  range.
+- **Layer id** / **Behavior id** - a constrained input. No layer or behavior
+  list is available over RPC, so these degrade to a validated number input
+  (layer index) or a `behaviorId,param1,param2` field respectively.
+- **No constraint** - the existing typed free-text input.
+
+The chosen value is validated on the client against the advertised constraint,
+and an inline message explains any violation while disabling Write, so obvious
+mistakes are caught without a firmware round-trip.
+
 ```bash
 cd web
 npm install
