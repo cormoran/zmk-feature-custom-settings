@@ -203,6 +203,34 @@ ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_array_setting, "test", "array_value",
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
 
+/* Bug #21 view-pool eviction test (test_view_pool_temp_slot_leak) needs more
+ * distinct (array, index) element views than
+ * CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE (default 16) so it can fill
+ * the pool and force array_view_acquire() to recycle a slot. array_value's
+ * max size of 3 is far too small, so this dedicated array provides plenty of
+ * elements. All elements are active (default_size == max_size) so a
+ * temporary override can be written to any of them. No constraint so any
+ * int32 value is accepted. */
+ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(test_view_pool_defaults, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                              0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_view_pool_array, "test", "view_pool",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, 20, 20,
+                                test_view_pool_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/* Scalar filler used by the temp-slot leak/unregister tests to occupy
+ * temporary-override pool slots without perturbing the settings exercised by
+ * other tests. Unconstrained so any int32 value is accepted. */
+ZMK_CUSTOM_SETTING_DEFINE(test_temp_filler_setting, "test", "temp_filler",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 ZMK_CUSTOM_SETTING_DEFINE(test_hid_usage_setting, "test", "hid_usage",
                           ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, ZMK_CUSTOM_SETTING_VALUE_INT32(4),
                           ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
@@ -1202,6 +1230,199 @@ static int test_temporary_override_pool(void) {
     return 0;
 }
 
+/* Bug #21, case 1: when the array "index view" pool is exhausted,
+ * array_view_acquire() recycles pool slot 0 for a different (array, index).
+ * If the element previously in slot 0 held an active temporary override,
+ * that override's temp-pool slot must be released as part of the recycle.
+ * Otherwise the temp slot leaks forever (its owner pointer aliases the reused
+ * view address) and every later TEMPORARY write eventually fails with -EBUSY.
+ *
+ * The test deterministically parks a temporary-holding element in pool slot 0
+ * (by acquiring one more distinct element than the pool holds, the last
+ * acquire lands in slot 0), overrides it, then forces slot 0 to be recycled
+ * by acquiring yet another distinct element. It then asserts the full
+ * temporary-override pool is available again - proving the evicted element's
+ * slot was freed and not left in_use/aliased. */
+static int test_view_pool_temp_slot_leak(void) {
+    const uint32_t pool_size = CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE;
+    const uint32_t temp_slots = CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS;
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    const struct zmk_custom_setting *array = zmk_custom_setting_find_array("test", "view_pool");
+    if (!int_setting || !array) {
+        return -ENOENT;
+    }
+    if (pool_size + 2 > zmk_custom_setting_array_max_size(array)) {
+        LOG_ERR("view_pool array (max %u) too small for a view pool of %u",
+                zmk_custom_setting_array_max_size(array), pool_size);
+        return -EINVAL;
+    }
+
+    /* Fill the view pool and then acquire one extra element, so pool slot 0
+     * deterministically ends up holding the view for index `pool_size`. */
+    const struct zmk_custom_setting *evicted = NULL;
+    for (uint32_t i = 0; i <= pool_size; i++) {
+        evicted = zmk_custom_setting_find_array_element("test", "view_pool", i);
+        if (!evicted) {
+            return -ENOENT;
+        }
+    }
+
+    /* Put a temporary override on the element parked in slot 0, consuming one
+     * temporary-override pool slot. */
+    int ret = zmk_custom_setting_write(evicted, &ZMK_CUSTOM_SETTING_VALUE_INT32(4242),
+                                       ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(evicted, 4242);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Acquire a fresh distinct element: the pool is full, so this recycles
+     * slot 0, evicting the temporary-override holder. The fix must release
+     * that element's temp slot here. */
+    const struct zmk_custom_setting *replacement =
+        zmk_custom_setting_find_array_element("test", "view_pool", pool_size + 1);
+    if (!replacement) {
+        return -ENOENT;
+    }
+
+    /* The whole temporary-override pool must be usable again. If the evicted
+     * element's slot leaked, one slot stays in_use and the last of these
+     * writes fails with -EBUSY. Fillers are scalars (int_value + temp_filler)
+     * so acquiring them cannot itself recycle the view pool. */
+    const struct zmk_custom_setting *fillers[] = {int_setting, &test_temp_filler_setting};
+    if (temp_slots > ARRAY_SIZE(fillers)) {
+        LOG_ERR("test assumes at most %u temp slots, configured %u", (unsigned)ARRAY_SIZE(fillers),
+                temp_slots);
+        return -EINVAL;
+    }
+    for (uint32_t i = 0; i < temp_slots; i++) {
+        ret = zmk_custom_setting_write(fillers[i], &ZMK_CUSTOM_SETTING_VALUE_INT32(50 + i),
+                                       ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+        if (ret < 0) {
+            LOG_ERR("Temp pool leaked after view-pool eviction: filler %u failed (%d)", i, ret);
+            return ret;
+        }
+    }
+
+    /* Pool is now full; a further temporary write must fail cleanly. This
+     * confirms the fillers really occupied every slot (i.e. none was still
+     * held by the leaked/aliased evicted element). */
+    ret = zmk_custom_setting_write(replacement, &ZMK_CUSTOM_SETTING_VALUE_INT32(9999),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret != -EBUSY) {
+        LOG_ERR("Expected temp pool to be exactly full after eviction, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Clean up: release every filler override we placed. */
+    for (uint32_t i = 0; i < temp_slots; i++) {
+        ret = zmk_custom_setting_rollback_temporary(fillers[i]);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    LOG_INF("PASS: custom_settings_view_pool_temp_slot_leak pool=%u", pool_size);
+    return 0;
+}
+
+/* Bug #21, case 2: unregistering a setting that still holds an active
+ * temporary override must release its temp-pool slot before detaching the
+ * descriptor. Otherwise temp_slots[k].owner keeps pointing at descriptor
+ * storage the caller may free/reuse, leaking the slot and risking
+ * mis-attribution on a later allocation. */
+static struct zmk_custom_setting_value unreg_temp_default = ZMK_CUSTOM_SETTING_VALUE_INT32(0);
+static struct zmk_custom_setting unreg_temp_setting;
+
+static int test_unregister_frees_temp_slot(void) {
+    const uint32_t temp_slots = CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS;
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    if (!int_setting) {
+        return -ENOENT;
+    }
+    if (temp_slots != 2) {
+        LOG_ERR("test_unregister_frees_temp_slot assumes 2 temp slots, configured %u", temp_slots);
+        return -EINVAL;
+    }
+
+    unreg_temp_setting = (struct zmk_custom_setting){
+        .custom_subsystem_id = "test",
+        .key = "unreg_temp",
+        .array_key = NULL,
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
+        .array_state = NULL,
+        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+        .constraints = NULL,
+        .constraints_count = 0,
+        .default_value = &unreg_temp_default,
+        .temp_slot = -1,
+    };
+    int ret = zmk_custom_settings_register(&unreg_temp_setting);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_register failed: %d", ret);
+        return ret;
+    }
+
+    /* Fill both temp slots: the unregister candidate plus one other setting. */
+    ret = zmk_custom_setting_write(&unreg_temp_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(7),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(8),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Pool is now full. */
+    ret = zmk_custom_setting_write(&test_temp_filler_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret != -EBUSY) {
+        LOG_ERR("Expected temp pool to be full before unregister, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Unregister the setting while its temporary override is still active. */
+    ret = zmk_custom_settings_unregister(&unreg_temp_setting);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_unregister failed: %d", ret);
+        return ret;
+    }
+    if (zmk_custom_setting_find("test", "unreg_temp") != NULL) {
+        LOG_ERR("Unregistered setting is still find-able");
+        return -EINVAL;
+    }
+
+    /* The unregistered setting's temp slot must have been freed, so a new
+     * temporary write now succeeds where it failed above. */
+    ret = zmk_custom_setting_write(&test_temp_filler_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
+    if (ret < 0) {
+        LOG_ERR("Temp slot leaked: unregister did not free the override slot (%d)", ret);
+        return ret;
+    }
+
+    /* Clean up the two remaining overrides. */
+    ret = zmk_custom_setting_rollback_temporary(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_rollback_temporary(&test_temp_filler_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_unregister_frees_temp_slot");
+    return 0;
+}
+
 /* Simulates what a boot-time devicetree default installer does: replace a
  * setting's compile-time default before any user value has been set, then
  * confirm reset() re-applies the new default. */
@@ -1865,6 +2086,16 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_temporary_override_pool();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_view_pool_temp_slot_leak();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_unregister_frees_temp_slot();
     if (ret < 0) {
         return ret;
     }

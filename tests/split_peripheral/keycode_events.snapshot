@@ -28,6 +28,8 @@ PASS: custom_settings_temporary_rollback scalar=10
 PASS: custom_settings_temporary_oversized size=33
 PASS: custom_settings_temporary_pool_exhausted
 PASS: custom_settings_temporary_pool_reclaimed
+PASS: custom_settings_view_pool_temp_slot_leak pool=16
+PASS: custom_settings_unregister_frees_temp_slot
 PASS: custom_settings_boot_default_override
 PASS: custom_settings_runtime_register_loads_persisted value=123
 PASS: custom_settings_runtime_register_save_scope value=55
