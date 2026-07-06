@@ -87,6 +87,38 @@ struct zmk_custom_setting_value {
 
 struct zmk_custom_setting;
 
+/*
+ * A statically-allocated shared budget that multiple BYTES/STRING
+ * large-value settings (see ZMK_CUSTOM_SETTING_DEFINE_POOLED) can draw
+ * regions from, instead of each paying for its own worst-case max_size
+ * buffer (ZMK_CUSTOM_SETTING_DEFINE_SIZED). A setting's region can be moved
+ * within `data` at any write that needs more room than it currently has
+ * (see pool_ensure_region in custom_settings.c); that is safe because every
+ * access site re-derefs a setting's `large_data` pointer under settings_lock
+ * instead of caching it across the lock - see the compaction-safety note on
+ * `large_pool` in struct zmk_custom_setting below.
+ */
+struct zmk_custom_setting_large_pool {
+    uint8_t *data;
+    size_t size;
+};
+
+/* Statically define a shared pool of _pool_size bytes. Heap-free: declares
+ * the backing array and the pool descriptor (named _name) as file-scope
+ * statics. Pass _name (not &_name) as ZMK_CUSTOM_SETTING_DEFINE_POOLED's
+ * _pool argument; that macro takes the address itself. */
+#define ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(_name, _pool_size)                                    \
+    static uint8_t _name##_pool_data[_pool_size];                                                  \
+    static struct zmk_custom_setting_large_pool _name = {                                          \
+        .data = _name##_pool_data,                                                                 \
+        .size = (_pool_size),                                                                      \
+    }
+
+/* Sum of the current payload sizes (incl. STRING NUL bytes) of every setting
+ * currently occupying a region of `pool` - useful for UI/diagnostics (e.g.
+ * showing remaining budget). Runs under settings_lock. */
+size_t zmk_custom_setting_large_pool_used(const struct zmk_custom_setting_large_pool *pool);
+
 typedef int (*zmk_custom_setting_rpc_bytes_converter_t)(const struct zmk_custom_setting *setting,
                                                         const uint8_t *src, size_t src_size,
                                                         uint8_t *dest, size_t *dest_size,
@@ -218,10 +250,24 @@ struct zmk_custom_setting {
      * `value_max_size == 0` means "use CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE"
      * so hand-built descriptors that leave these fields zero keep the legacy
      * behavior with no change.
+     *
+     * `large_pool` is the shared-pool alternative (ZMK_CUSTOM_SETTING_DEFINE_POOLED):
+     * NULL for every other registration style, including DEFINE_SIZED. When
+     * set, `large_data` starts NULL (no region allocated yet - a pooled
+     * setting holding its empty/default value costs zero pool bytes) and is
+     * (re)pointed at a region inside `large_pool->data` by pool_ensure_region()
+     * (custom_settings.c) on demand, moving other members of the same pool to
+     * keep the pool compact. This is safe without any locking discipline
+     * beyond the existing settings_lock: nothing anywhere in this module
+     * caches a `large_data` pointer or a borrowed pointer into it across a
+     * lock drop - effective_value()/read_into()/write_bytes()/the chunked RPC
+     * all re-read `large_data` fresh under the lock every time - so moving a
+     * setting's region between two accesses is invisible to every caller.
      */
     uint32_t value_max_size;
     uint8_t *large_data;
     size_t large_size;
+    struct zmk_custom_setting_large_pool *large_pool;
 
     /*
      * Intrusive singly-linked list pointer used only by
@@ -394,6 +440,67 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .value_max_size = (_max_size),                                                             \
         .large_data =                                                                              \
             ((_max_size) > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? _name##_large_data : NULL), \
+    }
+
+/*
+ * Register one BYTES/STRING setting whose payload lives in a shared
+ * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE budget instead of a dedicated
+ * per-setting buffer (compare ZMK_CUSTOM_SETTING_DEFINE_SIZED). Prefer this
+ * over DEFINE_SIZED when many large settings (e.g. N macro bodies) share one
+ * RAM budget and are not all expected to hold their maximum value
+ * simultaneously; prefer DEFINE_SIZED for one standalone large setting that
+ * should always have its own guaranteed capacity.
+ *
+ * _pool is the pool object itself (as declared by
+ * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE), not a pointer - this macro takes its
+ * address. _max_size must not exceed CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
+ * (same ceiling as DEFINE_SIZED), but is NOT checked against _pool's size at
+ * compile time: the pool object's `size` is a runtime field by the time this
+ * macro can see it (not a constant expression available at this expansion),
+ * so an over-committed pool (sum of every member's _max_size > pool size) is
+ * fine by design - see pool_ensure_region in custom_settings.c - and is only
+ * an actual problem once enough members are simultaneously non-empty to
+ * exceed the pool's real size, at which point the write that would exceed it
+ * fails with -ENOSPC and leaves the setting's previous value untouched. A
+ * persisted value that no longer fits on load (e.g. after shrinking the pool
+ * across a firmware update) is skipped with a LOG_WRN instead of failing
+ * boot, mirroring the existing keyspace-pool-exhaustion policy.
+ */
+#define ZMK_CUSTOM_SETTING_DEFINE_POOLED(_name, _max_size, _pool, _custom_subsystem_id, _key,      \
+                                         _value_type, _default_value, _confidentiality,            \
+                                         _read_permission, _write_permission, _constraint)         \
+    BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
+                     CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
+                 "Custom subsystem id is too long");                                               \
+    BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
+                 "Custom setting key is too long");                                                \
+    BUILD_ASSERT((_max_size) <= CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE,                   \
+                 "Custom setting max_size exceeds "                                                \
+                 "CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE");                               \
+    BUILD_ASSERT((_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||                           \
+                     (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,                        \
+                 "ZMK_CUSTOM_SETTING_DEFINE_POOLED only supports BYTES/STRING value types");       \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {_constraint};       \
+    static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
+    STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
+        .custom_subsystem_id = _custom_subsystem_id,                                               \
+        .key = _key,                                                                               \
+        .array_key = NULL,                                                                         \
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        .array_state = NULL,                                                                       \
+        .value_type = _value_type,                                                                 \
+        .confidentiality = _confidentiality,                                                       \
+        .read_permission = _read_permission,                                                       \
+        .write_permission = _write_permission,                                                     \
+        .constraints = _name##_constraints,                                                        \
+        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
+        .default_value = &_name##_default,                                                         \
+        .rpc_serializer = NULL,                                                                    \
+        .rpc_deserializer = NULL,                                                                  \
+        .temp_slot = -1,                                                                           \
+        .value_max_size = (_max_size),                                                             \
+        .large_data = NULL,                                                                        \
+        .large_pool = &(_pool),                                                                    \
     }
 
 /*
