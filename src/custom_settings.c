@@ -83,6 +83,64 @@ static void copy_value(struct zmk_custom_setting_value *dest,
 }
 
 /*
+ * Per-setting large-value backing store (issue #16).
+ *
+ * A BYTES/STRING setting registered with an explicit larger max_size keeps
+ * its payload in a dedicated `large_data` buffer instead of the fixed-size
+ * `memory_value` union, so one large setting does not inflate every other
+ * setting. These helpers centralize deciding whether a setting uses that
+ * store and reading/writing it, so the rest of the file only needs a handful
+ * of `setting_uses_large_store()` branches at the value-access sites.
+ */
+static size_t setting_value_capacity(const struct zmk_custom_setting *setting) {
+    return setting->value_max_size ? setting->value_max_size
+                                   : CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE;
+}
+
+static bool setting_uses_large_store(const struct zmk_custom_setting *setting) {
+    return setting->large_data != NULL &&
+           (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+            setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING);
+}
+
+/* Store `size` raw payload bytes into a large-store setting's buffer. Caller
+ * must have validated size <= setting_value_capacity(setting). */
+static void large_store_set_raw(struct zmk_custom_setting *setting, const void *data, size_t size) {
+    memcpy(setting->large_data, data, size);
+    if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+        setting->large_data[size] = '\0';
+    }
+    setting->large_size = size;
+}
+
+/* Copy a small carrier value (BYTES/STRING, <= carrier size) into a
+ * large-store setting's buffer - used when a large-capable setting is written
+ * with a value that happens to fit the fixed carrier (the normal
+ * zmk_custom_setting_write / default-application path). */
+static void large_store_set_value(struct zmk_custom_setting *setting,
+                                  const struct zmk_custom_setting_value *value) {
+    if (value->type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+        size_t len = bounded_strlen(value->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+        len = MIN(len, setting_value_capacity(setting));
+        large_store_set_raw(setting, value->string_value, len);
+    } else {
+        size_t len = MIN(value->size, setting_value_capacity(setting));
+        large_store_set_raw(setting, value->bytes_value, len);
+    }
+}
+
+/* Apply a scalar setting's compile-time default to its memory storage,
+ * routing large-store settings to their buffer and everything else to the
+ * union. Caller holds settings_lock. */
+static void apply_scalar_default_locked(struct zmk_custom_setting *setting) {
+    if (setting_uses_large_store(setting)) {
+        large_store_set_value(setting, setting->default_value);
+    } else {
+        copy_value(&setting->memory_value, setting->default_value);
+    }
+}
+
+/*
  * Temporary overrides (ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY) are rare and
  * short-lived, so instead of a full struct zmk_custom_setting_value slot
  * embedded in every registered setting, a small shared pool holds the few
@@ -102,6 +160,10 @@ static struct zmk_custom_settings_temp_slot temp_slots[CONFIG_ZMK_CUSTOM_SETTING
  * Safe as a single shared instance: all access happens while settings_lock
  * is held. */
 static struct zmk_custom_setting_value temp_scratch_value;
+/* Scratch space effective_value() materializes a large-store setting's value
+ * into when it still fits the fixed carrier. Same single-shared-instance
+ * safety as temp_scratch_value (settings_lock held). */
+static struct zmk_custom_setting_value effective_scratch_value;
 
 /*
  * Array element "index views": zmk_custom_setting_find_array_element hands
@@ -365,12 +427,28 @@ static void set_setting_has_persistent_value(const struct zmk_custom_setting *se
     ((struct zmk_custom_setting *)setting)->has_persistent_value = value;
 }
 
+/*
+ * Return the effective value as a fixed carrier, or NULL when the value is a
+ * large-store payload that does not fit the carrier (callers must then use
+ * zmk_custom_setting_read_into / the chunked RPC instead). Temporary
+ * overrides and array elements are always carrier-sized; a large-store scalar
+ * currently holding a small value is materialized into effective_scratch_value.
+ */
 static const struct zmk_custom_setting_value *
 effective_value(const struct zmk_custom_setting *setting) {
     if (setting->temporary_active && setting->temp_slot >= 0) {
         const struct zmk_custom_settings_temp_slot *slot = &temp_slots[setting->temp_slot];
         value_from_raw(&temp_scratch_value, slot->type, slot->data, slot->size);
         return &temp_scratch_value;
+    }
+
+    if (setting_uses_large_store(setting)) {
+        if (setting->large_size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+            return NULL;
+        }
+        value_from_raw(&effective_scratch_value, setting->value_type, setting->large_data,
+                       setting->large_size);
+        return &effective_scratch_value;
     }
 
     return memory_value_slot(setting);
@@ -767,7 +845,11 @@ int zmk_custom_setting_set_default(const struct zmk_custom_setting *const_settin
      * before or after this module's own registry init, as long as it is
      * before settings_load() (i.e. from any SYS_INIT). */
     if (!setting->has_persistent_value && !setting->dirty) {
-        copy_value(&setting->memory_value, value);
+        if (setting_uses_large_store(setting)) {
+            large_store_set_value(setting, value);
+        } else {
+            copy_value(&setting->memory_value, value);
+        }
     }
     k_mutex_unlock(&settings_lock);
 
@@ -947,9 +1029,16 @@ static int save_setting_locked(struct zmk_custom_setting *setting) {
 
     const void *data;
     size_t len;
-    ret = value_to_storage(memory_value_slot(setting), &data, &len);
-    if (ret < 0) {
-        return ret;
+    if (setting_uses_large_store(setting)) {
+        /* Large BYTES/STRING payload is stored raw; persist it directly
+         * (bypassing the fixed carrier value_to_storage would use). */
+        data = setting->large_data;
+        len = setting->large_size;
+    } else {
+        ret = value_to_storage(memory_value_slot(setting), &data, &len);
+        if (ret < 0) {
+            return ret;
+        }
     }
 
     ret = settings_save_one(name, data, len);
@@ -975,7 +1064,15 @@ int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
         return -ENOENT;
     }
 
-    copy_value(value, effective_value(setting));
+    const struct zmk_custom_setting_value *effective = effective_value(setting);
+    if (!effective) {
+        /* Large value that does not fit the fixed carrier - the caller must
+         * use zmk_custom_setting_read_into or the chunked ReadValueChunk RPC
+         * instead of the fixed-carrier read. */
+        k_mutex_unlock(&settings_lock);
+        return -EMSGSIZE;
+    }
+    copy_value(value, effective);
     k_mutex_unlock(&settings_lock);
 
     return 0;
@@ -1077,12 +1174,20 @@ static int write_value_locked(struct zmk_custom_setting *setting,
         return 0;
     }
     case ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY:
-        copy_value(memory_value_slot(setting), value);
+        if (setting_uses_large_store(setting)) {
+            large_store_set_value(setting, value);
+        } else {
+            copy_value(memory_value_slot(setting), value);
+        }
         set_setting_dirty(setting, true);
         clear_temporary_locked(setting);
         return 0;
     case ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST:
-        copy_value(memory_value_slot(setting), value);
+        if (setting_uses_large_store(setting)) {
+            large_store_set_value(setting, value);
+        } else {
+            copy_value(memory_value_slot(setting), value);
+        }
         clear_temporary_locked(setting);
         return save_setting_locked(setting);
     default:
@@ -1506,10 +1611,10 @@ int zmk_custom_setting_discard(const struct zmk_custom_setting *const_setting) {
             ret = settings_load_subtree(name);
         }
         if (ret < 0) {
-            copy_value(&setting->memory_value, setting->default_value);
+            apply_scalar_default_locked(setting);
         }
     } else {
-        copy_value(&setting->memory_value, setting->default_value);
+        apply_scalar_default_locked(setting);
     }
     setting->dirty = false;
     clear_temporary_locked(setting);
@@ -1624,7 +1729,7 @@ int zmk_custom_setting_reset(const struct zmk_custom_setting *const_setting) {
     }
 
     if (ret == 0) {
-        copy_value(&setting->memory_value, setting->default_value);
+        apply_scalar_default_locked(setting);
         setting->has_persistent_value = false;
         setting->dirty = false;
         clear_temporary_locked(setting);
@@ -1768,7 +1873,15 @@ int zmk_custom_setting_with_value(const struct zmk_custom_setting *setting,
         return -ENOENT;
     }
 
-    visitor(effective_value(setting), user_data);
+    const struct zmk_custom_setting_value *effective = effective_value(setting);
+    if (!effective) {
+        /* Large value that does not fit the fixed carrier - callers wanting
+         * the raw bytes use zmk_custom_setting_read_into (which reads the
+         * large store directly) instead. */
+        k_mutex_unlock(&settings_lock);
+        return -EMSGSIZE;
+    }
+    visitor(effective, user_data);
     k_mutex_unlock(&settings_lock);
 
     return 0;
@@ -1831,6 +1944,30 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
         return -EINVAL;
     }
 
+    /* Large-store fast path: read the raw payload straight from the setting's
+     * buffer, so a value larger than the fixed carrier is still readable (the
+     * effective_value carrier below cannot represent it). Skipped while a
+     * temporary override is active - those are always carrier-sized. */
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    if (setting_uses_large_store(setting) && !setting->temporary_active) {
+        size_t size = setting->large_size;
+        int ret = 0;
+        if (size > capacity) {
+            ret = -EMSGSIZE;
+        } else {
+            memcpy(buf, setting->large_data, size);
+            if (out_size) {
+                *out_size = size;
+            }
+            if (out_type) {
+                *out_type = setting->value_type;
+            }
+        }
+        k_mutex_unlock(&settings_lock);
+        return ret;
+    }
+    k_mutex_unlock(&settings_lock);
+
     struct read_into_context ctx = {.buf = buf, .capacity = capacity, .ret = -EIO};
     int ret = zmk_custom_setting_with_value(setting, read_into_visitor, &ctx);
     if (ret < 0) {
@@ -1849,10 +1986,63 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
     return 0;
 }
 
-int zmk_custom_setting_write_bytes(const struct zmk_custom_setting *setting, const void *data,
-                                   size_t size, enum zmk_custom_setting_write_mode mode) {
-    if (!setting || (!data && size > 0)) {
+/* Apply a large (> carrier) raw BYTES/STRING payload to a large-store
+ * setting. Caller holds settings_lock. TEMPORARY mode is not supported for
+ * large values (the temporary override pool is intentionally small). */
+static int write_large_locked(struct zmk_custom_setting *setting, const void *data, size_t size,
+                              enum zmk_custom_setting_write_mode mode) {
+    if (size > setting_value_capacity(setting)) {
+        return -EMSGSIZE;
+    }
+
+    switch (mode) {
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY:
+        large_store_set_raw(setting, data, size);
+        set_setting_dirty(setting, true);
+        clear_temporary_locked(setting);
+        return 0;
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST:
+        large_store_set_raw(setting, data, size);
+        clear_temporary_locked(setting);
+        return save_setting_locked(setting);
+    case ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY:
+        return -EMSGSIZE;
+    default:
         return -EINVAL;
+    }
+}
+
+int zmk_custom_setting_write_bytes(const struct zmk_custom_setting *const_setting, const void *data,
+                                   size_t size, enum zmk_custom_setting_write_mode mode) {
+    if (!const_setting || (!data && size > 0)) {
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting *setting = (struct zmk_custom_setting *)const_setting;
+
+    /* Large-store settings whose value exceeds the fixed carrier take a
+     * dedicated raw path (the carrier below cannot hold it). Values that
+     * still fit the carrier fall through to the normal validated path so
+     * constraints keep being enforced. */
+    if (setting_uses_large_store(setting) && size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        if (setting->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES &&
+            setting->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+            return -EINVAL;
+        }
+        if (size > setting_value_capacity(setting)) {
+            return -EMSGSIZE;
+        }
+
+        k_mutex_lock(&settings_lock, K_FOREVER);
+        int ret = write_large_locked(setting, data, size, mode);
+        k_mutex_unlock(&settings_lock);
+
+        if (ret == 0) {
+            raise_setting_changed(setting, mode == ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+                                               ? ZMK_CUSTOM_SETTING_CHANGED_SAVED
+                                               : ZMK_CUSTOM_SETTING_CHANGED_VALUE_UPDATED);
+        }
+        return ret;
     }
 
     struct zmk_custom_setting_value value = {.type = setting->value_type};
@@ -1954,6 +2144,21 @@ int zmk_custom_setting_set_behavior(const struct zmk_custom_setting *setting,
 }
 
 static int value_from_storage(struct zmk_custom_setting *setting, const void *data, size_t len) {
+    /* Large-store BYTES/STRING settings load their raw payload directly into
+     * their per-setting buffer, bypassing the fixed carrier (which cannot
+     * hold it). Constraints for these types are size-only, already enforced
+     * by the capacity check. */
+    if (setting_uses_large_store(setting) && len > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        if (len > setting_value_capacity(setting)) {
+            return -EMSGSIZE;
+        }
+        large_store_set_raw(setting, data, len);
+        set_setting_has_persistent_value(setting, true);
+        set_setting_dirty(setting, false);
+        clear_temporary_locked(setting);
+        return 0;
+    }
+
     struct zmk_custom_setting_value value = {.type = setting->value_type};
 
     switch (setting->value_type) {
@@ -2000,7 +2205,11 @@ static int value_from_storage(struct zmk_custom_setting *setting, const void *da
         return ret;
     }
 
-    copy_value(memory_value_slot(setting), &value);
+    if (setting_uses_large_store(setting)) {
+        large_store_set_value(setting, &value);
+    } else {
+        copy_value(memory_value_slot(setting), &value);
+    }
     set_setting_has_persistent_value(setting, true);
     set_setting_dirty(setting, false);
     clear_temporary_locked(setting);
@@ -2239,6 +2448,13 @@ static void keyspace_init_slot_setting_locked(struct zmk_custom_setting_keyspace
         .rpc_serializer = keyspace->rpc_serializer,
         .rpc_deserializer = keyspace->rpc_deserializer,
         .temp_slot = -1,
+        .value_max_size = keyspace->max_size,
+        /* A keyspace whose max_size exceeds the fixed carrier gives each slot
+         * its own large_data row (issue #16); otherwise slots keep union
+         * storage (large_data == NULL). */
+        .large_data = keyspace->value_bufs
+                          ? keyspace->value_bufs + (size_t)index * keyspace->value_buf_stride
+                          : NULL,
     };
 }
 
@@ -2484,7 +2700,9 @@ static int custom_settings_handle_set(const char *name, size_t len, settings_rea
         return -ENOENT;
     }
 
-    uint8_t data[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
+    /* Sized to the largest per-setting value so a large-store setting's
+     * persisted payload can be staged on load, not just the fixed carrier. */
+    uint8_t data[CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE];
     if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32) {
         len = sizeof(int32_t);
     } else if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL) {
@@ -2531,7 +2749,7 @@ static void init_setting_state_locked(struct zmk_custom_setting *setting) {
         array_state->persistent_size = array_state->default_size;
         array_state->size = array_state->default_size;
     } else {
-        copy_value(&setting->memory_value, setting->default_value);
+        apply_scalar_default_locked(setting);
         setting->has_persistent_value = false;
         setting->dirty = false;
     }

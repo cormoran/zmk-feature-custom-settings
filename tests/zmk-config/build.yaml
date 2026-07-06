@@ -6,13 +6,13 @@ include:
   - artifact: custom_settings_board_with_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y -DCONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y -DCONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128 -DCONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256
     snippet: studio-rpc-usb-uart
 
   - artifact: custom_settings_board_without_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y
+    cmake-args: -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y -DCONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256
 
   - artifact: custom_settings_split_peripheral_with_rpc_relay
     board: xiao_ble//zmk

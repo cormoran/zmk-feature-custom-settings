@@ -65,8 +65,13 @@ CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
 RPC requests.
 `CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE` should be increased because listing
 settings builds encoded notifications from the low priority workqueue.
-When Studio RPC is enabled, setting values are limited to 64 bytes and setting
-keys are limited to 48 bytes by the generated RPC schema.
+When Studio RPC is enabled, a single-frame setting value is limited to 64 bytes
+and setting keys are limited to 48 bytes by the generated RPC schema. Individual
+`ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES`/`ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING`
+settings can hold larger values (up to
+`CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE`) by registering with an
+explicit per-setting `max_size` and transferring the value over the chunked
+RPC — see [Large Values](#large-values-per-setting-max_size).
 
 ### Split Keyboards
 
@@ -302,6 +307,61 @@ identifier registered by the module that owns the setting. The web UI obtains
 that subsystem's index from ZMK Studio and sends the index in setting requests.
 The custom Studio subsystem identifier for this module is
 `cormoran_custom_settings`.
+
+### Large Values (Per-Setting max_size)
+
+By default every setting value is capped at
+`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` (64 bytes, the size of one RPC
+frame). A `BYTES`/`STRING` setting that needs to store more than that registers
+with an explicit per-setting `max_size` using `ZMK_CUSTOM_SETTING_DEFINE_SIZED`:
+
+```c
+/* Store up to 256 bytes for this one setting. */
+ZMK_CUSTOM_SETTING_DEFINE_SIZED(
+    my_blob_setting,
+    /* max_size = */ 256,
+    "my_module", "blob",
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+```
+
+Only the sized setting allocates its own right-sized backing buffer, so making
+one setting large does **not** grow the RAM footprint of every other setting.
+`max_size` must not exceed `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE`
+(default equal to `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`), so raise that
+config to enable large values:
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256
+```
+
+Which knob is authoritative:
+
+- `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is the single-frame value size and
+  the size of the fixed carrier `struct zmk_custom_setting_value`. It stays
+  pinned to 64 while the protobuf schema is enabled and is the default
+  per-setting `max_size`.
+- `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE` is the ceiling for any
+  per-setting `max_size` and for the shared chunk/record staging buffers.
+
+A value larger than `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is only
+reachable through:
+
+- the firmware API `zmk_custom_setting_write_bytes` / `zmk_custom_setting_read_into`
+  (the fixed-carrier `zmk_custom_setting_read`/`write` return `-EMSGSIZE` for an
+  oversized value rather than truncating it), and
+- the chunked `ReadValueChunk`/`WriteValueChunk` RPC (see below). The
+  single-frame `GetSetting` response omits an oversized value (`has_value`
+  unset) so the client knows to fetch it in chunks; the web UI does this
+  automatically.
+
+`ZMK_CUSTOM_SETTING_DEFINE_SIZED` also works for record settings — size the
+underlying `BYTES` setting so the encoded record fits — and keyspaces accept a
+larger `max_size` too.
 
 ### Reading And Writing Large Values In Chunks
 

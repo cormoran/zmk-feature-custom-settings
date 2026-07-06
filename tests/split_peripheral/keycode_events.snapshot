@@ -38,6 +38,8 @@ PASS: custom_settings_keyspace_settings_load_rebind a=111 b=222 c=333
 PASS: custom_settings_record speed=42 invert=1 label=abcdefg
 PASS: custom_settings_record_constraint_rejected
 PASS: custom_settings_record_schema_evolution speed=42 label=kept
+PASS: custom_settings_large_value size=256
+PASS: custom_settings_large_record id=1234 note_len=180 encoded=189
 PASS: split_peripheral_relay
 PASS: split_peripheral_relay_pop_back size=2
 PASS: split_peripheral_relay_push_back array[2]=44 size=3

@@ -31,6 +31,11 @@ import {
   scalarValueToNumber,
   validateConstraintValue,
 } from "./constraints";
+import {
+  readValueChunked,
+  writeValueChunked,
+  SINGLE_FRAME_VALUE_MAX,
+} from "./chunkedValue";
 
 export const SUBSYSTEM_IDENTIFIER = "cormoran_custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
@@ -456,10 +461,55 @@ export function RPCTestSection() {
     }
   };
 
-  const getSetting = () =>
-    sendRequest(
-      Request.create({ getSetting: { setting: settingRef, requireMeta } })
-    );
+  const getSetting = async () => {
+    setIsLoading(true);
+    setResponse(null);
+
+    try {
+      const resp = await callCustomRequest(
+        Request.create({ getSetting: { setting: settingRef, requireMeta } })
+      );
+      if (resp.error) {
+        setResponse(`Error: ${resp.error.message}`);
+        return;
+      }
+
+      const fetched = resp.getSetting?.setting;
+      if (!fetched) {
+        setResponse("No setting returned");
+        return;
+      }
+
+      setSetting(fetched);
+      let text = formatSetting(fetched);
+
+      // A value larger than one frame is omitted from the single-frame
+      // response (issue #16); fetch it over the chunked ReadValueChunk RPC.
+      // Value-less settings that are not large (device-private / secure while
+      // locked) simply fail the chunk read, which we ignore.
+      if (!fetched.value) {
+        try {
+          const bytes = await readValueChunked(callCustomRequest, settingRef);
+          if (bytes.length > 0) {
+            text += `\nlarge value (${bytes.length} bytes): ${formatBytesValue(
+              bytes
+            )}`;
+          }
+        } catch (chunkError) {
+          console.debug("[custom-settings] chunked read skipped", chunkError);
+        }
+      }
+
+      setResponse(text);
+    } catch (error) {
+      console.error("Get setting failed:", error);
+      setResponse(
+        `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const listSettings = async () => {
     setIsLoading(true);
@@ -485,8 +535,45 @@ export function RPCTestSection() {
     }
   };
 
-  const writeSetting = () =>
-    sendRequest(
+  const writeSetting = async () => {
+    // A BYTES/STRING value larger than one frame cannot ride the single-frame
+    // SettingValue field, so it is written over the chunked WriteValueChunk
+    // RPC (issue #16). Small values and arrays keep the plain write path.
+    if (
+      !isArray &&
+      (valueType === EditorValueType.Bytes ||
+        valueType === EditorValueType.String)
+    ) {
+      const bytes =
+        valueType === EditorValueType.Bytes
+          ? parseBytesValue(value)
+          : new TextEncoder().encode(value);
+      if (bytes.length > SINGLE_FRAME_VALUE_MAX) {
+        setIsLoading(true);
+        setResponse(null);
+        try {
+          await writeValueChunked(
+            callCustomRequest,
+            settingRef,
+            bytes,
+            writeMode
+          );
+          setResponse(`Wrote ${bytes.length} bytes via chunked transfer`);
+        } catch (error) {
+          console.error("Chunked write failed:", error);
+          setResponse(
+            `Failed: ${
+              error instanceof Error ? error.message : "Unknown error"
+            }`
+          );
+        } finally {
+          setIsLoading(false);
+        }
+        return;
+      }
+    }
+
+    return sendRequest(
       Request.create({
         writeSetting: {
           setting: settingRef,
@@ -495,6 +582,7 @@ export function RPCTestSection() {
         },
       })
     );
+  };
 
   const pushBackArray = () =>
     sendRequest(

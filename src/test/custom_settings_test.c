@@ -32,7 +32,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 struct test_settings_record {
     bool present;
     char name[SETTINGS_MAX_NAME_LEN];
-    uint8_t data[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
+    uint8_t data[CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE];
     size_t len;
 };
 
@@ -94,7 +94,7 @@ static int test_settings_save(struct settings_store *cs, const char *name, const
         return 0;
     }
 
-    if (val_len > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+    if (val_len > CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE) {
         return -EMSGSIZE;
     }
 
@@ -270,6 +270,50 @@ ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_macro_keyspace, "test", "macro/",
                                    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/*
+ * issue #16: a BYTES setting able to store a value much larger than the fixed
+ * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE carrier, using its own right-sized
+ * per-setting backing buffer (ZMK_CUSTOM_SETTING_DEFINE_SIZED). Large values
+ * are reachable via zmk_custom_setting_write_bytes / read_into and the chunked
+ * RPC only.
+ */
+#define TEST_LARGE_VALUE_SIZE 256
+
+ZMK_CUSTOM_SETTING_DEFINE_SIZED(test_large_bytes_setting, TEST_LARGE_VALUE_SIZE, "test",
+                                "large_bytes", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+                                ZMK_CUSTOM_SETTING_VALUE_BYTES(0),
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/* A record whose TLV encoding exceeds 64 bytes, stored in a large-sized BYTES
+ * setting so it can round-trip past the old ceiling (issue #16, point 6). */
+struct test_big_profile {
+    int32_t id;
+    char note[200];
+};
+
+ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(
+    test_big_profile_schema, struct test_big_profile,
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_INT32(struct test_big_profile, id, 1, NULL),
+    ZMK_CUSTOM_SETTING_RECORD_FIELD_STRING(struct test_big_profile, note, 2));
+
+ZMK_CUSTOM_SETTING_DEFINE_SIZED(test_big_record_setting, TEST_LARGE_VALUE_SIZE, "test",
+                                "big_record", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+                                ZMK_CUSTOM_SETTING_VALUE_BYTES(1),
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/* The large-value backing buffer must live outside the descriptor (as a
+ * pointer), so defining a 256-byte setting does not embed 256 bytes into
+ * every struct zmk_custom_setting. If it did, this descriptor would be at
+ * least as large as one buffer. */
+BUILD_ASSERT(sizeof(struct zmk_custom_setting) < CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE,
+             "large value buffer must not be embedded in the setting descriptor");
 
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
@@ -1823,6 +1867,148 @@ static int test_behavior_value_type(void) {
 }
 #endif
 
+static int test_large_value(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "large_bytes");
+    if (!setting) {
+        LOG_ERR("Large value test setting not registered");
+        return -ENOENT;
+    }
+
+    /* Sanity: a normal (int32) setting keeps union storage (no large buffer),
+     * while the sized setting has its own backing buffer. This is what keeps
+     * unrelated settings' RAM footprint from growing (issue #16). */
+    if (test_int_setting.large_data != NULL) {
+        LOG_ERR("Normal setting unexpectedly allocated a large backing buffer");
+        return -EINVAL;
+    }
+    if (setting->large_data == NULL) {
+        LOG_ERR("Sized setting is missing its large backing buffer");
+        return -EINVAL;
+    }
+
+    uint8_t payload[TEST_LARGE_VALUE_SIZE];
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        payload[i] = (uint8_t)(i * 7 + 3);
+    }
+
+    int ret = zmk_custom_setting_write_bytes(setting, payload, sizeof(payload),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Large write_bytes failed: %d", ret);
+        return ret;
+    }
+
+    uint8_t readback[TEST_LARGE_VALUE_SIZE];
+    size_t out_size = 0;
+    enum zmk_custom_setting_value_type out_type;
+    ret = zmk_custom_setting_read_into(setting, readback, sizeof(readback), &out_size, &out_type);
+    if (ret < 0 || out_size != sizeof(payload) || out_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+        memcmp(readback, payload, sizeof(payload)) != 0) {
+        LOG_ERR("Large read_into round-trip mismatch: ret=%d size=%u", ret, (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    /* The fixed-carrier read must clearly reject the oversized value instead
+     * of silently truncating it. */
+    struct zmk_custom_setting_value carrier;
+    ret = zmk_custom_setting_read(setting, &carrier);
+    if (ret != -EMSGSIZE) {
+        LOG_ERR("Fixed-carrier read of large value should return -EMSGSIZE, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* Persist, clobber in RAM, then discard: the persisted large value must be
+     * restored from flash exactly. */
+    ret = zmk_custom_setting_write_bytes(setting, payload, sizeof(payload),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_ERR("Large persist failed: %d", ret);
+        return ret;
+    }
+
+    uint8_t other[100];
+    memset(other, 0xAB, sizeof(other));
+    ret = zmk_custom_setting_write_bytes(setting, other, sizeof(other),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = zmk_custom_setting_discard(setting);
+    if (ret < 0) {
+        LOG_ERR("Large discard failed: %d", ret);
+        return ret;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(setting, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload) || memcmp(readback, payload, sizeof(payload)) != 0) {
+        LOG_ERR("Large discard did not restore persisted value: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_large_value size=%u", (unsigned)sizeof(payload));
+    return 0;
+}
+
+static int test_large_record(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "big_record");
+    if (!setting) {
+        LOG_ERR("Large record test setting not registered");
+        return -ENOENT;
+    }
+
+    struct test_big_profile in = {.id = 1234};
+    memset(in.note, 'x', 180);
+    in.note[180] = '\0';
+
+    /* Confirm the encoding really is larger than the old 64-byte ceiling. */
+    uint8_t encoded[TEST_LARGE_VALUE_SIZE];
+    size_t encoded_size = 0;
+    int ret = zmk_custom_setting_record_encode(&test_big_profile_schema, &in, encoded,
+                                               sizeof(encoded), &encoded_size);
+    if (ret < 0 || encoded_size <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        LOG_ERR("Large record encoding not larger than carrier: ret=%d size=%u", ret,
+                (unsigned)encoded_size);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_record_set(setting, &test_big_profile_schema, &in,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_ERR("Large record_set failed: %d", ret);
+        return ret;
+    }
+
+    struct test_big_profile out = {0};
+    ret = zmk_custom_setting_record_get(setting, &test_big_profile_schema, &out);
+    if (ret < 0) {
+        LOG_ERR("Large record_get failed: %d", ret);
+        return ret;
+    }
+
+    if (out.id != in.id || strlen(out.note) != 180 || memcmp(out.note, in.note, 180) != 0) {
+        LOG_ERR("Large record round-trip mismatch: id=%d note_len=%u", out.id,
+                (unsigned)strlen(out.note));
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_large_record id=%d note_len=%u encoded=%u", out.id,
+            (unsigned)strlen(out.note), (unsigned)encoded_size);
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -1885,6 +2071,16 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_record_settings();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_large_value();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_large_record();
     if (ret < 0) {
         return ret;
     }

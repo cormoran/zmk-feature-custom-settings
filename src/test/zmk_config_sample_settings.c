@@ -181,6 +181,21 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes_rpc) = {
     .temp_slot = -1,
 };
 
+/*
+ * issue #16: a BYTES setting able to store a value larger than the fixed
+ * carrier, using the ZMK_CUSTOM_SETTING_DEFINE_SIZED macro. When
+ * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE is left at the default
+ * (equal to the carrier size) this is just a normal setting; the sample
+ * builds raise it so this stores up to 256 bytes, reachable over the chunked
+ * RPC / read_into / write_bytes API.
+ */
+ZMK_CUSTOM_SETTING_DEFINE_SIZED(
+    zmk_config_sample_large_bytes, CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE,
+    "zmk_config_sample", "large_bytes_value", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(0), ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 static const struct zmk_custom_setting_value zmk_config_sample_private_string_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
     .size = sizeof("device only") - 1,

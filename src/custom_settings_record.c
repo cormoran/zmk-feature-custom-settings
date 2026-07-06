@@ -151,7 +151,7 @@ int zmk_custom_setting_record_set(const struct zmk_custom_setting *setting,
         }
     }
 
-    uint8_t encoded[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
+    uint8_t encoded[CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE];
     size_t encoded_size;
     int ret =
         zmk_custom_setting_record_encode(schema, record, encoded, sizeof(encoded), &encoded_size);
@@ -169,7 +169,7 @@ int zmk_custom_setting_record_get(const struct zmk_custom_setting *setting,
         return -EINVAL;
     }
 
-    uint8_t encoded[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
+    uint8_t encoded[CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE];
     size_t encoded_size;
     int ret = zmk_custom_setting_read_into(setting, encoded, sizeof(encoded), &encoded_size, NULL);
     if (ret < 0) {
