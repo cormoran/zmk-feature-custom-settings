@@ -42,6 +42,7 @@ enum EditorValueType {
   Bool = "bool",
   String = "string",
   Bytes = "bytes",
+  Behavior = "behavior",
 }
 
 function App() {
@@ -637,6 +638,9 @@ export function RPCTestSection() {
     } else if (nextValue.bytesValue !== undefined) {
       setValueType(EditorValueType.Bytes);
       setValue(formatBytesValue(nextValue.bytesValue));
+    } else if (nextValue.behaviorValue !== undefined) {
+      setValueType(EditorValueType.Behavior);
+      setValue(formatBehaviorValue(nextValue.behaviorValue));
     }
   };
 
@@ -746,6 +750,7 @@ export function RPCTestSection() {
               <option value={EditorValueType.Bool}>bool</option>
               <option value={EditorValueType.String}>string</option>
               <option value={EditorValueType.Bytes}>bytes</option>
+              <option value={EditorValueType.Behavior}>behavior</option>
             </select>
           </>
         )}
@@ -765,6 +770,11 @@ export function RPCTestSection() {
           id="value-input"
           value={value}
           onChange={(e) => setValue(e.target.value)}
+          placeholder={
+            valueType === EditorValueType.Behavior
+              ? "behaviorId,param1,param2"
+              : undefined
+          }
         />
 
         <label htmlFor="mode-input">Write Mode</label>
@@ -916,6 +926,7 @@ export function RPCTestSection() {
             <option value={EditorValueType.Bool}>bool</option>
             <option value={EditorValueType.String}>string</option>
             <option value={EditorValueType.Bytes}>bytes</option>
+            <option value={EditorValueType.Behavior}>behavior</option>
           </select>
 
           <label htmlFor="create-value-input">Value</label>
@@ -1105,6 +1116,7 @@ function settingValueTypeLabel(
   if (scalarValue.boolValue !== undefined) return "bool";
   if (scalarValue.stringValue !== undefined) return "string";
   if (scalarValue.bytesValue !== undefined) return "bytes";
+  if (scalarValue.behaviorValue !== undefined) return "behavior";
   return undefined;
 }
 
@@ -1115,7 +1127,29 @@ function formatScalarValue(value: SettingScalarValue): string {
   if (value.bytesValue !== undefined) {
     return formatBytesValue(value.bytesValue);
   }
+  if (value.behaviorValue !== undefined) {
+    return formatBehaviorValue(value.behaviorValue);
+  }
   return "";
+}
+
+function parseBehaviorValue(value: string): {
+  behaviorId: number;
+  param1: number;
+  param2: number;
+} {
+  const [behaviorId = 0, param1 = 0, param2 = 0] = value
+    .split(",")
+    .map((token) => Number.parseInt(token.trim(), 10) || 0);
+  return { behaviorId, param1, param2 };
+}
+
+function formatBehaviorValue(value: {
+  behaviorId: number;
+  param1: number;
+  param2: number;
+}): string {
+  return `${value.behaviorId},${value.param1},${value.param2}`;
 }
 
 function parseBytesValue(value: string): Uint8Array {
@@ -1150,6 +1184,8 @@ function parseScalarValueOf(
       return { boolValue: raw === "true" || raw === "1" };
     case EditorValueType.String:
       return { stringValue: raw };
+    case EditorValueType.Behavior:
+      return { behaviorValue: parseBehaviorValue(raw) };
     case EditorValueType.Int32:
     default:
       return { int32Value: Number.parseInt(raw, 10) || 0 };
@@ -1452,6 +1488,9 @@ function scalarValueKind(value: SettingScalarValue | undefined): string {
   }
   if (value.stringValue !== undefined) {
     return "string";
+  }
+  if (value.behaviorValue !== undefined) {
+    return "behavior";
   }
 
   return "empty";
