@@ -94,6 +94,11 @@ The custom settings relay payload size is
 source and encoded payload size. Larger keys, setting values, or metadata-heavy
 list responses may need a larger BLE MTU and split relay event data size.
 
+Values larger than a single RPC frame
+(`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`) are **not** relayed across the
+split — the notification omits an oversized value. See
+[Large Values](#large-values-per-setting-max_size) for the details.
+
 ### Register Settings
 
 Register a setting from another module:
@@ -362,6 +367,15 @@ reachable through:
 `ZMK_CUSTOM_SETTING_DEFINE_SIZED` also works for record settings — size the
 underlying `BYTES` setting so the encoded record fits — and keyspaces accept a
 larger `max_size` too.
+
+> **Large values are local-only on split keyboards.** A value larger than
+> `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is only reachable on the half that
+> owns the setting, via the firmware API or the chunked RPC. It is **not**
+> carried across the split relay: a peripheral setting-changed notification
+> omits an oversized value (`has_value` unset, cleanly — no crash), and there is
+> no chunked-RPC-over-relay path, so a central cannot read or write a
+> peripheral's large value. Register large settings on the half whose RPC client
+> (Studio) talks to them.
 
 ### Reading And Writing Large Values In Chunks
 

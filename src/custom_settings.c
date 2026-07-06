@@ -2055,10 +2055,15 @@ int zmk_custom_setting_write_bytes(const struct zmk_custom_setting *const_settin
         memcpy(value.bytes_value, data, size);
         break;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING: {
-        size_t len = MIN(size, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
-        memcpy(value.string_value, data, len);
-        value.string_value[len] = '\0';
-        value.size = len;
+        /* Reject rather than silently truncate when the value cannot fit the
+         * fixed carrier (mirrors the BYTES guard above). A larger value must
+         * be written to a large-capable setting via the raw path. */
+        if (size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+            return -EMSGSIZE;
+        }
+        memcpy(value.string_value, data, size);
+        value.string_value[size] = '\0';
+        value.size = size;
         break;
     }
     default:

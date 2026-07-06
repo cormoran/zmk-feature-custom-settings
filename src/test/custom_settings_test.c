@@ -188,6 +188,16 @@ ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     test_bytes_rpc_reverse, test_bytes_rpc_reverse, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+/* A NON-large STRING setting (no per-setting backing buffer): a value larger
+ * than the fixed carrier must be rejected, not silently truncated (issue #16
+ * follow-up). */
+ZMK_CUSTOM_SETTING_DEFINE(test_string_setting, "test", "string_value",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                          ZMK_CUSTOM_SETTING_VALUE_STRING("hi"),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 /* One registration for the whole 3-element array, replacing the pre-P3
  * ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(test_array_setting_0/1/2, ...)
  * trio (see the removal note in custom_settings.h). Defaults {1, 2, 3}
@@ -2009,6 +2019,72 @@ static int test_large_record(void) {
     return 0;
 }
 
+/* A >64-byte value written to a NON-large STRING setting must be rejected with
+ * -EMSGSIZE (mirroring the BYTES guard) instead of being silently truncated to
+ * the carrier size and reported as success. This path is reachable via the
+ * firmware API and the chunked-write RPC large branch (issue #16 follow-up). */
+static int test_string_no_truncation(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "string_value");
+    if (!setting) {
+        LOG_ERR("String test setting not registered");
+        return -ENOENT;
+    }
+    if (setting->large_data != NULL) {
+        LOG_ERR("String test setting unexpectedly has a large backing buffer");
+        return -EINVAL;
+    }
+
+    /* An oversized STRING value must be rejected, not truncated. */
+    char big[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 16];
+    memset(big, 'a', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+
+    int ret = zmk_custom_setting_write_bytes(setting, big, sizeof(big) - 1,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -EMSGSIZE) {
+        LOG_ERR("Oversized STRING write should return -EMSGSIZE, got %d", ret);
+        return -EINVAL;
+    }
+
+    /* The rejected write must not have altered the stored value. */
+    char readback[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    size_t out_size = 0;
+    ret = zmk_custom_setting_read_into(setting, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != strlen("hi") || memcmp(readback, "hi", out_size) != 0) {
+        LOG_ERR("Rejected STRING write clobbered stored value: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    /* A value that fits the carrier must still succeed (no regression). */
+    char fit[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    memset(fit, 'b', CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+    fit[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE] = '\0';
+    ret = zmk_custom_setting_write_bytes(setting, fit, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Carrier-sized STRING write failed: %d", ret);
+        return ret;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(setting, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ||
+        memcmp(readback, fit, out_size) != 0) {
+        LOG_ERR("Carrier-sized STRING round-trip mismatch: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_string_no_truncation");
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2081,6 +2157,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_large_record();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_string_no_truncation();
     if (ret < 0) {
         return ret;
     }

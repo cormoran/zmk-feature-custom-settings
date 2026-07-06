@@ -40,6 +40,7 @@ PASS: custom_settings_record_constraint_rejected
 PASS: custom_settings_record_schema_evolution speed=42 label=kept
 PASS: custom_settings_large_value size=256
 PASS: custom_settings_large_record id=1234 note_len=180 encoded=189
+PASS: custom_settings_string_no_truncation
 zmk: Welcome to ZMK!
 pressed: position 0 keycode 0x70004
 released: position 0 keycode 0x70004
