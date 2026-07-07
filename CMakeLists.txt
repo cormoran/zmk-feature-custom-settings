@@ -1,5 +1,8 @@
 zephyr_include_directories(include)
 if(CONFIG_ZMK_CUSTOM_SETTINGS)
+    # Simplification P4: const setting descriptors live in rodata
+    # (ROM_SECTIONS); the keyspace registry stays a RAM data section.
+    zephyr_linker_sources(ROM_SECTIONS include/linker/zmk-custom-settings-rom.ld)
     zephyr_linker_sources(DATA_SECTIONS include/linker/zmk-custom-settings.ld)
 
     target_sources(app PRIVATE src/custom_settings.c src/custom_settings_record.c)
