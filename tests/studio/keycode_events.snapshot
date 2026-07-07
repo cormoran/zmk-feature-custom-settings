@@ -41,8 +41,12 @@ PASS: custom_settings_keyspace_settings_load_rebind a=111 b=222 c=333
 PASS: custom_settings_record speed=42 invert=1 label=abcdefg
 PASS: custom_settings_record_constraint_rejected
 PASS: custom_settings_record_schema_evolution speed=42 label=kept
+PASS: custom_settings_large_value size=256
+PASS: custom_settings_large_record id=1234 note_len=180 encoded=189
+PASS: custom_settings_string_no_truncation
 PASS: custom_settings_behavior_value param1=0x70004
 PASS: custom_settings_behavior_value_rejects_invalid
+PASS: custom_settings_large_chunked_rpc size=200
 PASS: custom_settings_chunked_rpc rpc=030201->090807 internal=070809
 PASS: custom_settings_list_array_expands_to_elements count=3
 PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809

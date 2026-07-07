@@ -6,11 +6,32 @@ config ZMK_CUSTOM_SETTINGS
 if ZMK_CUSTOM_SETTINGS
 
 config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
-    int "Maximum custom setting value size"
+    int "Maximum single-frame custom setting value size"
     default 64
     range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
-      The Studio RPC protobuf schema currently supports values up to 64 bytes.
+      Size of the fixed struct zmk_custom_setting_value carrier and of the
+      non-chunked Studio RPC SettingValue.bytes_value/string_value fields.
+      This is the largest value that fits a single RPC frame and the default
+      per-setting max_size. It is pinned to 64 while the protobuf schema is
+      enabled (the non-chunked SettingValue fields are max_size:64). Settings
+      that need to store a larger value register with an explicit larger
+      max_size via ZMK_CUSTOM_SETTING_DEFINE_SIZED and transfer it over the
+      chunked ReadValueChunk/WriteValueChunk RPC instead of growing this.
+
+config ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
+    int "Maximum per-setting large value size"
+    default ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
+    help
+      Absolute ceiling for a single setting's per-setting max_size
+      (ZMK_CUSTOM_SETTING_DEFINE_SIZED) and the size of the staging buffers
+      used to assemble a large value from chunked RPC and to encode/decode a
+      record. Raising this does NOT inflate every setting: only a setting
+      registered with a larger max_size, plus the shared chunk/record staging
+      buffers, grow. Values above ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE are only
+      reachable through the chunked ReadValueChunk/WriteValueChunk RPC and the
+      zmk_custom_setting_read_into / zmk_custom_setting_write_bytes firmware
+      API; the single-frame Read/Write RPC omits/rejects them.
 
 config ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN
     int "Maximum custom subsystem id length"
@@ -104,16 +125,18 @@ config ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
 
 config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
     int "Chunked write staging buffer size"
-    default ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
-    range 1 ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
+    default ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
+    range 1 ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
     depends on ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
     help
       Size of the single global buffer used to assemble a chunked write
-      before it is validated and applied on commit. One transfer session
-      is supported at a time. Values cannot exceed
-      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE regardless of this
-      setting, since the assembled value still has to fit the setting's
-      internal storage.
+      before it is validated and applied on commit, and to stage a chunked
+      read. One transfer session is supported at a time. The assembled value
+      still has to fit the target setting's own max_size, so a value larger
+      than CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE requires that setting to
+      have been registered with a matching larger max_size (see
+      ZMK_CUSTOM_SETTING_DEFINE_SIZED and
+      CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE).
 
 config ZMK_CUSTOM_SETTINGS_TEMP_SLOTS
     int "Temporary override pool slot count"

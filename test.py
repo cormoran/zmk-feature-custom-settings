@@ -88,6 +88,7 @@ class WestCommandsTests(unittest.TestCase):
                         b"bytes_value",
                         b"bytes_rpc_value",
                         b"array_value",
+                        b"large_bytes_value",
                     ],
                 ),
                 "custom_settings_board_without_rpc": ConfigAndDeviceTree(
@@ -107,6 +108,7 @@ class WestCommandsTests(unittest.TestCase):
                         b"bytes_value",
                         b"bytes_rpc_value",
                         b"array_value",
+                        b"large_bytes_value",
                     ],
                 ),
                 "custom_settings_split_peripheral_with_rpc_relay": ConfigAndDeviceTree(
@@ -132,6 +134,7 @@ class WestCommandsTests(unittest.TestCase):
                         b"bytes_value",
                         b"bytes_rpc_value",
                         b"array_value",
+                        b"large_bytes_value",
                     ],
                 ),
                 "custom_settings_split_central_with_rpc_relay": ConfigAndDeviceTree(
@@ -160,6 +163,7 @@ class WestCommandsTests(unittest.TestCase):
                         b"bytes_value",
                         b"bytes_rpc_value",
                         b"array_value",
+                        b"large_bytes_value",
                     ],
                 ),
             }

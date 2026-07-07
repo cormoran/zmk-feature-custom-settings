@@ -611,7 +611,14 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
         LOG_DBG("Custom settings proto value start: subsystem=%s key=%s",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
         ret = setting_value_to_proto(setting, &dest->value);
-        if (ret < 0) {
+        if (ret == -EMSGSIZE) {
+            /* Large value that does not fit the single-frame SettingValue
+             * field (issue #16). Omit it rather than truncating; the client
+             * must fetch it with ReadValueChunk. has_unsaved_value and the
+             * rest of the Setting are still reported. */
+            dest->has_value = false;
+            ret = 0;
+        } else if (ret < 0) {
             dest->has_value = false;
             return ret;
         }
@@ -1549,6 +1556,12 @@ struct zmk_custom_settings_chunk_session {
 
 static K_MUTEX_DEFINE(chunk_session_lock);
 static struct zmk_custom_settings_chunk_session chunk_session;
+/* Staging buffer for reading a large value out (issue #16): a large value
+ * does not fit the fixed struct zmk_custom_setting_value carrier, so it is
+ * read straight into here via zmk_custom_setting_read_into. Guarded by
+ * chunk_session_lock (a read cannot overlap a write commit that needs the
+ * session state). */
+static uint8_t chunk_read_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE];
 
 static bool chunk_value_type_supported(const struct zmk_custom_setting *setting) {
     return setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
@@ -1584,30 +1597,65 @@ static int handle_private_read_value_chunk(const struct zmk_custom_settings_sett
         return 0;
     }
 
-    struct zmk_custom_setting_value value;
-    int ret = zmk_custom_setting_read(setting, &value);
-    if (ret < 0) {
-        return ret;
-    }
-
-    struct zmk_custom_setting_value rpc_value;
-    ret = zmk_custom_setting_serialize_rpc_value(setting, &value, &rpc_value);
-    if (ret < 0) {
-        return ret;
-    }
-
     const uint8_t *data;
     uint32_t total_size;
-    if (rpc_value.type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
-        data = rpc_value.bytes_value;
-        total_size = rpc_value.size;
-    } else {
-        data = (const uint8_t *)rpc_value.string_value;
-        total_size =
-            bounded_strlen(rpc_value.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+
+    struct zmk_custom_setting_value value;
+    struct zmk_custom_setting_value rpc_value;
+    int ret = zmk_custom_setting_read(setting, &value);
+    if (ret == 0) {
+        /* Value fits the fixed carrier: apply the RPC serializer (if any) and
+         * serve from the serialized carrier, preserving small-value
+         * behavior. */
+        ret = zmk_custom_setting_serialize_rpc_value(setting, &value, &rpc_value);
+        if (ret < 0) {
+            return ret;
+        }
+        if (rpc_value.type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
+            data = rpc_value.bytes_value;
+            total_size = rpc_value.size;
+        } else {
+            data = (const uint8_t *)rpc_value.string_value;
+            total_size =
+                bounded_strlen(rpc_value.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+        }
+
+        if (offset > total_size) {
+            return -EINVAL;
+        }
+
+        cormoran_zmk_custom_settings_ValueChunkResponse chunk =
+            cormoran_zmk_custom_settings_ValueChunkResponse_init_zero;
+        chunk.total_size = total_size;
+        chunk.offset = offset;
+        uint32_t chunk_len = MIN(total_size - offset, sizeof(chunk.data.bytes));
+        memcpy(chunk.data.bytes, data + offset, chunk_len);
+        chunk.data.size = chunk_len;
+        chunk.last = (offset + chunk_len) >= total_size;
+
+        resp->which_response_type = cormoran_zmk_custom_settings_Response_value_chunk_tag;
+        resp->response_type.value_chunk = chunk;
+        return 0;
+    }
+    if (ret != -EMSGSIZE) {
+        return ret;
     }
 
+    /* Large value (> carrier): read the raw payload into the staging buffer.
+     * RPC serializer converters are not applied on this path - they are
+     * bounded by the fixed carrier and only meaningful for small values. */
+    k_mutex_lock(&chunk_session_lock, K_FOREVER);
+    size_t read_size = 0;
+    ret = zmk_custom_setting_read_into(setting, chunk_read_buffer, sizeof(chunk_read_buffer),
+                                       &read_size, NULL);
+    if (ret < 0) {
+        k_mutex_unlock(&chunk_session_lock);
+        return ret;
+    }
+    total_size = (uint32_t)read_size;
+
     if (offset > total_size) {
+        k_mutex_unlock(&chunk_session_lock);
         return -EINVAL;
     }
 
@@ -1616,9 +1664,10 @@ static int handle_private_read_value_chunk(const struct zmk_custom_settings_sett
     chunk.total_size = total_size;
     chunk.offset = offset;
     uint32_t chunk_len = MIN(total_size - offset, sizeof(chunk.data.bytes));
-    memcpy(chunk.data.bytes, data + offset, chunk_len);
+    memcpy(chunk.data.bytes, chunk_read_buffer + offset, chunk_len);
     chunk.data.size = chunk_len;
     chunk.last = (offset + chunk_len) >= total_size;
+    k_mutex_unlock(&chunk_session_lock);
 
     resp->which_response_type = cormoran_zmk_custom_settings_Response_value_chunk_tag;
     resp->response_type.value_chunk = chunk;
@@ -1692,6 +1741,32 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
         return -EINVAL;
     }
 
+    enum zmk_custom_setting_write_mode mode =
+        chunk_session.mode ==
+                cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
+            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
+            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
+
+    int ret;
+    if (chunk_session.total_size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        /* Large value: write the assembled payload straight to the setting's
+         * large store (issue #16). RPC deserializer converters are bounded by
+         * the fixed carrier and are not applied on this path. The write is
+         * done while still holding chunk_session_lock (consistent lock order:
+         * chunk_session_lock is always taken before settings_lock), then the
+         * session is released. */
+        ret = zmk_custom_setting_write_bytes(setting, chunk_session.buffer,
+                                             chunk_session.total_size, mode);
+        reset_chunk_session_locked();
+        k_mutex_unlock(&chunk_session_lock);
+        if (ret < 0) {
+            return ret;
+        }
+
+        set_status(resp, 1, "Value written from chunks");
+        return 0;
+    }
+
     struct zmk_custom_setting_value rpc_value = {.type = setting->value_type};
     if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
         rpc_value.size = chunk_session.total_size;
@@ -1703,14 +1778,8 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
         rpc_value.size = len;
     }
 
-    enum zmk_custom_setting_write_mode mode =
-        chunk_session.mode ==
-                cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_PERSIST
-            ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
-            : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
-
     struct zmk_custom_setting_value internal_value;
-    int ret = zmk_custom_setting_deserialize_rpc_value(setting, &rpc_value, &internal_value);
+    ret = zmk_custom_setting_deserialize_rpc_value(setting, &rpc_value, &internal_value);
     reset_chunk_session_locked();
     k_mutex_unlock(&chunk_session_lock);
     if (ret < 0) {
@@ -2707,6 +2776,100 @@ static int custom_settings_chunked_rpc_test_init(void) {
 }
 
 SYS_INIT(custom_settings_chunked_rpc_test_init, APPLICATION, 99);
+
+/* issue #16: a value larger than the fixed carrier (and larger than one chunk
+ * frame) must round-trip over WriteValueChunk/ReadValueChunk into a
+ * large-sized setting's backing buffer. */
+static int custom_settings_large_chunked_rpc_test_init(void) {
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "large_bytes");
+    if (!setting) {
+        LOG_ERR("Large chunked RPC test setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    struct zmk_custom_settings_setting_ref ref = {
+        .has_custom_subsystem_id = true,
+        .has_key = true,
+        .has_source = true,
+        .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+    };
+    copy_string(ref.custom_subsystem_id, sizeof(ref.custom_subsystem_id), "test");
+    copy_string(ref.key, sizeof(ref.key), "large_bytes");
+
+    const uint32_t total = 200;
+    uint8_t payload[200];
+    for (uint32_t i = 0; i < total; i++) {
+        payload[i] = (uint8_t)(i * 3 + 1);
+    }
+
+    /* Write across two > single-frame-limited chunks (128 + 72). */
+    cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_write_value_chunk(
+        &ref, total, 0, payload, 128, false,
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_write_value_chunk(
+        &ref, total, 128, payload + 128, total - 128, true,
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+
+    uint8_t readback[200];
+    size_t out_size = 0;
+    ret = zmk_custom_setting_read_into(setting, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != total || memcmp(readback, payload, total) != 0) {
+        LOG_ERR("Large chunked write did not assemble the expected value: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    /* Read it back over two chunks. */
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_read_value_chunk(&ref, 0, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+    if (resp.which_response_type != cormoran_zmk_custom_settings_Response_value_chunk_tag ||
+        resp.response_type.value_chunk.total_size != total ||
+        resp.response_type.value_chunk.offset != 0 ||
+        resp.response_type.value_chunk.data.size != 128 || resp.response_type.value_chunk.last ||
+        memcmp(resp.response_type.value_chunk.data.bytes, payload, 128) != 0) {
+        LOG_ERR("Large chunked read head mismatch");
+        return -EINVAL;
+    }
+
+    resp = (cormoran_zmk_custom_settings_Response)cormoran_zmk_custom_settings_Response_init_zero;
+    ret = handle_private_read_value_chunk(&ref, 128, &resp);
+    if (ret < 0) {
+        return ret;
+    }
+    if (resp.response_type.value_chunk.offset != 128 ||
+        resp.response_type.value_chunk.data.size != total - 128 ||
+        !resp.response_type.value_chunk.last ||
+        memcmp(resp.response_type.value_chunk.data.bytes, payload + 128, total - 128) != 0) {
+        LOG_ERR("Large chunked read tail mismatch");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_large_chunked_rpc size=%u", (unsigned)total);
+    return 0;
+}
+
+SYS_INIT(custom_settings_large_chunked_rpc_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
