@@ -91,16 +91,16 @@ static void copy_value(struct zmk_custom_setting_value *dest,
 /*
  * Per-setting large-value backing store (issue #16).
  *
- * A BYTES/STRING setting registered with an explicit larger max_size keeps
- * its payload in a dedicated `large_data` buffer instead of the fixed-size
- * `memory_value` union, so one large setting does not inflate every other
- * setting. These helpers centralize deciding whether a setting uses that
- * store and reading/writing it, so the rest of the file only needs a handful
- * of `setting_uses_large_store()` branches at the value-access sites.
- *
- * A pooled setting (large_pool != NULL, ZMK_CUSTOM_SETTING_DEFINE_POOLED)
- * also uses this store, but its `large_data` is NULL until the first
- * non-empty write - see pool_ensure_region() below.
+ * A BYTES/STRING setting registered against a large-value pool
+ * (ZMK_CUSTOM_SETTING_DEFINE_POOLED, or ZMK_CUSTOM_SETTING_DEFINE_SIZED's
+ * private single-member pool) keeps its payload in a region carved from
+ * `large_pool` instead of the fixed-size `memory_value` union, so one large
+ * setting does not inflate every other setting. `large_data` is NULL until
+ * the first non-empty write - see pool_ensure_region() below - and is
+ * (re)pointed at a pool region on demand. These helpers centralize deciding
+ * whether a setting uses that store and reading/writing it, so the rest of
+ * the file only needs a handful of `setting_uses_large_store()` branches at
+ * the value-access sites.
  */
 static size_t setting_value_capacity(const struct zmk_custom_setting *setting) {
     return setting->value_max_size ? setting->value_max_size
@@ -108,7 +108,7 @@ static size_t setting_value_capacity(const struct zmk_custom_setting *setting) {
 }
 
 static bool setting_uses_large_store(const struct zmk_custom_setting *setting) {
-    return (setting->large_data != NULL || setting->large_pool != NULL) &&
+    return setting->large_pool != NULL &&
            (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
             setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING);
 }
@@ -125,6 +125,55 @@ static size_t pool_member_extent(const struct zmk_custom_setting *setting) {
            (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ? 1 : 0);
 }
 
+/* Link `setting` into `pool`'s intrusive member list. Caller holds
+ * settings_lock and must only call this the moment `setting->large_data`
+ * transitions from NULL to non-NULL (i.e. `setting` is not already a
+ * member). */
+static void pool_link_locked(struct zmk_custom_setting_large_pool *pool,
+                             struct zmk_custom_setting *setting) {
+    setting->_pool_next = pool->members;
+    pool->members = setting;
+}
+
+/* Unlink `setting` from `pool`'s intrusive member list. Caller holds
+ * settings_lock. A no-op if `setting` is not currently a member (e.g. it
+ * never allocated a region). */
+static void pool_unlink_locked(struct zmk_custom_setting_large_pool *pool,
+                               struct zmk_custom_setting *setting) {
+    if (pool->members == setting) {
+        pool->members = setting->_pool_next;
+        setting->_pool_next = NULL;
+        return;
+    }
+
+    struct zmk_custom_setting *prev = pool->members;
+    while (prev && prev->_pool_next != setting) {
+        prev = prev->_pool_next;
+    }
+    if (prev) {
+        prev->_pool_next = setting->_pool_next;
+        setting->_pool_next = NULL;
+    }
+}
+
+/*
+ * Release `setting`'s pool region (if any) and unlink it from its pool's
+ * member list. Caller holds settings_lock. Must run before a runtime-
+ * registered setting's storage is detached/reused (zmk_custom_settings_
+ * unregister) - otherwise the pool's member list would keep a dangling
+ * pointer at storage that no longer represents this setting (see the
+ * intrusive-list note on struct zmk_custom_setting_large_pool). A no-op for
+ * a non-pooled setting or one with no allocated region.
+ */
+static void pool_release_locked(struct zmk_custom_setting *setting) {
+    if (setting->large_pool == NULL || setting->large_data == NULL) {
+        return;
+    }
+    pool_unlink_locked(setting->large_pool, setting);
+    setting->large_data = NULL;
+    setting->large_size = 0;
+}
+
 /*
  * Ensure a pooled setting (setting->large_pool != NULL) has a region of at
  * least `needed` bytes (payload plus the STRING NUL, if any - the caller
@@ -138,23 +187,30 @@ static size_t pool_member_extent(const struct zmk_custom_setting *setting) {
  * Deliberately simple: no free lists, no per-region headers, no cached
  * bookkeeping. A region's extent is always derived on the spot from its
  * owning setting's current large_size, so "compacting" just means walking
- * every OTHER member of this pool that currently holds a region, sliding
- * each down (in ascending address order, via memmove, which tolerates the
- * overlapping src/dest this can produce) to eliminate any gap starting at
- * pool->data, and finally handing this setting whatever space is left right
- * after the last one. That happens on every growth, not only when strictly
- * necessary, but pools are expected to hold a handful of members, so this
- * stays cheap and never needs invalidating.
+ * every OTHER member of this pool (via the pool's own intrusive member list,
+ * not the global setting registry - see struct zmk_custom_setting_large_pool),
+ * sliding each down (in ascending address order, via memmove, which
+ * tolerates the overlapping src/dest this can produce) to eliminate any gap
+ * starting at pool->data, and finally handing this setting whatever space is
+ * left right after the last one. That happens on every growth, not only when
+ * strictly necessary, but pools are expected to hold a handful of members, so
+ * this stays cheap and never needs invalidating.
  *
  * Selecting members in ascending address order is done without an
  * intermediate array (repeatedly scanning for the lowest not-yet-processed
- * address) so this has no fixed cap on pool membership.
+ * address) so this has no fixed cap on pool membership. Every member walked
+ * here (other than `setting` itself, which may or may not be one yet) is by
+ * construction one with large_data != NULL, since that is the pool's
+ * membership invariant - see pool_link_locked/pool_unlink_locked.
  */
 static int pool_ensure_region(struct zmk_custom_setting *setting, size_t needed) {
     struct zmk_custom_setting_large_pool *pool = setting->large_pool;
 
     if (needed == 0) {
-        setting->large_data = NULL;
+        if (setting->large_data != NULL) {
+            pool_unlink_locked(pool, setting);
+            setting->large_data = NULL;
+        }
         return 0;
     }
 
@@ -167,8 +223,8 @@ static int pool_ensure_region(struct zmk_custom_setting *setting, size_t needed)
     /* Feasibility check before moving anything: every other member of this
      * pool keeps its current extent, plus the room this write needs. */
     size_t other_total = 0;
-    ZMK_CUSTOM_SETTING_FOREACH(other) {
-        if (other == setting || other->large_pool != pool || other->large_data == NULL) {
+    for (struct zmk_custom_setting *other = pool->members; other; other = other->_pool_next) {
+        if (other == setting) {
             continue;
         }
         other_total += pool_member_extent(other);
@@ -182,8 +238,8 @@ static int pool_ensure_region(struct zmk_custom_setting *setting, size_t needed)
     const uint8_t *last_addr = NULL;
     for (;;) {
         struct zmk_custom_setting *next = NULL;
-        ZMK_CUSTOM_SETTING_FOREACH(other) {
-            if (other == setting || other->large_pool != pool || other->large_data == NULL) {
+        for (struct zmk_custom_setting *other = pool->members; other; other = other->_pool_next) {
+            if (other == setting) {
                 continue;
             }
             if (have_last_addr && other->large_data <= last_addr) {
@@ -191,7 +247,7 @@ static int pool_ensure_region(struct zmk_custom_setting *setting, size_t needed)
                 continue;
             }
             if (!next || other->large_data < next->large_data) {
-                next = (struct zmk_custom_setting *)other;
+                next = other;
             }
         }
         if (!next) {
@@ -209,7 +265,11 @@ static int pool_ensure_region(struct zmk_custom_setting *setting, size_t needed)
         cursor += extent;
     }
 
+    bool was_member = setting->large_data != NULL;
     setting->large_data = cursor;
+    if (!was_member) {
+        pool_link_locked(pool, setting);
+    }
     return 0;
 }
 
@@ -282,10 +342,8 @@ size_t zmk_custom_setting_large_pool_used(const struct zmk_custom_setting_large_
 
     size_t used = 0;
     k_mutex_lock(&settings_lock, K_FOREVER);
-    ZMK_CUSTOM_SETTING_FOREACH(setting) {
-        if (setting->large_pool == pool) {
-            used += pool_member_extent(setting);
-        }
+    for (struct zmk_custom_setting *member = pool->members; member; member = member->_pool_next) {
+        used += pool_member_extent(member);
     }
     k_mutex_unlock(&settings_lock);
     return used;
@@ -2655,12 +2713,14 @@ static void keyspace_init_slot_setting_locked(struct zmk_custom_setting_keyspace
         .rpc_deserializer = keyspace->rpc_deserializer,
         .temp_slot = -1,
         .value_max_size = keyspace->max_size,
-        /* A keyspace whose max_size exceeds the fixed carrier gives each slot
-         * its own large_data row (issue #16); otherwise slots keep union
-         * storage (large_data == NULL). */
-        .large_data = keyspace->value_bufs
-                          ? keyspace->value_bufs + (size_t)index * keyspace->value_buf_stride
-                          : NULL,
+        /* A keyspace whose max_size exceeds the fixed carrier draws each
+         * slot's region from the keyspace's shared pool on demand (issue
+         * #16, exactly like ZMK_CUSTOM_SETTING_DEFINE_POOLED); otherwise
+         * slots keep union storage (large_pool == NULL, large_data ==
+         * NULL). large_data itself is left NULL here - a freshly (re)bound
+         * slot starts with no region until it is written a non-empty value,
+         * same as any pooled setting. */
+        .large_pool = keyspace->large_pool,
     };
 }
 
@@ -3153,6 +3213,12 @@ int zmk_custom_settings_unregister(struct zmk_custom_setting *desc) {
     if (runtime_settings_head == desc) {
         runtime_settings_head = desc->_runtime_next;
         desc->_runtime_next = NULL;
+        /* Release any pool region before this descriptor's storage is
+         * freed/reused by the caller - with the pool's intrusive member
+         * list (see struct zmk_custom_setting_large_pool), leaving `desc`
+         * linked in would corrupt the list the moment its memory is
+         * repurposed (e.g. a keyspace slot rebound to a different key). */
+        pool_release_locked(desc);
         k_mutex_unlock(&settings_lock);
         return 0;
     }
@@ -3169,6 +3235,7 @@ int zmk_custom_settings_unregister(struct zmk_custom_setting *desc) {
 
     prev->_runtime_next = desc->_runtime_next;
     desc->_runtime_next = NULL;
+    pool_release_locked(desc);
 
     k_mutex_unlock(&settings_lock);
     return 0;
