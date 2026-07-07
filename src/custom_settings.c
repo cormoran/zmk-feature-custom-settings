@@ -39,6 +39,12 @@ static K_MUTEX_DEFINE(settings_lock);
  * zmk_custom_settings_register() itself is split out into this helper. */
 static void register_runtime_locked(struct zmk_custom_setting *desc);
 
+/* Forward declaration: array_view_acquire() (defined below) recycles pooled
+ * views and must release any temporary override the evicted view still owns,
+ * but clear_temporary_locked() is defined further down alongside the rest of
+ * the temp-slot helpers. */
+static void clear_temporary_locked(struct zmk_custom_setting *setting);
+
 static size_t bounded_strlen(const char *str, size_t max_len) {
     size_t len = 0;
     while (len < max_len && str[len] != '\0') {
@@ -204,11 +210,18 @@ array_view_acquire(const struct zmk_custom_setting *array_descriptor, uint32_t i
     }
 
     if (!free_slot) {
-        /* Pool exhausted: recycle slot 0. This only affects a caller still
-         * holding a stale pointer for whichever (array, index) previously
-         * occupied that slot; normal usage (lookup, use immediately or
-         * briefly) is unaffected. */
+        /* Pool exhausted: recycle slot 0. Before overwriting it, release any
+         * temporary override the evicted view still owns. Ownership in
+         * temp_slots is tracked by view pointer, so without this the evicted
+         * element's temp slot would be leaked forever (in_use, but its owner
+         * address is about to be reused for a different element) and could
+         * later be aliased by owner-pointer to the new element that reuses
+         * this same view address. A caller still holding a stale pointer for
+         * the evicted (array, index) will observe the override cleared along
+         * with the value being redirected to the new element - an inherent
+         * limitation of holding a pointer past pool eviction. */
         free_slot = &array_view_pool[0];
+        clear_temporary_locked(&free_slot->view);
     }
 
     free_slot->in_use = true;
@@ -2905,12 +2918,39 @@ int zmk_custom_settings_register(struct zmk_custom_setting *desc) {
     return 0;
 }
 
+/* Release any pooled array_view slots belonging to array_state, clearing an
+ * active temporary override each still owns and freeing the pool slot. Used
+ * when the owning array descriptor is going away so its views cannot leak
+ * temp slots (owner pointer into pool storage that is about to be reused) or
+ * later alias a recycled pool entry. */
+static void release_array_views_locked(const struct zmk_custom_setting_array_state *array_state) {
+    for (size_t i = 0; i < ARRAY_SIZE(array_view_pool); i++) {
+        struct zmk_custom_setting_array_view_slot *slot = &array_view_pool[i];
+        if (slot->in_use && slot->view.array_state == array_state) {
+            clear_temporary_locked(&slot->view);
+            slot->in_use = false;
+        }
+    }
+}
+
 int zmk_custom_settings_unregister(struct zmk_custom_setting *desc) {
     if (!desc) {
         return -EINVAL;
     }
 
     k_mutex_lock(&settings_lock, K_FOREVER);
+
+    /* Release any temporary override slot owned by this descriptor (or, for
+     * an array, by any of its live element views) before detaching it. The
+     * descriptor's storage may be freed/reused by the caller after this
+     * returns, and temp/view slots track ownership by pointer - leaving a
+     * stale owner would leak the slot and could mis-attribute a later
+     * temp_slot_alloc collision or clear_temporary walk. */
+    if (zmk_custom_setting_is_array(desc) && desc->array_state) {
+        release_array_views_locked(desc->array_state);
+    } else {
+        clear_temporary_locked(desc);
+    }
 
     if (runtime_settings_head == desc) {
         runtime_settings_head = desc->_runtime_next;
