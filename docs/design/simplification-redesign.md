@@ -647,3 +647,121 @@ sketches above:
   opaque-blob encoding, ordinal persistence naming, and removal of the
   runtime-registration facility described in §5 are unchanged/deferred to
   Phase 3.
+
+## 13. Implementation notes (Phase 2 / Change 2, as landed)
+
+Phase 2 (`codex/simplify-p2-read-chunk`, stacked on Phase 1's
+`codex/simplify-p1-pools`) implemented §4 in full: `ReadValueChunkRequest` /
+`Request.read_value_chunk` (tag 9, now `reserved`) are deleted, and
+`GetSetting`/`ListSettings`/notifications stream `Setting.value`'s
+bytes/string payload of any size through a nanopb callback field. Notable
+findings and deviations from §4/§10's sketch:
+
+- **`ValueChunkResponse` was already dead weight for writes.** §10's open
+  question 2 asked whether the write ack still needs `ValueChunkResponse` or
+  can use a plain `StatusResponse`. Turned out `handle_private_write_value_chunk`
+  (every branch: chunk-received, large-value commit, small-value commit) was
+  already calling `set_status(...)` - `ValueChunkResponse` was wired into the
+  proto and the `Response` oneof but never actually constructed by the write
+  path, only by the now-deleted read path. So the message and the
+  `Response.value_chunk` field (tag 4, now `reserved`) are deleted outright
+  with **zero** change to the write-ack wire shape; nothing on the web side
+  needed to adapt (it only ever checked `resp.error`, confirmed by the
+  existing `chunkedValue.spec.ts` write test already mocking a `status`
+  response).
+- **One value-encode path for every size, not "small inline vs large fork".**
+  `setting_value_to_proto` decides the wire oneof arm
+  (`bytes_value`/`string_value`) from `setting->value_type` alone (a
+  compile-time-fixed property) and always wires a callback
+  (`encode_setting_scalar_value`); the callback itself, running during the
+  real `pb_encode`, does `zmk_custom_setting_read()` first and only falls
+  back to the large-store raw-pointer path (new
+  `zmk_custom_setting_with_large_raw_bytes()`, §4.2's "no intermediate copy")
+  on `-EMSGSIZE`. So a 3-byte value and a 3000-byte value go through the same
+  function; the RPC serializer converter is applied only in the small-value
+  branch, preserving the pre-P2 limitation that converters never see a
+  >carrier value (§11 open question 4: still not fixed, cost was judged
+  non-trivial for a Phase 2 change and is left for a future pass if ever
+  needed).
+- **Decode needs a scratch buffer, not just an encode callback.** §4.2 does
+  not mention decode, but making `bytes_value`/`string_value` `FT_CALLBACK`
+  affects *decode* at every site that embeds a `SettingValue`
+  (`WriteSettingRequest`, `CreateSettingRequest`, and their relayed
+  equivalents), since the field no longer has `.bytes`/`.size` struct members
+  a decoder can read after the fact. `decode_into_bounded_scratch()` (a
+  generic `struct bounded_decode_scratch { buf, capacity, size }` + callback)
+  fills a bounded destination at decode time instead; `proto_to_value()` was
+  changed to take that scratch explicitly rather than reading the old
+  fields. Three independent scratch instances exist (not one shared global):
+  `g_write_value_decode_scratch` (local Studio RPC `Request` decode, capacity
+  = `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`, matching the old
+  `max_size:64` cap - a write bigger than one frame still needs
+  `WriteValueChunk`), `relay_request_write_value_decode_scratch` (relayed
+  `RelayRequest` decode, same capacity), and
+  `relay_notification_value_decode_scratch` (relayed `RelayNotification`
+  decode, capacity = the relay envelope size, which can exceed one RPC frame
+  - see the next point). Each is declared right before its sole decode call
+  site; sharing was avoided even where the code *could* prove single-flight
+  safety, to keep that invariant local and not load-bearing project-wide.
+- **A decoded value sometimes needs to become an encode source again.** Two
+  sites decode a `SettingValue` and then must re-encode the *same* bytes into
+  a different message without a live `struct zmk_custom_setting *` to stream
+  from: (a) `request_to_relay_request`'s `write_setting` case, forwarding a
+  just-decoded `WriteSettingRequest.value` into a `RelayRequest` for the
+  peripheral; (b) `relayed_notification_to_public`, decoding a
+  `RelayNotification` from a peripheral and handing the result to
+  `raise_encoded_studio_notification` for a fresh local `pb_encode`. Since
+  `pb_callback_t.funcs` is a union (`decode`/`encode` alias the same memory),
+  a struct copy of an already-decoded `SettingValue` carries a *decode*-role
+  callback that must be explicitly re-targeted to *encode* role before the
+  next `pb_encode` - `retarget_value_to_encode_scratch()` does this (a no-op
+  for every `which_value_type` other than bytes_value/string_value). Missing
+  this at either site would silently emit garbage-interpreted-as-a-function-
+  pointer instead of a decode error, since nanopb has no way to detect "wrong
+  union member in use."
+- **The relay landmine is real but only for notifications, not requests.**
+  §4 doesn't discuss the split relay at all (it was written before Phase
+  1/§3.4's pool-member-list groundwork made the relay-value question
+  concrete). Investigation found: `WriteSettingRequest.value` forwarded
+  central→peripheral was *already* bounded to one RPC frame's worth
+  (≤`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`) by the decode scratch, so
+  the request-relay path needed no special handling beyond the retarget
+  above. Only the *notification* path (peripheral→central, `Setting.value`
+  streamed through `encode_setting_scalar_value`) can now produce a value
+  larger than the fixed `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` relay
+  envelope, since direct encoding has no size cap any more. Fix: attempt the
+  full `pb_encode` of the `RelayNotification` first; if it fails **and**
+  `has_value` was set, clear `has_value` and retry once before giving up -
+  this preserves the pre-P2 behavior (an oversized value is omitted, not a
+  lost notification) without needing to precompute a byte-accurate budget
+  ahead of encoding (the retry is exact by construction, unlike a
+  size-estimate-then-decide approach). One knock-on effect: a value that
+  fits the relay envelope but exceeds `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`
+  can now be relayed when it could not be before (the old cap was
+  incidentally tied to the carrier, not the actual envelope budget) - the
+  README's "large values are not relayed" note was reworded to describe the
+  real (envelope-based) limit rather than implying the old carrier-based one.
+- **Self-tests needed a real `pb_encode`/`pb_decode`, not struct pokes.**
+  Every test that used to read `proto_setting.value.value_type.bytes_value.bytes[i]`
+  directly (there is no such member on a callback field) now round-trips
+  through `test_encode_setting()`/`test_decode_setting()` (thin wrappers
+  around a real `pb_encode`/`pb_decode`), which incidentally makes those
+  tests exercise the exact code path a real RPC client does. The native_sim
+  `custom_settings_large_chunked_rpc_test_init` self-test (named in the task
+  as the one to rewrite) keeps its chunked-write half unchanged and replaces
+  the two-chunk `ReadValueChunk` read-back with one `GetSetting`-style encode
+  into a 512-byte buffer, decoded and compared byte-exact against the
+  original 200-byte payload - this is what stands in for hardware validation
+  of the streaming path pending the orchestrator's real-device pass.
+- **Golden snapshots did not need regeneration.** The task anticipated the
+  chunked-RPC self-tests' `PASS:` lines would change and snapshots would need
+  regenerating. In practice the rewritten tests kept their exact
+  `LOG_INF("PASS: ...")` wording (same test name, same logged values - only
+  *how* the value was read back changed, not what was asserted or printed),
+  so `tests/{studio,test,split_peripheral}/keycode_events.snapshot` diffed
+  clean against the actual rebuilt output with no edits.
+- **Pending:** real-hardware validation of the streaming `GetSetting` path
+  (the native_sim self-test proves the encode/decode plumbing; it does not
+  exercise the ZMK Studio RPC TX chunking behavior on real hardware the way
+  Phase 1 / issue #24 validated `CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=64` serving
+  a 128-byte value). Left for the orchestrator per the task's scope.

@@ -65,13 +65,15 @@ CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
 RPC requests.
 `CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE` should be increased because listing
 settings builds encoded notifications from the low priority workqueue.
-When Studio RPC is enabled, a single-frame setting value is limited to 64 bytes
-and setting keys are limited to 48 bytes by the generated RPC schema. Individual
+When Studio RPC is enabled, a single-frame *write* is limited to 64 bytes (the
+`WriteSetting` request decodes into a fixed carrier) and setting keys are
+limited to 48 bytes by the generated RPC schema; reads have no such limit
+(`GetSetting`/`ListSettings` stream a value of any size). Individual
 `ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES`/`ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING`
 settings can hold larger values (up to
 `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE`) by registering with an
-explicit per-setting `max_size` and transferring the value over the chunked
-RPC — see [Large Values](#large-values-per-setting-max_size).
+explicit per-setting `max_size` and writing the value over the chunked RPC —
+see [Large Values](#large-values-per-setting-max_size).
 
 ### Split Keyboards
 
@@ -94,9 +96,9 @@ The custom settings relay payload size is
 source and encoded payload size. Larger keys, setting values, or metadata-heavy
 list responses may need a larger BLE MTU and split relay event data size.
 
-Values larger than a single RPC frame
-(`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`) are **not** relayed across the
-split — the notification omits an oversized value. See
+Values that do not fit the relay envelope are **not** relayed across the
+split — the notification omits an oversized value rather than failing — and
+there is no chunked-write-over-relay path either. See
 [Large Values](#large-values-per-setting-max_size) for the details.
 
 ### Register Settings
@@ -360,16 +362,20 @@ Which knob is authoritative:
 - `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE` is the ceiling for any
   per-setting `max_size` and for the shared chunk/record staging buffers.
 
-A value larger than `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is only
-reachable through:
+A value larger than `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is reachable
+through:
 
 - the firmware API `zmk_custom_setting_write_bytes` / `zmk_custom_setting_read_into`
   (the fixed-carrier `zmk_custom_setting_read`/`write` return `-EMSGSIZE` for an
-  oversized value rather than truncating it), and
-- the chunked `ReadValueChunk`/`WriteValueChunk` RPC (see below). The
-  single-frame `GetSetting` response omits an oversized value (`has_value`
-  unset) so the client knows to fetch it in chunks; the web UI does this
-  automatically.
+  oversized value rather than truncating it);
+- **reading** it: the plain `GetSetting`/`ListSettings` RPC response streams a
+  value of any size — the ZMK Studio RPC transport's send path streams a
+  response incrementally regardless of size, so there is no read-side chunking
+  RPC (there used to be a `ReadValueChunk`; it is gone);
+- **writing** it: the chunked `WriteValueChunk` RPC (see below) — the receive
+  path buffers a whole request frame *before* decoding it, so a value bigger
+  than one frame genuinely cannot arrive any other way; the web UI does this
+  automatically once a `bytes`/`string` edit exceeds one frame.
 
 `ZMK_CUSTOM_SETTING_DEFINE_SIZED` also works for record settings — size the
 underlying `BYTES` setting so the encoded record fits — and keyspaces accept a
@@ -377,14 +383,18 @@ larger `max_size` too (a keyspace with a large `max_size` draws every entry's
 region from its own per-keyspace pool the same way — see
 [RPC-Creatable Keyspaces](#rpc-creatable-keyspaces)).
 
-> **Large values are local-only on split keyboards.** A value larger than
-> `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is only reachable on the half that
-> owns the setting, via the firmware API or the chunked RPC. It is **not**
-> carried across the split relay: a peripheral setting-changed notification
-> omits an oversized value (`has_value` unset, cleanly — no crash), and there is
-> no chunked-RPC-over-relay path, so a central cannot read or write a
-> peripheral's large value. Register large settings on the half whose RPC client
-> (Studio) talks to them.
+> **Large values are effectively local-only on split keyboards.** A value
+> larger than `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is fully readable and
+> writable only on the half that owns the setting, via the firmware API or the
+> RPCs above. The split relay envelope
+> (`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN`) is a small fixed buffer, unlike the
+> direct RPC path: a peripheral setting-changed notification includes a value
+> only if it fits that envelope (which may be smaller or a little larger than
+> `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` depending on configuration) and
+> otherwise omits it cleanly (`has_value` unset, no crash); there is no
+> chunked-write-over-relay path, so a central cannot write a peripheral's large
+> value at all. Register large settings on the half whose RPC client (Studio)
+> talks to them.
 
 ### Shared Large-Value Pools
 
@@ -446,26 +456,33 @@ same policy already used for keyspace-pool exhaustion.
 `zmk_custom_setting_large_pool_used(&pool)` returns the pool's current total
 usage, useful for a UI showing remaining budget.
 
-### Reading And Writing Large Values In Chunks
+### Reading And Writing Large Values
 
-`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC` (enabled by default alongside Studio
-RPC) adds `ReadValueChunk`/`WriteValueChunk` requests for bytes/string
-settings. Each response or request carries one chunk (bounded by the
-protobuf schema, independent of `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`),
-so a value can be moved across several RPC frames instead of needing to fit
-alongside its metadata in a single `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` frame:
+Reading a large value needs no special RPC: `GetSetting`/`ListSettings`
+stream `Setting.value`'s bytes/string payload directly, regardless of size.
+This works because the ZMK Studio RPC transport's send path streams a
+response incrementally — `CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE` is a
+transmit-chunk size, not a maximum response length — so nothing but the old
+fixed-size protobuf field was ever standing in the way. (Before this, a value
+past `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` was omitted from the
+response and had to be fetched with a now-removed `ReadValueChunk` RPC.)
 
-- Read: send `ReadValueChunkRequest{setting, offset}` starting at `offset =
-  0` and keep increasing `offset` by the returned chunk length until the
-  response reports `last = true`. Reads are stateless; chunks may be
-  re-read or read out of order.
-- Write: send `WriteValueChunkRequest{setting, total_size, offset, data,
-  commit, mode}` starting at `offset = 0`. Chunks for one transfer must
-  arrive in order; the value is validated and applied only when a chunk
-  sets `commit = true`, so a partially-sent value is never observable by
-  readers. Only one write transfer is staged at a time
-  (`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE`); starting a new
-  transfer (`offset = 0`) for any setting replaces an abandoned one.
+Writing a large value still needs chunking: the receive path buffers a whole
+request frame into `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE` *before* nanopb decodes
+it, so a value bigger than one frame genuinely cannot arrive in a single
+`WriteSetting` request. `CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC` (enabled by
+default alongside Studio RPC) adds the `WriteValueChunk` request for
+bytes/string settings:
+
+- Send `WriteValueChunkRequest{setting, total_size, offset, data, commit,
+  mode}` starting at `offset = 0`. Each request carries one chunk (bounded by
+  the protobuf schema, independent of
+  `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`). Chunks for one transfer must
+  arrive in order; the value is validated and applied only when a chunk sets
+  `commit = true`, so a partially-sent value is never observable by readers.
+  Only one write transfer is staged at a time
+  (`CONFIG_ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE`); starting a new transfer
+  (`offset = 0`) for any setting replaces an abandoned one.
 
 ### Array Settings
 
@@ -630,8 +647,8 @@ entry then draws its region from one pool private to that keyspace (sized
 buffer would have reserved), so `max_size` and `max_entries` stay independent
 knobs — a handful of near-`max_size` entries and many small ones draw from the
 same budget rather than each slot reserving its own worst case. Large entries
-transfer over the [chunked RPC](#large-values-per-setting-max_size) like any
-other large value.
+read and write like any other [large value](#large-values-per-setting-max_size)
+(streamed on read, chunked on write).
 
 Once created, an entry is a full citizen of the registry: it is find-able
 (`zmk_custom_setting_find("my_module", "macro/my-macro-1")`), discoverable via

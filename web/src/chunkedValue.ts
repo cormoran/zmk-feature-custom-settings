@@ -1,11 +1,15 @@
-// Chunked large-value transfer helpers (issue #16).
+// Chunked large-value write helper (issue #16 / simplification P2).
 //
-// A single-frame SettingValue only carries up to
-// CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE (64) bytes, so a larger BYTES /
-// STRING value is transferred over the ReadValueChunk / WriteValueChunk RPCs.
-// These helpers assemble / split such a value; they take a plain
-// `callRPC(request) => Promise<Response>` so they can be unit tested without a
-// live connection.
+// The RX path buffers a whole frame before nanopb decodes it, so a BYTES /
+// STRING value bigger than one frame still has to be written over several
+// WriteValueChunk RPCs. Reading no longer needs chunking: GetSetting/
+// ListSettings now stream a value of any size directly (the RPC transport's
+// TX path streams its response incrementally, unlike RX), so
+// ReadValueChunk/readValueChunked is gone - see App.tsx's getSetting, which
+// just uses the plain GetSetting response.
+//
+// This helper takes a plain `callRPC(request) => Promise<Response>` so it can
+// be unit tested without a live connection.
 
 import {
   Request,
@@ -15,66 +19,14 @@ import {
 } from "./proto/cormoran/zmk/custom_settings/custom_settings";
 
 // Largest value that still fits a single non-chunked SettingValue frame. A
-// value larger than this is read/written over the chunked RPC instead.
+// value larger than this is written over the chunked RPC instead (reads of
+// any size go through the plain GetSetting response).
 export const SINGLE_FRAME_VALUE_MAX = 64;
-// Chunk payload size (matches WriteValueChunkRequest.data / ValueChunkResponse
-// max_size:128 in the proto options).
+// Chunk payload size (matches WriteValueChunkRequest.data max_size:128 in the
+// proto options).
 export const CHUNK_DATA_MAX = 128;
 
 export type CallRPC = (request: Request) => Promise<Response>;
-
-function concatChunks(parts: Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const part of parts) {
-    out.set(part.subarray(0, Math.min(part.length, total - offset)), offset);
-    offset += part.length;
-    if (offset >= total) {
-      break;
-    }
-  }
-  return out;
-}
-
-// Read a large BYTES/STRING value in full by repeating ReadValueChunk until the
-// device reports the last chunk. Stateless on the device side, so chunks are
-// requested in order starting at offset 0.
-export async function readValueChunked(
-  callRPC: CallRPC,
-  setting: SettingRef
-): Promise<Uint8Array> {
-  const parts: Uint8Array[] = [];
-  let offset = 0;
-  let total = 0;
-
-  // Guard against a misbehaving device by bounding the loop to a generous
-  // number of chunks.
-  for (let guard = 0; guard < 4096; guard++) {
-    const resp = await callRPC(
-      Request.create({ readValueChunk: { setting, offset } })
-    );
-    if (resp.error) {
-      throw new Error(resp.error.message || "Read chunk failed");
-    }
-    const chunk = resp.valueChunk;
-    if (!chunk) {
-      throw new Error("Read chunk response had no value chunk");
-    }
-    total = chunk.totalSize ?? 0;
-    const data = chunk.data ?? new Uint8Array();
-    parts.push(data);
-    offset += data.length;
-    if (chunk.last || (data.length === 0 && offset >= total)) {
-      break;
-    }
-    if (data.length === 0) {
-      // No progress and not marked last: bail rather than spin forever.
-      break;
-    }
-  }
-
-  return concatChunks(parts, total);
-}
 
 // Write a large BYTES/STRING value by splitting it into CHUNK_DATA_MAX frames.
 // The first frame (offset 0) opens the transfer and declares total_size; the
