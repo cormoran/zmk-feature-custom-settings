@@ -310,6 +310,31 @@ ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_macro_keyspace, "test", "macro/",
                                    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 /*
+ * Simplification P1 (Change 1, task 3): a keyspace whose max_size exceeds the
+ * fixed carrier draws every slot's region from a per-keyspace
+ * ZMK_CUSTOM_SETTING_LARGE_POOL instead of a dedicated value_bufs row -
+ * exactly like ZMK_CUSTOM_SETTING_DEFINE_POOLED. max_entries (2) and max_size
+ * (100) are chosen so the pool's worst-case budget (max_entries * (max_size +
+ * 1) = 202 bytes) exactly fits two simultaneous full-size entries - the same
+ * capacity a dedicated per-slot buffer would have guaranteed, just carved on
+ * demand instead of reserved up front.
+ */
+#define TEST_KEYSPACE_LARGE_MAX_SIZE 100
+
+static const struct zmk_custom_setting_value test_blob_keyspace_default_value =
+    ZMK_CUSTOM_SETTING_VALUE_BYTES(0);
+
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_blob_keyspace, "test", "blob/",
+                                   ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+                                   /* max_size = */ TEST_KEYSPACE_LARGE_MAX_SIZE,
+                                   /* max_key_len = */ 16,
+                                   /* max_entries = */ 2, test_blob_keyspace_default_value,
+                                   ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/*
  * issue #16: a BYTES setting able to store a value much larger than the fixed
  * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE carrier, using its own right-sized
  * per-setting backing buffer (ZMK_CUSTOM_SETTING_DEFINE_SIZED). Large values
@@ -2602,6 +2627,136 @@ static int test_large_value_pool(void) {
     return 0;
 }
 
+/*
+ * Simplification P1 (Change 1, task 3): a keyspace entry whose value exceeds
+ * the fixed carrier round-trips through the keyspace's own
+ * ZMK_CUSTOM_SETTING_LARGE_POOL - the same mechanism ZMK_CUSTOM_SETTING_
+ * DEFINE_POOLED uses, just scoped to one keyspace's slots instead of a
+ * caller-shared pool. Also exercises that a deleted entry's pool region is
+ * released (via zmk_custom_settings_unregister -> pool_release_locked), not
+ * just its slot.
+ */
+static int test_keyspace_large_value(void) {
+    int ret = zmk_custom_settings_register_keyspace(&test_blob_keyspace);
+    if (ret < 0) {
+        LOG_ERR("zmk_custom_settings_register_keyspace(test_blob_keyspace) failed: %d", ret);
+        return ret;
+    }
+
+    if (zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool) != 0) {
+        LOG_ERR("Keyspace pool should start empty");
+        return -EINVAL;
+    }
+
+    const struct zmk_custom_setting *created = NULL;
+    ret = zmk_custom_setting_keyspace_create(&test_blob_keyspace, "blob/one",
+                                             &ZMK_CUSTOM_SETTING_VALUE_BYTES(1, 2, 3),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0 || !created) {
+        LOG_ERR("Failed to create blob/one: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+
+    /* Grow the entry past the fixed carrier via write_bytes, exactly like a
+     * DEFINE_POOLED/DEFINE_SIZED setting - the slot's large_data starts NULL
+     * (no region allocated by create() for a value that fits the carrier)
+     * and pool_ensure_region() carves one on this write. */
+    uint8_t payload[TEST_KEYSPACE_LARGE_MAX_SIZE];
+    fill_pool_test_pattern(payload, sizeof(payload), 5);
+    ret = zmk_custom_setting_write_bytes(created, payload, sizeof(payload),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_ERR("Writing max-size blob/one failed: %d", ret);
+        return ret;
+    }
+
+    /* A second full-size entry must also fit - the pool's worst-case budget
+     * (max_entries * (max_size + 1)) matches what two dedicated per-slot
+     * buffers would have reserved, so this is not a capacity regression. */
+    const struct zmk_custom_setting *created2 = NULL;
+    ret = zmk_custom_setting_keyspace_create(&test_blob_keyspace, "blob/two",
+                                             &ZMK_CUSTOM_SETTING_VALUE_BYTES(9),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created2);
+    if (ret < 0 || !created2) {
+        LOG_ERR("Failed to create blob/two: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+    uint8_t payload2[TEST_KEYSPACE_LARGE_MAX_SIZE];
+    fill_pool_test_pattern(payload2, sizeof(payload2), 19);
+    ret = zmk_custom_setting_write_bytes(created2, payload2, sizeof(payload2),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Writing max-size blob/two failed (pool budget regression?): %d", ret);
+        return ret;
+    }
+
+    uint8_t readback[TEST_KEYSPACE_LARGE_MAX_SIZE];
+    size_t out_size = 0;
+    ret = zmk_custom_setting_read_into(created, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload) || memcmp(readback, payload, sizeof(payload)) != 0) {
+        LOG_ERR("Keyspace pooled read-back mismatch for blob/one: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    /* Clobber blob/one in RAM, then discard: the persisted large value must
+     * be restored from the keyspace pool exactly like any other pooled
+     * setting's discard. */
+    uint8_t clobber[10];
+    memset(clobber, 0xEE, sizeof(clobber));
+    ret = zmk_custom_setting_write_bytes(created, clobber, sizeof(clobber),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_discard(created);
+    if (ret < 0) {
+        LOG_ERR("Discarding blob/one failed: %d", ret);
+        return ret;
+    }
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(created, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload) || memcmp(readback, payload, sizeof(payload)) != 0) {
+        LOG_ERR("Keyspace pooled discard did not restore persisted value: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    size_t used_before_delete = zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool);
+    if (used_before_delete != sizeof(payload) + sizeof(payload2)) {
+        LOG_ERR("Unexpected keyspace pool usage before delete: %u", (unsigned)used_before_delete);
+        return -EINVAL;
+    }
+
+    /* Deleting an entry must release its pool region, not just its slot -
+     * zmk_custom_setting_keyspace_delete -> zmk_custom_settings_unregister ->
+     * pool_release_locked. */
+    ret = zmk_custom_setting_keyspace_delete(&test_blob_keyspace, "blob/one");
+    if (ret < 0) {
+        LOG_ERR("Deleting blob/one failed: %d", ret);
+        return ret;
+    }
+    size_t used_after_delete = zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool);
+    if (used_after_delete != used_before_delete - sizeof(payload)) {
+        LOG_ERR("Keyspace pool usage did not drop after delete: before=%u after=%u",
+                (unsigned)used_before_delete, (unsigned)used_after_delete);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_keyspace_delete(&test_blob_keyspace, "blob/two");
+    if (ret < 0) {
+        LOG_ERR("Deleting blob/two failed: %d", ret);
+        return ret;
+    }
+    if (zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool) != 0) {
+        LOG_ERR("Keyspace pool should be empty after deleting every entry");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_large_value size=%u", (unsigned)sizeof(payload));
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2694,6 +2849,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_large_value_pool();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_large_value();
     if (ret < 0) {
         return ret;
     }
