@@ -2,8 +2,17 @@
 
 cormoran.zmk.custom_settings.SettingScalarValue.bytes_value max_size:64
 cormoran.zmk.custom_settings.SettingScalarValue.string_value max_size:64
-cormoran.zmk.custom_settings.SettingValue.bytes_value max_size:64
-cormoran.zmk.custom_settings.SettingValue.string_value max_size:64
+
+# Simplification P2: the top-level Setting.value bytes/string payload is
+# encoded/decoded through a callback instead of a fixed inline array, so
+# GetSetting/ListSettings can stream a value of any size (see
+# encode_setting_scalar_value / decode_setting_scalar_value in
+# custom_settings_handler.c) instead of omitting it past max_size and forcing
+# a client to fall back to the (now deleted) ReadValueChunk RPC. Array/scalar
+# values (SettingScalarValue above, used by array elements and constraints)
+# are unaffected and stay inline-capped at 64 bytes.
+cormoran.zmk.custom_settings.SettingValue.bytes_value type:FT_CALLBACK
+cormoran.zmk.custom_settings.SettingValue.string_value type:FT_CALLBACK
 
 cormoran.zmk.custom_settings.SettingConstraintOptions.values max_count:8
 cormoran.zmk.custom_settings.SettingConstraintOptions.labels max_count:8
@@ -22,4 +31,3 @@ cormoran.zmk.custom_settings.StatusResponse.message max_size:96
 # value larger than one RPC frame can still be transferred over several
 # chunks once per-setting value capacity grows past CHUNK_MAX_SIZE.
 cormoran.zmk.custom_settings.WriteValueChunkRequest.data max_size:128
-cormoran.zmk.custom_settings.ValueChunkResponse.data max_size:128

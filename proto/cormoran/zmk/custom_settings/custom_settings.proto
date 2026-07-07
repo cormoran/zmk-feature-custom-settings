@@ -190,15 +190,6 @@ message DiscardSettingsRequest { SettingScope scope = 1; }
 
 message ResetSettingsRequest { SettingScope scope = 1; }
 
-// Read one chunk of a bytes/string setting value starting at offset. Repeat
-// with increasing offset (0, then response.offset + response.data length,
-// ...) until the response reports last = true. Stateless: chunks may be
-// re-read or read out of order.
-message ReadValueChunkRequest {
-    SettingRef setting = 1;
-    uint32 offset = 2;
-}
-
 // Write one chunk of a bytes/string setting value. The first chunk (offset =
 // 0) opens a transfer session and declares total_size; subsequent chunks for
 // the same setting must arrive in order (offset must equal the number of
@@ -215,6 +206,11 @@ message WriteValueChunkRequest {
 }
 
 message Request {
+    // 9 used to be ReadValueChunkRequest (simplification P2): GetSetting /
+    // ListSettings now stream a value of any size directly (see
+    // SettingValue.bytes_value / string_value in the .options file).
+    reserved 9;
+
     oneof request_type {
         ListSettingsRequest list_settings = 1;
         GetSettingRequest get_setting = 2;
@@ -224,7 +220,6 @@ message Request {
         ResetSettingsRequest reset_settings = 6;
         PushBackArrayRequest push_back_array = 7;
         PopBackArrayRequest pop_back_array = 8;
-        ReadValueChunkRequest read_value_chunk = 9;
         WriteValueChunkRequest write_value_chunk = 10;
         CreateSettingRequest create_setting = 11;
         DeleteSettingRequest delete_setting = 12;
@@ -240,19 +235,17 @@ message StatusResponse {
 
 message GetSettingResponse { Setting setting = 1; }
 
-message ValueChunkResponse {
-    uint32 total_size = 1;
-    uint32 offset = 2;
-    bytes data = 3;
-    bool last = 4;
-}
-
 message Response {
+    // 4 used to be ValueChunkResponse: WriteValueChunk's ack was always a
+    // plain StatusResponse (see handle_private_write_value_chunk) even before
+    // simplification P2, so deleting the read-only ValueChunkResponse message
+    // does not change the write-ack wire shape at all.
+    reserved 4;
+
     oneof response_type {
         ErrorResponse error = 1;
         StatusResponse status = 2;
         GetSettingResponse get_setting = 3;
-        ValueChunkResponse value_chunk = 4;
     }
 }
 
