@@ -97,6 +97,10 @@ static void copy_value(struct zmk_custom_setting_value *dest,
  * setting. These helpers centralize deciding whether a setting uses that
  * store and reading/writing it, so the rest of the file only needs a handful
  * of `setting_uses_large_store()` branches at the value-access sites.
+ *
+ * A pooled setting (large_pool != NULL, ZMK_CUSTOM_SETTING_DEFINE_POOLED)
+ * also uses this store, but its `large_data` is NULL until the first
+ * non-empty write - see pool_ensure_region() below.
  */
 static size_t setting_value_capacity(const struct zmk_custom_setting *setting) {
     return setting->value_max_size ? setting->value_max_size
@@ -104,46 +108,187 @@ static size_t setting_value_capacity(const struct zmk_custom_setting *setting) {
 }
 
 static bool setting_uses_large_store(const struct zmk_custom_setting *setting) {
-    return setting->large_data != NULL &&
+    return (setting->large_data != NULL || setting->large_pool != NULL) &&
            (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
             setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING);
 }
 
+/* Bytes a pool member currently occupies: its payload plus the trailing NUL
+ * for STRING (large_store_set_raw always writes that NUL inside the region,
+ * so it must count toward the region's extent). 0 for a member with no
+ * region (large_data == NULL). */
+static size_t pool_member_extent(const struct zmk_custom_setting *setting) {
+    if (setting->large_data == NULL) {
+        return 0;
+    }
+    return setting->large_size +
+           (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ? 1 : 0);
+}
+
+/*
+ * Ensure a pooled setting (setting->large_pool != NULL) has a region of at
+ * least `needed` bytes (payload plus the STRING NUL, if any - the caller
+ * computes this the same way pool_member_extent does). Caller holds
+ * settings_lock. Returns 0 on success or -ENOSPC if the pool cannot fit
+ * `needed` bytes for this setting even after compacting every other member;
+ * on -ENOSPC nothing is modified - not `setting`, not any other pool
+ * member - so the write that requested this region can fail cleanly with the
+ * setting's previous value untouched.
+ *
+ * Deliberately simple: no free lists, no per-region headers, no cached
+ * bookkeeping. A region's extent is always derived on the spot from its
+ * owning setting's current large_size, so "compacting" just means walking
+ * every OTHER member of this pool that currently holds a region, sliding
+ * each down (in ascending address order, via memmove, which tolerates the
+ * overlapping src/dest this can produce) to eliminate any gap starting at
+ * pool->data, and finally handing this setting whatever space is left right
+ * after the last one. That happens on every growth, not only when strictly
+ * necessary, but pools are expected to hold a handful of members, so this
+ * stays cheap and never needs invalidating.
+ *
+ * Selecting members in ascending address order is done without an
+ * intermediate array (repeatedly scanning for the lowest not-yet-processed
+ * address) so this has no fixed cap on pool membership.
+ */
+static int pool_ensure_region(struct zmk_custom_setting *setting, size_t needed) {
+    struct zmk_custom_setting_large_pool *pool = setting->large_pool;
+
+    if (needed == 0) {
+        setting->large_data = NULL;
+        return 0;
+    }
+
+    if (setting->large_data != NULL && needed <= pool_member_extent(setting)) {
+        /* Shrinking (or an unchanged size) keeps writing into the same
+         * region - no need to move anything. */
+        return 0;
+    }
+
+    /* Feasibility check before moving anything: every other member of this
+     * pool keeps its current extent, plus the room this write needs. */
+    size_t other_total = 0;
+    ZMK_CUSTOM_SETTING_FOREACH(other) {
+        if (other == setting || other->large_pool != pool || other->large_data == NULL) {
+            continue;
+        }
+        other_total += pool_member_extent(other);
+    }
+    if (other_total + needed > pool->size) {
+        return -ENOSPC;
+    }
+
+    uint8_t *cursor = pool->data;
+    bool have_last_addr = false;
+    const uint8_t *last_addr = NULL;
+    for (;;) {
+        struct zmk_custom_setting *next = NULL;
+        ZMK_CUSTOM_SETTING_FOREACH(other) {
+            if (other == setting || other->large_pool != pool || other->large_data == NULL) {
+                continue;
+            }
+            if (have_last_addr && other->large_data <= last_addr) {
+                /* Already compacted in an earlier iteration. */
+                continue;
+            }
+            if (!next || other->large_data < next->large_data) {
+                next = (struct zmk_custom_setting *)other;
+            }
+        }
+        if (!next) {
+            break;
+        }
+
+        have_last_addr = true;
+        last_addr = next->large_data;
+
+        size_t extent = pool_member_extent(next);
+        if (next->large_data != cursor) {
+            memmove(cursor, next->large_data, extent);
+            next->large_data = cursor;
+        }
+        cursor += extent;
+    }
+
+    setting->large_data = cursor;
+    return 0;
+}
+
 /* Store `size` raw payload bytes into a large-store setting's buffer. Caller
- * must have validated size <= setting_value_capacity(setting). */
-static void large_store_set_raw(struct zmk_custom_setting *setting, const void *data, size_t size) {
-    memcpy(setting->large_data, data, size);
-    if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+ * must have validated size <= setting_value_capacity(setting). For a pooled
+ * setting, first (re)points large_data at a big-enough region via
+ * pool_ensure_region(), possibly relocating other members of the same pool;
+ * on -ENOSPC nothing is modified. */
+static int large_store_set_raw(struct zmk_custom_setting *setting, const void *data, size_t size) {
+    if (setting->large_pool != NULL) {
+        size_t needed =
+            size + (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ? 1 : 0);
+        int ret = pool_ensure_region(setting, needed);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    if (size > 0) {
+        memcpy(setting->large_data, data, size);
+    }
+    if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING &&
+        setting->large_data != NULL) {
         setting->large_data[size] = '\0';
     }
     setting->large_size = size;
+    return 0;
 }
 
 /* Copy a small carrier value (BYTES/STRING, <= carrier size) into a
  * large-store setting's buffer - used when a large-capable setting is written
  * with a value that happens to fit the fixed carrier (the normal
- * zmk_custom_setting_write / default-application path). */
-static void large_store_set_value(struct zmk_custom_setting *setting,
-                                  const struct zmk_custom_setting_value *value) {
+ * zmk_custom_setting_write / default-application path). Returns -ENOSPC for
+ * a pooled setting whose backing pool has no room (see large_store_set_raw);
+ * the setting's previous value is left untouched in that case. */
+static int large_store_set_value(struct zmk_custom_setting *setting,
+                                 const struct zmk_custom_setting_value *value) {
     if (value->type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
         size_t len = bounded_strlen(value->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
         len = MIN(len, setting_value_capacity(setting));
-        large_store_set_raw(setting, value->string_value, len);
+        return large_store_set_raw(setting, value->string_value, len);
     } else {
         size_t len = MIN(value->size, setting_value_capacity(setting));
-        large_store_set_raw(setting, value->bytes_value, len);
+        return large_store_set_raw(setting, value->bytes_value, len);
     }
 }
 
 /* Apply a scalar setting's compile-time default to its memory storage,
  * routing large-store settings to their buffer and everything else to the
- * union. Caller holds settings_lock. */
+ * union. Caller holds settings_lock. An empty (size 0) default never
+ * allocates a pool region (large_store_set_raw's needed == 0 case). A
+ * pooled setting whose non-empty default cannot fit its pool at init time
+ * logs and leaves the setting without a region rather than failing boot. */
 static void apply_scalar_default_locked(struct zmk_custom_setting *setting) {
     if (setting_uses_large_store(setting)) {
-        large_store_set_value(setting, setting->default_value);
+        int ret = large_store_set_value(setting, setting->default_value);
+        if (ret < 0) {
+            LOG_ERR("Custom settings pool has no room for %s/%s's default value (%d)",
+                    setting->custom_subsystem_id, setting->key, ret);
+        }
     } else {
         copy_value(&setting->memory_value, setting->default_value);
     }
+}
+
+size_t zmk_custom_setting_large_pool_used(const struct zmk_custom_setting_large_pool *pool) {
+    if (!pool) {
+        return 0;
+    }
+
+    size_t used = 0;
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    ZMK_CUSTOM_SETTING_FOREACH(setting) {
+        if (setting->large_pool == pool) {
+            used += pool_member_extent(setting);
+        }
+    }
+    k_mutex_unlock(&settings_lock);
+    return used;
 }
 
 /*
@@ -459,8 +604,11 @@ effective_value(const struct zmk_custom_setting *setting) {
         if (setting->large_size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
             return NULL;
         }
-        value_from_raw(&effective_scratch_value, setting->value_type, setting->large_data,
-                       setting->large_size);
+        /* A pooled setting with no region yet (large_data == NULL) holds an
+         * empty value - value_from_raw must not be handed a NULL source
+         * pointer even for a zero-length copy. */
+        value_from_raw(&effective_scratch_value, setting->value_type,
+                       setting->large_data != NULL ? setting->large_data : "", setting->large_size);
         return &effective_scratch_value;
     }
 
@@ -859,7 +1007,11 @@ int zmk_custom_setting_set_default(const struct zmk_custom_setting *const_settin
      * before settings_load() (i.e. from any SYS_INIT). */
     if (!setting->has_persistent_value && !setting->dirty) {
         if (setting_uses_large_store(setting)) {
-            large_store_set_value(setting, value);
+            int large_ret = large_store_set_value(setting, value);
+            if (large_ret < 0) {
+                k_mutex_unlock(&settings_lock);
+                return large_ret;
+            }
         } else {
             copy_value(&setting->memory_value, value);
         }
@@ -1044,8 +1196,12 @@ static int save_setting_locked(struct zmk_custom_setting *setting) {
     size_t len;
     if (setting_uses_large_store(setting)) {
         /* Large BYTES/STRING payload is stored raw; persist it directly
-         * (bypassing the fixed carrier value_to_storage would use). */
-        data = setting->large_data;
+         * (bypassing the fixed carrier value_to_storage would use). A pooled
+         * setting with no region (empty value) has large_data == NULL -
+         * settings_save_one(name, NULL, 0) means "delete this record" to the
+         * settings subsystem, not "save an empty value", so substitute a
+         * valid (never dereferenced past its 0-byte length) pointer. */
+        data = setting->large_data != NULL ? setting->large_data : "";
         len = setting->large_size;
     } else {
         ret = value_to_storage(memory_value_slot(setting), &data, &len);
@@ -1188,7 +1344,10 @@ static int write_value_locked(struct zmk_custom_setting *setting,
     }
     case ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY:
         if (setting_uses_large_store(setting)) {
-            large_store_set_value(setting, value);
+            int ret = large_store_set_value(setting, value);
+            if (ret < 0) {
+                return ret;
+            }
         } else {
             copy_value(memory_value_slot(setting), value);
         }
@@ -1197,7 +1356,10 @@ static int write_value_locked(struct zmk_custom_setting *setting,
         return 0;
     case ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST:
         if (setting_uses_large_store(setting)) {
-            large_store_set_value(setting, value);
+            int ret = large_store_set_value(setting, value);
+            if (ret < 0) {
+                return ret;
+            }
         } else {
             copy_value(memory_value_slot(setting), value);
         }
@@ -1968,7 +2130,12 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
         if (size > capacity) {
             ret = -EMSGSIZE;
         } else {
-            memcpy(buf, setting->large_data, size);
+            /* A pooled setting with no region yet (large_data == NULL) has
+             * size == 0 here; skip the copy rather than pass a NULL source
+             * to memcpy. */
+            if (size > 0) {
+                memcpy(buf, setting->large_data, size);
+            }
             if (out_size) {
                 *out_size = size;
             }
@@ -2008,14 +2175,21 @@ static int write_large_locked(struct zmk_custom_setting *setting, const void *da
         return -EMSGSIZE;
     }
 
+    int ret;
     switch (mode) {
     case ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY:
-        large_store_set_raw(setting, data, size);
+        ret = large_store_set_raw(setting, data, size);
+        if (ret < 0) {
+            return ret;
+        }
         set_setting_dirty(setting, true);
         clear_temporary_locked(setting);
         return 0;
     case ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST:
-        large_store_set_raw(setting, data, size);
+        ret = large_store_set_raw(setting, data, size);
+        if (ret < 0) {
+            return ret;
+        }
         clear_temporary_locked(setting);
         return save_setting_locked(setting);
     case ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY:
@@ -2170,7 +2344,16 @@ static int value_from_storage(struct zmk_custom_setting *setting, const void *da
         if (len > setting_value_capacity(setting)) {
             return -EMSGSIZE;
         }
-        large_store_set_raw(setting, data, len);
+        int ret = large_store_set_raw(setting, data, len);
+        if (ret < 0) {
+            /* Pool exhausted (e.g. the pool shrank across a firmware update,
+             * or this boot's other pool members already claim the rest of
+             * the budget) - skip this persisted value rather than fail boot,
+             * mirroring the keyspace-pool-exhaustion policy. */
+            LOG_WRN("Custom settings pool exhausted; skipping persisted value for %s/%s",
+                    setting->custom_subsystem_id, setting->key);
+            return ret;
+        }
         set_setting_has_persistent_value(setting, true);
         set_setting_dirty(setting, false);
         clear_temporary_locked(setting);
@@ -2224,7 +2407,12 @@ static int value_from_storage(struct zmk_custom_setting *setting, const void *da
     }
 
     if (setting_uses_large_store(setting)) {
-        large_store_set_value(setting, &value);
+        int large_ret = large_store_set_value(setting, &value);
+        if (large_ret < 0) {
+            LOG_WRN("Custom settings pool exhausted; skipping persisted value for %s/%s",
+                    setting->custom_subsystem_id, setting->key);
+            return large_ret;
+        }
     } else {
         copy_value(memory_value_slot(setting), &value);
     }
@@ -2864,6 +3052,16 @@ static bool runtime_setting_exists_locked(const char *custom_subsystem_id, const
 
 int zmk_custom_settings_register(struct zmk_custom_setting *desc) {
     if (!desc || !desc->custom_subsystem_id || (!desc->key && !desc->array_key)) {
+        return -EINVAL;
+    }
+
+    /* ZMK_CUSTOM_SETTING_DEFINE_POOLED enforces this with a BUILD_ASSERT at
+     * compile time; a hand-built or runtime-assembled descriptor that sets
+     * large_pool has no such check, so enforce it here instead of silently
+     * treating the setting as non-large-store (setting_uses_large_store()
+     * also gates on type). */
+    if (desc->large_pool != NULL && desc->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES &&
+        desc->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
         return -EINVAL;
     }
 

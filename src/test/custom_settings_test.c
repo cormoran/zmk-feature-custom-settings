@@ -353,6 +353,51 @@ ZMK_CUSTOM_SETTING_DEFINE_SIZED(test_big_record_setting, TEST_LARGE_VALUE_SIZE, 
 BUILD_ASSERT(sizeof(struct zmk_custom_setting) < CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE,
              "large value buffer must not be embedded in the setting descriptor");
 
+/*
+ * Shared large-value pool: several BYTES/STRING settings can be registered
+ * against one static ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE budget instead of
+ * each paying for its own worst-case max_size buffer
+ * (ZMK_CUSTOM_SETTING_DEFINE_SIZED). Deliberately over-committed - two
+ * 128-byte BYTES members plus a 32-byte STRING member add up to far more
+ * than the 192-byte pool - so writes can legitimately fail with -ENOSPC and
+ * exercise compaction (see test_large_value_pool).
+ */
+#define TEST_POOL_SIZE 192
+#define TEST_POOLED_BYTES_MAX_SIZE 128
+#define TEST_POOLED_STRING_MAX_SIZE 32
+
+/* A genuinely empty BYTES value (size 0) - ZMK_CUSTOM_SETTING_VALUE_BYTES(0)
+ * is NOT empty, it is a one-byte value {0}, so it cannot be used here to
+ * exercise "an empty default must not allocate a pool region". */
+#define TEST_POOLED_EMPTY_BYTES                                                                    \
+    ((struct zmk_custom_setting_value){.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 0})
+
+ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(test_large_pool, TEST_POOL_SIZE);
+
+ZMK_CUSTOM_SETTING_DEFINE_POOLED(test_pooled_a, TEST_POOLED_BYTES_MAX_SIZE, test_large_pool, "test",
+                                 "pooled_a", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+                                 TEST_POOLED_EMPTY_BYTES,
+                                 ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                 ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+ZMK_CUSTOM_SETTING_DEFINE_POOLED(test_pooled_b, TEST_POOLED_BYTES_MAX_SIZE, test_large_pool, "test",
+                                 "pooled_b", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+                                 TEST_POOLED_EMPTY_BYTES,
+                                 ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                 ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+ZMK_CUSTOM_SETTING_DEFINE_POOLED(test_pooled_c, TEST_POOLED_STRING_MAX_SIZE, test_large_pool,
+                                 "test", "pooled_c", ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                 ZMK_CUSTOM_SETTING_VALUE_STRING(""),
+                                 ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                 ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 static int expect_int_value(const struct zmk_custom_setting *setting, int32_t expected) {
     struct zmk_custom_setting_value value;
     int ret = zmk_custom_setting_read(setting, &value);
@@ -2108,8 +2153,8 @@ static int test_large_value(void) {
     /* Sanity: a normal (int32) setting keeps union storage (no large buffer),
      * while the sized setting has its own backing buffer. This is what keeps
      * unrelated settings' RAM footprint from growing (issue #16). */
-    if (test_int_setting.large_data != NULL) {
-        LOG_ERR("Normal setting unexpectedly allocated a large backing buffer");
+    if (test_int_setting.large_data != NULL || test_int_setting.large_pool != NULL) {
+        LOG_ERR("Normal setting unexpectedly has large-store state");
         return -EINVAL;
     }
     if (setting->large_data == NULL) {
@@ -2306,6 +2351,257 @@ static int test_string_no_truncation(void) {
     return 0;
 }
 
+static void fill_pool_test_pattern(uint8_t *buf, size_t size, uint8_t seed) {
+    for (size_t i = 0; i < size; i++) {
+        buf[i] = (uint8_t)(i * 7 + seed);
+    }
+}
+
+/* Shared large-value pool (ZMK_CUSTOM_SETTING_DEFINE_POOLED): several
+ * settings draw regions from one static budget instead of each reserving its
+ * own worst-case max_size buffer. test_pooled_a/b/c are deliberately
+ * over-committed against the 192-byte test_large_pool, so writes here
+ * legitimately hit -ENOSPC and exercise compaction (a setting's region can
+ * move within the pool at any write that needs more room than it currently
+ * has - see pool_ensure_region in custom_settings.c). */
+static int test_large_value_pool(void) {
+    if (test_pooled_a.large_pool != &test_large_pool || test_pooled_a.large_data != NULL ||
+        test_pooled_a.large_size != 0) {
+        LOG_ERR("Pooled setting A is not in its expected pre-write state");
+        return -EINVAL;
+    }
+    if (test_pooled_b.large_data != NULL || test_pooled_b.large_size != 0) {
+        LOG_ERR("Pooled setting B is not in its expected pre-write state");
+        return -EINVAL;
+    }
+    /* test_pooled_c's default is an empty STRING, but a STRING's stored NUL
+     * still costs one pool byte even at size 0 (see pool_member_extent) - so
+     * unlike A/B (BYTES, genuinely zero-cost when empty) it already holds a
+     * one-byte region here. Confirm that, then use the actual pool usage as
+     * this test's baseline instead of assuming the pool starts at 0. */
+    if (test_pooled_c.large_data == NULL || test_pooled_c.large_size != 0) {
+        LOG_ERR("Pooled STRING setting C is not in its expected pre-write state");
+        return -EINVAL;
+    }
+    size_t baseline_used = zmk_custom_setting_large_pool_used(&test_large_pool);
+    if (baseline_used != 1) {
+        LOG_ERR("Unexpected pool baseline usage: %u", (unsigned)baseline_used);
+        return -EINVAL;
+    }
+
+    uint8_t readback[TEST_POOLED_BYTES_MAX_SIZE];
+    size_t out_size;
+    int ret;
+
+    /* 1. Write 100 bytes to A, read back identical. */
+    uint8_t payload_a[100];
+    fill_pool_test_pattern(payload_a, sizeof(payload_a), 3);
+    ret = zmk_custom_setting_write_bytes(&test_pooled_a, payload_a, sizeof(payload_a),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Pool write A failed: %d", ret);
+        return ret;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_a, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload_a) ||
+        memcmp(readback, payload_a, sizeof(payload_a)) != 0) {
+        LOG_ERR("Pool A round-trip mismatch: ret=%d size=%u", ret, (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_write_and_read size=%u", (unsigned)sizeof(payload_a));
+
+    /* 2. A already holds 100 of the pool's 192 bytes, so a 100-byte write to
+     * B (100 + 100 > 192) must fail with -ENOSPC and leave A untouched. */
+    uint8_t payload_b[100];
+    fill_pool_test_pattern(payload_b, sizeof(payload_b), 11);
+    ret = zmk_custom_setting_write_bytes(&test_pooled_b, payload_b, sizeof(payload_b),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -ENOSPC) {
+        LOG_ERR("Pool write B should fail with -ENOSPC, got %d", ret);
+        return -EINVAL;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_a, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload_a) ||
+        memcmp(readback, payload_a, sizeof(payload_a)) != 0) {
+        LOG_ERR("Pool A clobbered by B's failed allocation");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_enospc");
+
+    /* 3./4. Shrinking A to 20 bytes frees enough of the pool's *logical*
+     * budget (a shrink writes in place - A's region does not move) that B's
+     * 100-byte write now succeeds. Placing B's new region requires
+     * compaction: every other pool member is repacked from the start of the
+     * pool, so this also validates A's content survives a compaction it was
+     * not directly involved in. */
+    uint8_t payload_a2[20];
+    fill_pool_test_pattern(payload_a2, sizeof(payload_a2), 41);
+    ret = zmk_custom_setting_write_bytes(&test_pooled_a, payload_a2, sizeof(payload_a2),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Shrinking pool A failed: %d", ret);
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write_bytes(&test_pooled_b, payload_b, sizeof(payload_b),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Pool write B should succeed once A has shrunk: %d", ret);
+        return ret;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_a, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload_a2) ||
+        memcmp(readback, payload_a2, sizeof(payload_a2)) != 0) {
+        LOG_ERR("Pool A content lost across B's compacting allocation");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_compaction size_a=%u size_b=%u",
+            (unsigned)sizeof(payload_a2), (unsigned)sizeof(payload_b));
+
+    /* 4. Grow A again within the remaining budget (192 - 100(B) = 92); this
+     * forces A's region to move (its old spot is not big enough), which in
+     * turn requires B - the other live member - to be compacted down first.
+     * Both values must come out intact afterwards. */
+    uint8_t payload_a3[70];
+    fill_pool_test_pattern(payload_a3, sizeof(payload_a3), 77);
+    ret = zmk_custom_setting_write_bytes(&test_pooled_a, payload_a3, sizeof(payload_a3),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Growing pool A within budget failed: %d", ret);
+        return ret;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_a, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload_a3) ||
+        memcmp(readback, payload_a3, sizeof(payload_a3)) != 0) {
+        LOG_ERR("Pool A mismatch after regrowing");
+        return -EINVAL;
+    }
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_b, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload_b) ||
+        memcmp(readback, payload_b, sizeof(payload_b)) != 0) {
+        LOG_ERR("Pool B disturbed by A's regrowth");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_grow size_a=%u size_b=%u", (unsigned)sizeof(payload_a3),
+            (unsigned)sizeof(payload_b));
+
+    /* 5. An empty write releases A's region entirely; pool_used must drop by
+     * exactly A's freed extent. */
+    size_t used_before = zmk_custom_setting_large_pool_used(&test_large_pool);
+    ret = zmk_custom_setting_write_bytes(&test_pooled_a, NULL, 0,
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Releasing pool A failed: %d", ret);
+        return ret;
+    }
+    size_t used_after = zmk_custom_setting_large_pool_used(&test_large_pool);
+    if (used_after != used_before - sizeof(payload_a3) || test_pooled_a.large_data != NULL) {
+        LOG_ERR("Pool usage did not drop as expected after releasing A: before=%u after=%u",
+                (unsigned)used_before, (unsigned)used_after);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_release used_before=%u used_after=%u",
+            (unsigned)used_before, (unsigned)used_after);
+
+    /* 6. Persist B, clobber it in RAM, then discard: the persisted pool
+     * value must be restored - discard's settings_load_subtree() replay
+     * routes back through pool_ensure_region exactly like any other pool
+     * write. */
+    ret = zmk_custom_setting_write_bytes(&test_pooled_b, payload_b, sizeof(payload_b),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_ERR("Persisting pool B failed: %d", ret);
+        return ret;
+    }
+
+    uint8_t clobber[40];
+    memset(clobber, 0xCD, sizeof(clobber));
+    ret = zmk_custom_setting_write_bytes(&test_pooled_b, clobber, sizeof(clobber),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Clobbering pool B failed: %d", ret);
+        return ret;
+    }
+
+    ret = zmk_custom_setting_discard(&test_pooled_b);
+    if (ret < 0) {
+        LOG_ERR("Discarding pool B failed: %d", ret);
+        return ret;
+    }
+
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_b, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload_b) ||
+        memcmp(readback, payload_b, sizeof(payload_b)) != 0) {
+        LOG_ERR("Pool B discard did not restore the persisted value: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_persist_discard size=%u", (unsigned)sizeof(payload_b));
+
+    /* 7. A STRING pooled member: write it, then force a real compaction move
+     * (release B, then regrow it to a different size so the compactor has to
+     * reposition C alongside it) and confirm the NUL terminator survives. */
+    ret = zmk_custom_setting_write_bytes(&test_pooled_c, "hello", 5,
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Writing pool C failed: %d", ret);
+        return ret;
+    }
+
+    ret = zmk_custom_setting_write_bytes(&test_pooled_b, NULL, 0,
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Releasing pool B failed: %d", ret);
+        return ret;
+    }
+
+    uint8_t payload_b2[90];
+    fill_pool_test_pattern(payload_b2, sizeof(payload_b2), 5);
+    ret = zmk_custom_setting_write_bytes(&test_pooled_b, payload_b2, sizeof(payload_b2),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Regrowing pool B for the compaction check failed: %d", ret);
+        return ret;
+    }
+
+    char string_readback[TEST_POOLED_STRING_MAX_SIZE];
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(&test_pooled_c, string_readback, sizeof(string_readback),
+                                       &out_size, NULL);
+    if (ret < 0 || out_size != 5 || memcmp(string_readback, "hello", 5) != 0 ||
+        string_readback[5] != '\0') {
+        LOG_ERR("Pool STRING member C corrupted across compaction: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_pool_string_member value=%s", string_readback);
+
+    /* Leave a clean slate (every pooled test member released) for anything
+     * that runs after this test. */
+    zmk_custom_setting_write_bytes(&test_pooled_a, NULL, 0, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    zmk_custom_setting_write_bytes(&test_pooled_b, NULL, 0, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    zmk_custom_setting_write_bytes(&test_pooled_c, NULL, 0, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2393,6 +2689,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_string_no_truncation();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_large_value_pool();
     if (ret < 0) {
         return ret;
     }

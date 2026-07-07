@@ -196,6 +196,23 @@ ZMK_CUSTOM_SETTING_DEFINE_SIZED(
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+/*
+ * A large BYTES setting sharing a static ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE
+ * budget instead of reserving its own dedicated buffer
+ * (ZMK_CUSTOM_SETTING_DEFINE_SIZED above) - the pool sizing to use when
+ * several large settings should not each cost their own worst-case max_size
+ * while empty.
+ */
+ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(zmk_config_sample_pool,
+                                     CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE);
+
+ZMK_CUSTOM_SETTING_DEFINE_POOLED(
+    zmk_config_sample_pooled_bytes, CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE,
+    zmk_config_sample_pool, "zmk_config_sample", "pooled_bytes_value",
+    ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, ZMK_CUSTOM_SETTING_VALUE_BYTES(0),
+    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
 static const struct zmk_custom_setting_value zmk_config_sample_private_string_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
     .size = sizeof("device only") - 1,
