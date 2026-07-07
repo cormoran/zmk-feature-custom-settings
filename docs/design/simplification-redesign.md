@@ -889,3 +889,103 @@ opaque-blob form. Notable decisions and deviations from §5's sketch:
   inside `convert_rpc_bytes_value` - same behavior, different plumbing). The
   large-payload path still skips converters, same as every other large value
   (§13's open-question-4 status is unchanged).
+
+## 15. Implementation notes (Phase 4 / Change 4, as landed)
+
+Phase 4 (`codex/simplify-p4-descriptor`, stacked on Phase 3's
+`codex/simplify-p3-keyspace`) implemented §6 in full: `struct
+zmk_custom_setting` is a const, flash-resident descriptor
+(`ITERABLE_SECTION_ROM` + `zephyr_linker_sources(ROM_SECTIONS ...)`, in a
+new `include/linker/zmk-custom-settings-rom.ld`; the keyspace section stays
+`ITERABLE_SECTION_RAM`/`DATA_SECTIONS`), all mutable state lives in a
+macro-emitted `struct zmk_custom_setting_state` RAM block, and the embedded
+`memory_value` carrier is gone. Notable decisions and deviations from §6.2's
+sketch:
+
+- **State block is 24 bytes on ARM32, not 16.** §6.2's sketch stopped at
+  `{flags, temp_slot, value union}` ≈ 16 bytes. The shipped block carries
+  two additional pointers the sketch did not account for:
+  `default_override` (see below) and `_pool_next` - Phase 1's pool
+  member-list link is mutated at runtime, so a const descriptor cannot hold
+  it. Layout: `flags(u8) + temp_slot(i8) + pad(2) + value union(12) +
+  default_override(4) + _pool_next(4)` = 24 B with 32-bit pointers. A
+  compile-time self-check in `custom_settings_test.c` asserts
+  `sizeof(struct zmk_custom_setting_state) <= 24` (<= 40 on LP64
+  native_sim), and that a BOOL setting emits no value buffer.
+- **Pool member list links descriptors, reaches the link via state.** §3.4's
+  intrusive list could have re-typed `pool->members` to link state blocks
+  directly. It still links `const struct zmk_custom_setting *` because pool
+  code needs the descriptor anyway (value_type for the STRING-NUL extent
+  accounting, blob.max_size), and a bare state pointer has no back-pointer
+  to its owning descriptor; the mutable link is
+  `member->state->_pool_next`. Documented on
+  `struct zmk_custom_setting_large_pool`.
+- **`zmk_custom_setting_set_default()` becomes `state->default_override`.**
+  The pre-P4 implementation overwrote the descriptor's `default_value`
+  pointer, which a const descriptor forbids. Signature and documented
+  semantics are unchanged (zmk-feature-runtime-macro's
+  runtime_macro_dt_defaults.c depends on both): the override pointer is
+  installed on the RAM state block and `setting_default_value()` consults
+  it before the descriptor's flash default at every site defaults are read
+  (init, discard, reset). `init_setting_state_locked` deliberately does
+  NOT clear the override, preserving the "callable from any SYS_INIT
+  before settings_load(), regardless of ordering vs this module's own
+  init" guarantee; keyspace binds DO reset it (the whole embedded state
+  block) so a recycled slot cannot inherit a stale override.
+- **Every non-array BYTES/STRING value is blob-backed now - the
+  `setting_uses_large_store()` predicate became `setting_uses_blob_store()`
+  (type-based, not pool-presence-based).** §6.3 offered a choice for small
+  `DEFINE` BYTES/STRING values (right-sized static buffer vs routing through
+  a pool); the static buffer won: the plain registration macro emits
+  `uint8_t <name>_store[capacity + 1]` (capacity =
+  `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`; +1 keeps the STRING-NUL
+  convention shared with pool regions, also reserved for BYTES for
+  simplicity) and points `state->blob.data` at it permanently. Scalar types
+  emit a zero-length store (GNU C zero-size array - costs nothing), keeping
+  one innermost macro for all types via a constant-folded conditional
+  initializer. Descriptor `blob.pool == NULL` is the single fixed-buffer vs
+  pool-member fork, exactly as §6.3 wanted. One deliberate behavior change
+  fell out: `zmk_custom_setting_with_large_raw_bytes()` now streams ANY
+  non-array BYTES/STRING value (it used to return -ENOTSUP for settings
+  without a large store); its only in-tree caller (the RPC value-encode
+  fallback) is indifferent, and the header doc was updated.
+- **Descriptor union arm is named `array_state`, not `array`.** Keeping the
+  §6.2 sketch's field-name change would have churned ~28 call sites for no
+  layout benefit; the anonymous union member keeps the old accessor
+  spelling. `array_key`/`array_index` stay outside the union
+  (`array_key != NULL` is the is-array discriminator; views mutate their
+  own RAM copy's `array_index`).
+- **Enums packed as sketched** (`value_type`/`confidentiality` to uint8_t,
+  permissions to two 4-bit bitfields, `constraints_count` to uint8_t).
+  ARM32 descriptor: 52 bytes of rodata.
+- **Runtime-built descriptor instances embed their state.** Keyspace slots
+  (`struct zmk_custom_setting_keyspace_slot.state`) and array index views
+  (`array_view_pool` entries) are RAM instances of the same struct;
+  `keyspace_bind_slot_locked` / `array_view_acquire` reset the embedded
+  block and rewire `setting.state` after the descriptor struct-copy (the
+  copy would otherwise alias the array descriptor's own macro-emitted
+  state). Temp-slot keying by view pointer, and therefore by
+  (array_state, array_index), is unchanged.
+- **Hand-built descriptors must be const now.** `zmk_config_sample_settings.c`
+  (the deliberate "no macros" registration exercise) was migrated: `const
+  STRUCT_SECTION_ITERABLE`, a hand-declared state block per setting, and a
+  store buffer + `blob.max_size` for its BYTES/STRING entries. Mixing a
+  non-const object into the (now read-only) section would be a GCC section
+  type conflict, so out-of-tree hand-built registrations - none are known -
+  must do the same.
+- **`value_max_size` (and its `0 == default` convention) is gone**; the
+  capacity lives in the descriptor's `blob.max_size`, always set explicitly
+  by the macros, read through a `setting_capacity()` helper.
+- **Measured RAM** (tests/zmk-config `custom_settings_board_with_rpc`,
+  xiao_ble, LARGE_VALUE_MAX_SIZE=256, 14 registered settings + one 8-slot
+  keyspace): total RAM 86704 -> 84016 B (-2688 B), flash 252920 -> 252040 B
+  (-880 B - flash *also* shrank because the old RAM descriptors' initializer
+  images disappeared along with the 64+-byte embedded carriers). The
+  descriptor section went from 2128 B RAM (152 B/setting) to 728 B rodata
+  (52 B/setting) + 24 B RAM state each + exact value storage (65 B fixed
+  store per plain BYTES/STRING sample; pool regions unchanged). §6.4
+  predicted ~160 -> ~16 + storage; landed at 152 -> 24 + storage (the two
+  extra state pointers above).
+- **No proto or web changes**, as planned. Golden snapshots
+  (tests/{test,studio,split_peripheral}) did not change - the rewritten
+  internals kept every PASS line identical.

@@ -356,9 +356,10 @@ CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256
 Which knob is authoritative:
 
 - `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is the single-frame value size and
-  the size of the fixed carrier `struct zmk_custom_setting_value`. It stays
-  pinned to 64 while the protobuf schema is enabled and is the default
-  per-setting `max_size`.
+  the size of the stack-allocated API exchange carrier
+  `struct zmk_custom_setting_value`. It stays pinned to 64 while the protobuf
+  schema is enabled and is the default per-setting `max_size`. It does not
+  size any per-setting storage (see [Memory Notes](#memory-notes)).
 - `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE` is the ceiling for any
   per-setting `max_size` and for the shared chunk/record staging buffers.
 
@@ -698,9 +699,23 @@ zmk_custom_setting_with_value(setting, log_speed, NULL);
 
 ### Memory Notes
 
-Each setting keeps only its current in-memory value in RAM; the default
-value lives in flash and is referenced by pointer, and the persisted value is
-not cached separately:
+A setting's registration descriptor (identity, type, permissions,
+constraints, default pointer) is `const` and lives in flash; the only RAM a
+setting costs is a compact per-setting state block (~24 bytes on ARM32:
+status flags, temporary-override slot index, the runtime default override
+pointer, pool bookkeeping, and - for `INT32`/`BOOL`/`BEHAVIOR` - the value
+itself, stored inline) plus the exact storage for its value:
+
+- `INT32`/`BOOL`/`BEHAVIOR`: no extra storage at all - the value fits the
+  state block's inline union. A bool setting costs ~24 bytes of RAM total.
+- `BYTES`/`STRING` via plain `ZMK_CUSTOM_SETTING_DEFINE`: one exact-size
+  static buffer of `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1` bytes.
+- `BYTES`/`STRING` via `ZMK_CUSTOM_SETTING_DEFINE_SIZED`/`_POOLED` (and
+  keyspace entries): a region carved on demand from the declared
+  [pool](#shared-large-value-pools) - zero bytes while empty.
+
+The default value lives in flash and is referenced by pointer, and the
+persisted value is not cached separately:
 
 - `ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY` overrides come from a small
   shared pool instead of a dedicated slot per setting

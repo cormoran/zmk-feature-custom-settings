@@ -10,14 +10,18 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     default 64
     range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
-      Size of the fixed struct zmk_custom_setting_value carrier and of the
-      non-chunked Studio RPC SettingValue.bytes_value/string_value fields.
-      This is the largest value that fits a single RPC frame and the default
-      per-setting max_size. It is pinned to 64 while the protobuf schema is
-      enabled (the non-chunked SettingValue fields are max_size:64). Settings
+      Size of the struct zmk_custom_setting_value API exchange carrier
+      (stack-allocated by zmk_custom_setting_read/write callers and used by
+      the array feature's element storage) and the single-frame RPC value
+      bound: the largest value an incoming single-frame write can carry.
+      Since simplification P4 this does NOT size any per-setting storage -
+      a BYTES/STRING setting's value lives in an exact-size buffer or pool
+      region, and scalars store inline in a small per-setting state block.
+      It is pinned to 64 while the protobuf schema is enabled. Settings
       that need to store a larger value register with an explicit larger
-      max_size via ZMK_CUSTOM_SETTING_DEFINE_SIZED and transfer it over the
-      chunked ReadValueChunk/WriteValueChunk RPC instead of growing this.
+      max_size via ZMK_CUSTOM_SETTING_DEFINE_SIZED/_POOLED; a larger value
+      is written over the chunked WriteValueChunk RPC and read via the
+      ordinary (streamed) GetSetting.
 
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
     int "Maximum per-setting large value size"
