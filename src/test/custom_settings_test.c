@@ -291,6 +291,32 @@ ZMK_CUSTOM_SETTING_DEFINE(test_record_setting, "test", "record_value",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+/*
+ * Simplification P4 layout self-checks (compile-time, via sizeof):
+ *
+ * 1. The per-setting RAM state block stays small: <= 24 bytes with 32-bit
+ *    pointers (the design target; flags + temp_slot + a 12-byte value union
+ *    + 2 pointers), scaling only through its two pointers/union on LP64
+ *    hosts (native_sim on a 64-bit machine: <= 40).
+ * 2. A BOOL (or any scalar) setting emits NO value buffer at all: its
+ *    macro-emitted `_store` array is zero-length, so the whole per-setting
+ *    RAM cost is exactly the state block.
+ */
+ZMK_CUSTOM_SETTING_DEFINE(test_bool_probe_setting, "test", "bool_probe",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL, ZMK_CUSTOM_SETTING_VALUE_BOOL(false),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+BUILD_ASSERT(sizeof(struct zmk_custom_setting_state) <= (sizeof(void *) == 4 ? 24 : 40),
+             "P4: per-setting RAM state block grew past the design budget");
+BUILD_ASSERT(sizeof(test_bool_probe_setting_store) == 0,
+             "P4: a BOOL setting must not emit a value store buffer");
+BUILD_ASSERT(ZMK_CUSTOM_SETTING_VALUE_STORE_SIZE(ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                                 CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) ==
+                 CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1,
+             "P4: a STRING setting's fixed store must reserve capacity + NUL");
+
 /* Simplification P3: an RPC-creatable keyspace for user-created entries
  * under the "macro/" prefix. max_key_len (16) is a keyspace-local limit
  * bounded by (but need not equal) CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (48,
@@ -1992,15 +2018,16 @@ static int test_large_value(void) {
         return -ENOENT;
     }
 
-    /* Sanity: a normal (int32) setting keeps union storage (no large buffer),
-     * while the sized setting has its own backing buffer. This is what keeps
-     * unrelated settings' RAM footprint from growing (issue #16). */
-    if (test_int_setting.large_data != NULL || test_int_setting.large_pool != NULL) {
-        LOG_ERR("Normal setting unexpectedly has large-store state");
+    /* Sanity: a normal (int32) setting keeps inline state-union storage (no
+     * blob buffer or pool of any kind - P4), while the sized setting draws
+     * from its private pool. This is what keeps unrelated settings' RAM
+     * footprint from growing (issue #16). */
+    if (test_int_setting.blob.max_size != 0 || test_int_setting.blob.pool != NULL) {
+        LOG_ERR("Normal setting unexpectedly has blob-store state");
         return -EINVAL;
     }
-    if (setting->large_data == NULL) {
-        LOG_ERR("Sized setting is missing its large backing buffer");
+    if (setting->state->blob.data == NULL) {
+        LOG_ERR("Sized setting is missing its pool-backed region (non-empty default)");
         return -EINVAL;
     }
 
@@ -2137,8 +2164,11 @@ static int test_string_no_truncation(void) {
         LOG_ERR("String test setting not registered");
         return -ENOENT;
     }
-    if (setting->large_data != NULL) {
-        LOG_ERR("String test setting unexpectedly has a large backing buffer");
+    /* P4: every STRING setting keeps its value behind a blob buffer now;
+     * "non-large" means a carrier-capacity fixed store, not a pool. */
+    if (setting->blob.pool != NULL ||
+        setting->blob.max_size != CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        LOG_ERR("String test setting unexpectedly has large/pooled blob store");
         return -EINVAL;
     }
 
@@ -2207,12 +2237,12 @@ static void fill_pool_test_pattern(uint8_t *buf, size_t size, uint8_t seed) {
  * move within the pool at any write that needs more room than it currently
  * has - see pool_ensure_region in custom_settings.c). */
 static int test_large_value_pool(void) {
-    if (test_pooled_a.large_pool != &test_large_pool || test_pooled_a.large_data != NULL ||
-        test_pooled_a.large_size != 0) {
+    if (test_pooled_a.blob.pool != &test_large_pool || test_pooled_a.state->blob.data != NULL ||
+        test_pooled_a.state->blob.size != 0) {
         LOG_ERR("Pooled setting A is not in its expected pre-write state");
         return -EINVAL;
     }
-    if (test_pooled_b.large_data != NULL || test_pooled_b.large_size != 0) {
+    if (test_pooled_b.state->blob.data != NULL || test_pooled_b.state->blob.size != 0) {
         LOG_ERR("Pooled setting B is not in its expected pre-write state");
         return -EINVAL;
     }
@@ -2221,7 +2251,7 @@ static int test_large_value_pool(void) {
      * unlike A/B (BYTES, genuinely zero-cost when empty) it already holds a
      * one-byte region here. Confirm that, then use the actual pool usage as
      * this test's baseline instead of assuming the pool starts at 0. */
-    if (test_pooled_c.large_data == NULL || test_pooled_c.large_size != 0) {
+    if (test_pooled_c.state->blob.data == NULL || test_pooled_c.state->blob.size != 0) {
         LOG_ERR("Pooled STRING setting C is not in its expected pre-write state");
         return -EINVAL;
     }
@@ -2350,7 +2380,7 @@ static int test_large_value_pool(void) {
         return ret;
     }
     size_t used_after = zmk_custom_setting_large_pool_used(&test_large_pool);
-    if (used_after != used_before - sizeof(payload_a3) || test_pooled_a.large_data != NULL) {
+    if (used_after != used_before - sizeof(payload_a3) || test_pooled_a.state->blob.data != NULL) {
         LOG_ERR("Pool usage did not drop as expected after releasing A: before=%u after=%u",
                 (unsigned)used_before, (unsigned)used_after);
         return -EINVAL;
@@ -2471,7 +2501,7 @@ static int test_keyspace_large_value(void) {
     }
 
     /* Grow the entry past the fixed carrier via write_bytes, exactly like a
-     * DEFINE_POOLED/DEFINE_SIZED setting - the slot's large_data starts NULL
+     * DEFINE_POOLED/DEFINE_SIZED setting - the slot's blob region starts NULL
      * (no region allocated by create() for a value that fits the carrier)
      * and pool_ensure_region() carves one on this write. */
     uint8_t payload[TEST_KEYSPACE_LARGE_MAX_SIZE];
