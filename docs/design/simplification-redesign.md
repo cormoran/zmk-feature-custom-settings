@@ -489,7 +489,7 @@ Knock-on wins:
 - `STRUCT_SECTION_ITERABLE` of a `const` object in ROM: standard Zephyr
   practice, but the module's `.ld` include and macro qualifiers must move
   together (`DATA_SECTIONS` → `ROM_SECTIONS`, descriptors declared `const`).
-- Ordering: land **after** Changes 1–3 (they delete the fields/paths — 
+- Ordering: land **after** Changes 1–3 (they delete the fields/paths —
   `large_data` dual-role, `_runtime_next`, hand-built-descriptor compat — that
   would otherwise complicate the split).
 
@@ -608,3 +608,42 @@ they can be separate PRs in the order above.
    per-setting static buffer (recommended: exact-size, no pool motion) vs
    routing even small values through a pool? Either way the descriptor stops
    embedding the 64-byte carrier.
+
+## 12. Implementation notes (Phase 1 / Change 1, as landed)
+
+Phase 1 (this module's `codex/simplify-p1-pools` branch) implemented §3 in
+full, plus the pool-ownership prerequisite of §3.4, plus a narrow slice of
+§5.3 (only the value storage swap, not the opaque-blob/ordinal-persistence
+keyspace redesign, which stays Phase 3 as planned). Noted deviations from the
+sketches above:
+
+- **Pool member link field name.** §3.4's sketch calls the intrusive-list
+  field `pool_next`; the shipped field is `_pool_next` (leading underscore),
+  matching this file's existing `_runtime_next` convention for
+  internal/do-not-touch struct fields.
+- **`DEFINE_SIZED`'s private pool is sized `max_size + 1`, not `max_size`**
+  (§3.2's sketch pool size). A `STRING` region's trailing NUL is stored
+  *inside* the pool region (`large_store_set_raw`), so a full-length `STRING`
+  needs `max_size + 1` bytes to still fit - the same `+1` the old dedicated
+  buffer already reserved. Sizing the private pool at exactly `max_size`
+  would have been a capacity regression for `STRING` settings.
+- **Extra macro layer.** `DEFINE_SIZED`'s full signature (RPC converters +
+  variadic constraints) required a new innermost
+  `ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS` macro
+  (not spelled out in §3.3) so both `DEFINE_POOLED` and `DEFINE_SIZED` funnel
+  through one place that actually sets `.large_pool`. The plain-`DEFINE`
+  innermost macro (`..._WITH_RPC_CONVERTERS_AND_CONSTRAINTS`) is now the one
+  that emits no large-value store of any kind, so a normal small setting pays
+  nothing extra.
+- **§11 open question 3 resolved:** each keyspace gets its own **private**
+  pool (isolated budget), matching the recommended default; the "shared
+  across all keyspaces" variant was not built (no caller has asked for it).
+- **Keyspace storage swap is intentionally narrower than §5.3.** Task 3 kept
+  `keys[max_entries][max_key_len]` and `slots[max_entries]` exactly as they
+  were - only the large-value backing store moved from a fixed
+  `value_bufs[max_entries][max_size + 1]` table to a per-keyspace
+  `ZMK_CUSTOM_SETTING_LARGE_POOL` (same worst-case budget, carved on demand
+  per slot via the now-generic pooled-setting path). The `[key\0][payload]`
+  opaque-blob encoding, ordinal persistence naming, and removal of the
+  runtime-registration facility described in §5 are unchanged/deferred to
+  Phase 3.

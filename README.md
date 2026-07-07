@@ -334,11 +334,18 @@ ZMK_CUSTOM_SETTING_DEFINE_SIZED(
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 ```
 
-Only the sized setting allocates its own right-sized backing buffer, so making
-one setting large does **not** grow the RAM footprint of every other setting.
-`max_size` must not exceed `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE`
-(default equal to `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`), so raise that
-config to enable large values:
+`ZMK_CUSTOM_SETTING_DEFINE_SIZED` is sugar for a private, single-member
+[large-value pool](#shared-large-value-pools) sized just for this one setting
+— the pool is this module's only large-value backing store, so "sized" and
+"pooled" are the same mechanism at different sharing granularities. Making one
+setting large this way does **not** grow the RAM footprint of every other
+setting, and (unlike a plain static buffer) the setting's region is only
+allocated once it actually holds a non-empty value — see
+[Shared Large-Value Pools](#shared-large-value-pools) for what that means in
+practice. `max_size` must not exceed
+`CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE` (default equal to
+`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`), so raise that config to enable
+large values:
 
 ```conf
 CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256
@@ -366,7 +373,9 @@ reachable through:
 
 `ZMK_CUSTOM_SETTING_DEFINE_SIZED` also works for record settings — size the
 underlying `BYTES` setting so the encoded record fits — and keyspaces accept a
-larger `max_size` too.
+larger `max_size` too (a keyspace with a large `max_size` draws every entry's
+region from its own per-keyspace pool the same way — see
+[RPC-Creatable Keyspaces](#rpc-creatable-keyspaces)).
 
 > **Large values are local-only on split keyboards.** A value larger than
 > `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` is only reachable on the half that
@@ -379,14 +388,20 @@ larger `max_size` too.
 
 ### Shared Large-Value Pools
 
-`ZMK_CUSTOM_SETTING_DEFINE_SIZED` gives every large setting its own dedicated
-backing buffer, sized for `max_size` bytes whether or not the setting is ever
-written. That is wasteful when a module has *many* large settings that are
-not all expected to hold their maximum value at the same time (e.g. one
-`BYTES` setting per user-defined macro body) — reserving `max_size` bytes for
-each would cost `N * max_size` bytes of RAM even while most of them are empty
-or short. `ZMK_CUSTOM_SETTING_DEFINE_POOLED` lets a group of `BYTES`/`STRING`
-settings share one fixed-size budget instead:
+Every large value in this module — a `ZMK_CUSTOM_SETTING_DEFINE_SIZED`
+setting, a `ZMK_CUSTOM_SETTING_DEFINE_POOLED` setting, and a large keyspace
+entry alike — is backed by the same mechanism: a region carved on demand from
+a `struct zmk_custom_setting_large_pool`. `DEFINE_SIZED` is just sugar for a
+private pool sized for exactly one setting, so it costs one small pool
+descriptor more than a bare buffer would, but a setting holding an empty value
+still costs zero pool bytes (see below) instead of always reserving
+`max_size` bytes. `ZMK_CUSTOM_SETTING_DEFINE_POOLED` lets a group of
+`BYTES`/`STRING` settings share one explicit, fixed-size budget instead of
+each getting its own private pool — useful when a module has *many* large
+settings that are not all expected to hold their maximum value at the same
+time (e.g. one `BYTES` setting per user-defined macro body), since reserving
+`max_size` bytes for each would cost `N * max_size` bytes of RAM even while
+most of them are empty or short:
 
 ```c
 /* One 4 KiB budget shared by every macro body. */
@@ -606,6 +621,17 @@ int ret = zmk_custom_setting_keyspace_create(
 zmk_custom_setting_keyspace_delete(&my_macros, "macro/my-macro-1");
 /* -ENOENT if the key has no live slot. */
 ```
+
+For a `BYTES`/`STRING` keyspace, `max_size` can exceed
+`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` exactly like
+[`ZMK_CUSTOM_SETTING_DEFINE_SIZED`](#large-values-per-setting-max_size): every
+entry then draws its region from one pool private to that keyspace (sized
+`max_entries * (max_size + 1)` bytes, the same worst-case budget a per-slot
+buffer would have reserved), so `max_size` and `max_entries` stay independent
+knobs — a handful of near-`max_size` entries and many small ones draw from the
+same budget rather than each slot reserving its own worst case. Large entries
+transfer over the [chunked RPC](#large-values-per-setting-max_size) like any
+other large value.
 
 Once created, an entry is a full citizen of the registry: it is find-able
 (`zmk_custom_setting_find("my_module", "macro/my-macro-1")`), discoverable via
