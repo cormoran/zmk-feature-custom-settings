@@ -1294,8 +1294,9 @@ int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
     const struct zmk_custom_setting_value *effective = effective_value(setting);
     if (!effective) {
         /* Large value that does not fit the fixed carrier - the caller must
-         * use zmk_custom_setting_read_into or the chunked ReadValueChunk RPC
-         * instead of the fixed-carrier read. */
+         * use zmk_custom_setting_read_into (or, over RPC, the ordinary
+         * streamed GetSetting/ListSettings response - see
+         * custom_settings_handler.c) instead of the fixed-carrier read. */
         k_mutex_unlock(&settings_lock);
         return -EMSGSIZE;
     }
@@ -2221,6 +2222,53 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
     if (out_type) {
         *out_type = ctx.out_type;
     }
+    return 0;
+}
+
+int zmk_custom_setting_value_size(const struct zmk_custom_setting *setting, size_t *out_size) {
+    if (!setting || !out_size) {
+        return -EINVAL;
+    }
+    if (setting->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES &&
+        setting->value_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    if (setting_uses_large_store(setting) && !setting->temporary_active) {
+        *out_size = setting->large_size;
+        k_mutex_unlock(&settings_lock);
+        return 0;
+    }
+
+    const struct zmk_custom_setting_value *effective = effective_value(setting);
+    if (!effective) {
+        /* Shouldn't happen: the large-store branch above already handles any
+         * setting whose value could exceed the carrier. */
+        k_mutex_unlock(&settings_lock);
+        return -EMSGSIZE;
+    }
+    *out_size = effective->size;
+    k_mutex_unlock(&settings_lock);
+    return 0;
+}
+
+int zmk_custom_setting_with_large_raw_bytes(const struct zmk_custom_setting *setting,
+                                            zmk_custom_setting_raw_bytes_visitor_t visitor,
+                                            void *user_data) {
+    if (!setting || !visitor) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&settings_lock, K_FOREVER);
+    if (!setting_uses_large_store(setting) || setting->temporary_active) {
+        k_mutex_unlock(&settings_lock);
+        return -ENOTSUP;
+    }
+
+    const uint8_t *data = setting->large_size > 0 ? setting->large_data : (const uint8_t *)"";
+    visitor(data, setting->large_size, user_data);
+    k_mutex_unlock(&settings_lock);
     return 0;
 }
 

@@ -113,15 +113,19 @@ config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
       CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE.
 
 config ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
-    bool "Enable chunked read/write RPC for large setting values"
+    bool "Enable chunked write RPC for large setting values"
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     default y
     help
-      Adds ReadValueChunk/WriteValueChunk RPC requests that transfer a
-      bytes/string setting value across multiple frames. Useful when a
-      value plus request/response overhead does not fit
-      CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE, or ahead of a future increase to
-      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE beyond one frame.
+      Adds the WriteValueChunk RPC request that transfers a bytes/string
+      setting value across multiple write frames. Useful when a value plus
+      request/response overhead does not fit
+      CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE (the RX path buffers a whole frame
+      before nanopb decodes it, so a large incoming value genuinely cannot
+      arrive in one frame). Reading a large value does not need this: since
+      simplification P2, GetSetting/ListSettings stream a value of any size
+      directly (the RPC transport's TX path streams its response
+      incrementally, unlike RX), so there is no ReadValueChunk any more.
 
 config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
     int "Chunked write staging buffer size"
@@ -130,10 +134,10 @@ config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
     depends on ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
     help
       Size of the single global buffer used to assemble a chunked write
-      before it is validated and applied on commit, and to stage a chunked
-      read. One transfer session is supported at a time. The assembled value
-      still has to fit the target setting's own max_size, so a value larger
-      than CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE requires that setting to
+      before it is validated and applied on commit. One write transfer
+      session is supported at a time. The assembled value still has to fit
+      the target setting's own max_size, so a value larger than
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE requires that setting to
       have been registered with a matching larger max_size (see
       ZMK_CUSTOM_SETTING_DEFINE_SIZED and
       CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE).

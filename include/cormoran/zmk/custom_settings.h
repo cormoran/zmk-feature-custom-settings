@@ -266,14 +266,17 @@ struct zmk_custom_setting {
      * keep the pool compact. This is safe without any locking discipline
      * beyond the existing settings_lock: nothing anywhere in this module
      * caches a `large_data` pointer or a borrowed pointer into it across a
-     * lock drop - effective_value()/read_into()/write_bytes()/the chunked RPC
-     * all re-read `large_data` fresh under the lock every time - so moving a
-     * setting's region between two accesses is invisible to every caller.
-     * `large_size` is the current payload length. Large values are only
-     * reachable via the chunked ReadValueChunk/WriteValueChunk RPC and
-     * zmk_custom_setting_read_into / zmk_custom_setting_write_bytes; the
-     * fixed-carrier zmk_custom_setting_read/write and the single-frame RPC
-     * report -EMSGSIZE / omit the value once it exceeds the carrier.
+     * lock drop - effective_value()/read_into()/write_bytes()/the streaming
+     * RPC value-encode callback (see custom_settings_handler.c) all re-read
+     * `large_data` fresh under the lock every time - so moving a setting's
+     * region between two accesses is invisible to every caller. `large_size`
+     * is the current payload length. Large values are reachable via
+     * zmk_custom_setting_read_into / zmk_custom_setting_write_bytes, the
+     * WriteValueChunk RPC (writes only - reads stream through the ordinary
+     * GetSetting/ListSettings RPC response since simplification P2), and
+     * zmk_custom_setting_with_large_raw_bytes; the fixed-carrier
+     * zmk_custom_setting_read/write report -EMSGSIZE once the value exceeds
+     * the carrier.
      *
      * `value_max_size == 0` means "use CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE"
      * so hand-built descriptors that leave these fields zero keep the legacy
@@ -388,11 +391,12 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
  * "pooled" are the same mechanism at different sharing granularities. A
  * one-member pool never moves (compaction is a no-op), so this behaves like a
  * dedicated buffer while costing one small pool descriptor extra. A value
- * larger than CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE can only be
- * read/written through the chunked ReadValueChunk/WriteValueChunk Studio RPC
- * and the zmk_custom_setting_read_into / zmk_custom_setting_write_bytes
- * firmware API; the fixed-carrier zmk_custom_setting_read/write and the
- * single-frame RPC report -EMSGSIZE / omit the value once it exceeds the
+ * larger than CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE can be read through
+ * the ordinary GetSetting/ListSettings Studio RPC (streamed, any size, since
+ * simplification P2), written through the chunked WriteValueChunk Studio RPC,
+ * and read/written through the zmk_custom_setting_read_into /
+ * zmk_custom_setting_write_bytes firmware API; the fixed-carrier
+ * zmk_custom_setting_read/write report -EMSGSIZE once the value exceeds the
  * carrier.
  */
 #define ZMK_CUSTOM_SETTING_DEFINE_SIZED(_name, _max_size, _custom_subsystem_id, _key, _value_type, \
@@ -881,6 +885,29 @@ int zmk_custom_setting_with_value(const struct zmk_custom_setting *setting,
 int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void *buf,
                                  size_t capacity, size_t *out_size,
                                  enum zmk_custom_setting_value_type *out_type);
+
+/* Query a BYTES/STRING setting's current raw payload length without copying
+ * it. Used by the streaming RPC value-encode callback (simplification P2,
+ * see custom_settings_handler.c) and the split relay's pre-encode budget
+ * check; -EINVAL if the setting is not BYTES/STRING. */
+int zmk_custom_setting_value_size(const struct zmk_custom_setting *setting, size_t *out_size);
+
+/* Visitor invoked with a pointer straight into a large-store BYTES/STRING
+ * setting's backing region (no copy) while the settings lock is held. Runs
+ * synchronously; keep it short and do not call back into other
+ * zmk_custom_setting_* functions from within it. Lets the streaming RPC
+ * value-encode callback write a value larger than
+ * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE straight to the output stream
+ * with no intermediate copy (simplification P2 dropped the old chunk read
+ * staging buffer for this reason). */
+typedef void (*zmk_custom_setting_raw_bytes_visitor_t)(const uint8_t *data, size_t size,
+                                                       void *user_data);
+
+/* Returns -ENOTSUP if the setting's current value fits the fixed carrier (use
+ * zmk_custom_setting_with_value / zmk_custom_setting_read_into instead). */
+int zmk_custom_setting_with_large_raw_bytes(const struct zmk_custom_setting *setting,
+                                            zmk_custom_setting_raw_bytes_visitor_t visitor,
+                                            void *user_data);
 
 /* Write a BYTES or STRING setting from a runtime buffer instead of a
  * compile-time-literal value. For STRING settings, size is measured before
