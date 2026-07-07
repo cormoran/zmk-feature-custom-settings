@@ -7,3 +7,4 @@
 #include <zephyr/linker/linker-defs.h>
 
 ITERABLE_SECTION_RAM(zmk_custom_setting, 4)
+ITERABLE_SECTION_RAM(zmk_custom_setting_keyspace, 4)

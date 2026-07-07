@@ -671,15 +671,22 @@ static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
     dest->read_permission = proto_permission(setting->read_permission);
     dest->write_permission = proto_permission(setting->write_permission);
 
+    /* A keyspace slot's own constraints are always empty (they describe its
+     * opaque blob, which has none of its own) - present the owning
+     * keyspace's PAYLOAD constraints instead, matching what
+     * zmk_custom_setting_write validates a write against. */
+    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
+    const struct zmk_custom_setting_constraint *constraints =
+        keyspace ? keyspace->constraints : setting->constraints;
+    size_t constraints_count = keyspace ? keyspace->constraints_count : setting->constraints_count;
+
     for (size_t i = 0;
-         i < setting->constraints_count && dest->constraints_count < ARRAY_SIZE(dest->constraints);
-         i++) {
-        if (setting->constraints[i].type == ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
+         i < constraints_count && dest->constraints_count < ARRAY_SIZE(dest->constraints); i++) {
+        if (constraints[i].type == ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
             continue;
         }
 
-        int ret = constraint_to_proto(&setting->constraints[i],
-                                      &dest->constraints[dest->constraints_count]);
+        int ret = constraint_to_proto(&constraints[i], &dest->constraints[dest->constraints_count]);
         if (ret < 0) {
             continue;
         }
@@ -689,21 +696,36 @@ static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
     return 0;
 }
 
+/* A keyspace slot's OWN value_type is always BYTES internally (the opaque
+ * [user_key\0][payload] blob - see zmk_custom_setting_keyspace_of); the
+ * PRESENTED type - what RPC clients see the value as - is the owning
+ * keyspace's declared value_type. Every other setting presents as its own
+ * value_type. */
+static enum zmk_custom_setting_value_type
+presented_value_type(const struct zmk_custom_setting *setting) {
+    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
+    return keyspace ? keyspace->value_type : setting->value_type;
+}
+
 static int setting_value_to_proto(const struct zmk_custom_setting *setting,
                                   cormoran_zmk_custom_settings_SettingValue *dest) {
     *dest = (cormoran_zmk_custom_settings_SettingValue)
         cormoran_zmk_custom_settings_SettingValue_init_zero;
 
+    enum zmk_custom_setting_value_type presented_type = presented_value_type(setting);
     if (!zmk_custom_setting_is_array(setting) &&
-        (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
-         setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING)) {
+        (presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+         presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING)) {
         /* Simplification P2: defer the actual read to pb_encode time instead
-         * of reading eagerly here - see encode_setting_scalar_value. The
-         * oneof arm (bytes_value vs string_value) only depends on the
-         * setting's declared value_type, which is fixed at registration, so
-         * it is safe to select now even though the bytes themselves are read
-         * later. */
-        dest->which_value_type = setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES
+         * of reading eagerly here - see encode_setting_scalar_value, which
+         * (simplification P3) is itself keyspace-aware via
+         * zmk_custom_setting_read/with_large_raw_bytes already stripping a
+         * keyspace slot's key prefix - so this callback wiring needs no
+         * further change for keyspace slots. The oneof arm (bytes_value vs
+         * string_value) only depends on the PRESENTED value_type, which is
+         * fixed at registration, so it is safe to select now even though the
+         * bytes themselves are read later. */
+        dest->which_value_type = presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES
                                      ? cormoran_zmk_custom_settings_SettingValue_bytes_value_tag
                                      : cormoran_zmk_custom_settings_SettingValue_string_value_tag;
         dest->value_type.bytes_value.funcs.encode = encode_setting_scalar_value;
@@ -1078,6 +1100,28 @@ static bool for_each_list_item(const struct zmk_custom_settings_setting_scope *s
         }
         if (!visitor(setting, user_data)) {
             return false;
+        }
+    }
+
+    /* Simplification P3: keyspace slots are no longer reachable through
+     * ZMK_CUSTOM_SETTING_FOREACH (they were, via the now-deleted general
+     * runtime-registration list) - walk every keyspace's live slots
+     * explicitly so ListSettings/GetSetting/notifications still surface
+     * user-created entries (docs/design/simplification-redesign.md §5,
+     * Goal A audit). A slot is never an array, so no expansion step is
+     * needed the way array descriptors need one above. */
+    ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(keyspace) {
+        for (uint32_t i = 0; i < keyspace->max_entries; i++) {
+            if (!keyspace->slots[i].in_use) {
+                continue;
+            }
+            const struct zmk_custom_setting *slot_setting = &keyspace->slots[i].setting;
+            if (!setting_matches_scope(slot_setting, scope)) {
+                continue;
+            }
+            if (!visitor(slot_setting, user_data)) {
+                return false;
+            }
         }
     }
 
@@ -1578,7 +1622,7 @@ static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArray
 }
 
 /*
- * P5b: CreateSetting/DeleteSetting - RPC-creatable keyspace entries (see
+ * CreateSetting/DeleteSetting - RPC-creatable keyspace entries (see
  * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE in custom_settings.h). Unlike every
  * other request above, these resolve their target through
  * zmk_custom_settings_keyspace_find_for_key(subsystem, key) - a keyspace,
@@ -1773,8 +1817,9 @@ static K_MUTEX_DEFINE(chunk_session_lock);
 static struct zmk_custom_settings_chunk_session chunk_session;
 
 static bool chunk_value_type_supported(const struct zmk_custom_setting *setting) {
-    return setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
-           setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
+    enum zmk_custom_setting_value_type type = presented_value_type(setting);
+    return type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+           type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
 }
 
 static void reset_chunk_session_locked(void) {
@@ -1874,8 +1919,8 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
         return 0;
     }
 
-    struct zmk_custom_setting_value rpc_value = {.type = setting->value_type};
-    if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
+    struct zmk_custom_setting_value rpc_value = {.type = presented_value_type(setting)};
+    if (rpc_value.type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
         rpc_value.size = chunk_session.total_size;
         memcpy(rpc_value.bytes_value, chunk_session.buffer, chunk_session.total_size);
     } else {
@@ -2828,6 +2873,95 @@ static int custom_settings_list_array_test_init(void) {
 }
 
 SYS_INIT(custom_settings_list_array_test_init, APPLICATION, 99);
+
+/* Simplification P3: ListSettings/GetSetting must surface keyspace entries
+ * by their USER key with their PAYLOAD value, even though a slot is stored
+ * internally as an anonymous [key\0][payload] BYTES blob under an ordinal
+ * storage name. Exercises for_each_list_item's explicit keyspace-slot pass
+ * (Goal A audit) plus the full setting_to_proto presentation path. Uses the
+ * "test"/"macro/" keyspace registered by custom_settings_test.c (reached
+ * through the compile-time keyspace section, so no cross-file symbol is
+ * needed). */
+static int custom_settings_list_keyspace_test_init(void) {
+    struct zmk_custom_setting_keyspace *keyspace =
+        zmk_custom_settings_keyspace_find_for_key("test", "macro/list-test");
+    if (!keyspace) {
+        LOG_ERR("List keyspace test: no keyspace registered for test/macro/");
+        return -ENOENT;
+    }
+
+    const struct zmk_custom_setting *created = NULL;
+    struct zmk_custom_setting_value value = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
+        .int32_value = 42,
+    };
+    int ret = zmk_custom_setting_keyspace_create(keyspace, "macro/list-test", &value,
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0 || !created) {
+        LOG_ERR("List keyspace test: create failed: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+
+    struct zmk_custom_settings_setting_scope scope = {
+        .has_custom_subsystem_id = true,
+        .has_key_prefix = true,
+        .has_source = true,
+        .source = ZMK_CUSTOM_SETTING_SOURCE_LOCAL,
+    };
+    copy_string(scope.custom_subsystem_id, sizeof(scope.custom_subsystem_id), "test");
+    copy_string(scope.key_prefix, sizeof(scope.key_prefix), "macro/");
+
+    uint32_t count = 0;
+    for_each_list_item(&scope, list_count_visitor, &count);
+    if (count != 1) {
+        LOG_ERR("List keyspace test: expected 1 list item under macro/, got %u", count);
+        return -EINVAL;
+    }
+
+    /* The presented Setting must carry the USER key and the typed payload,
+     * not the ordinal storage name / raw blob. */
+    cormoran_zmk_custom_settings_Setting proto_setting =
+        cormoran_zmk_custom_settings_Setting_init_zero;
+    ret = setting_to_proto(created, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        LOG_ERR("List keyspace test: setting_to_proto failed: %d", ret);
+        return ret;
+    }
+    if (strcmp(proto_setting.key, "macro/list-test") != 0) {
+        LOG_ERR("List keyspace test: expected user key, got \"%s\"", proto_setting.key);
+        return -EINVAL;
+    }
+    if (!proto_setting.has_value ||
+        proto_setting.value.which_value_type !=
+            cormoran_zmk_custom_settings_SettingValue_int32_value_tag ||
+        proto_setting.value.value_type.int32_value != 42) {
+        LOG_ERR("List keyspace test: expected int32 payload 42 (which=%u)",
+                (unsigned)proto_setting.value.which_value_type);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_keyspace_delete(keyspace, "macro/list-test");
+    if (ret < 0) {
+        LOG_ERR("List keyspace test: delete failed: %d", ret);
+        return ret;
+    }
+    count = 0;
+    for_each_list_item(&scope, list_count_visitor, &count);
+    if (count != 0) {
+        LOG_ERR("List keyspace test: expected 0 list items after delete, got %u", count);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_list_keyspace_user_key key=macro/list-test value=42");
+    return 0;
+}
+
+/* Priority 99 like the other self-tests. Link order relative to
+ * custom_settings_test.c's SYS_INIT (same level) does not matter: this test
+ * only needs the keyspace section entry (compile-time) and an empty "macro/"
+ * prefix, and the lifecycle test deletes every entry it creates before
+ * returning. */
+SYS_INIT(custom_settings_list_keyspace_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) &&                                                 \
