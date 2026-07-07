@@ -765,3 +765,127 @@ findings and deviations from §4/§10's sketch:
   exercise the ZMK Studio RPC TX chunking behavior on real hardware the way
   Phase 1 / issue #24 validated `CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=64` serving
   a 128-byte value). Left for the orchestrator per the task's scope.
+
+## 14. Implementation notes (Phase 3 / Change 3, as landed)
+
+Phase 3 (`codex/simplify-p3-keyspace`, stacked on Phase 2's
+`codex/simplify-p2-read-chunk`) implemented §5 in full: the general
+runtime-registration facility is deleted, `ZMK_CUSTOM_SETTING_FOREACH` is a
+plain `STRUCT_SECTION_FOREACH` again, and keyspaces are rebuilt in the
+opaque-blob form. Notable decisions and deviations from §5's sketch:
+
+- **Keyspace-slot dispatch rides on one descriptor field, not scattered
+  branches.** §5.3 frames the blob decode as living at "~3 presentation
+  sites". In practice the cleanest cut was one `_keyspace` back-pointer on
+  `struct zmk_custom_setting` (NULL for every normal setting) consulted by
+  the public entry points (`read`/`read_into`/`write`/`write_bytes`/
+  `value_size`/`with_large_raw_bytes`/`public_key`/`serialize`/`deserialize`)
+  which then delegate to a small `keyspace_*` helper cluster in
+  `custom_settings.c`. The storage/pool/save/load internals
+  (`write_bytes_raw`, `write_scalar_value`, `save_setting_locked`,
+  `large_store_set_raw`, `pool_ensure_region`, `value_from_storage`) stay
+  100% keyspace-agnostic exactly as designed - they see one opaque pooled
+  BYTES value per slot. The former public `zmk_custom_setting_write` /
+  `write_bytes` bodies were renamed to internal `write_scalar_value` /
+  `write_bytes_raw` so the keyspace layer can store an already-assembled blob
+  without re-triggering its own interception.
+- **A slot's own `value_type` is always BYTES.** The keyspace's *declared*
+  value_type (what clients see) lives only on the keyspace and is resolved
+  via `zmk_custom_setting_keyspace_of()` / `presented_value_type()` at the
+  presentation sites (RPC oneof arm selection, chunk-commit typing,
+  constraint presentation in `setting_meta_to_proto`, converter selection).
+  The slot descriptor deliberately does NOT copy the keyspace's constraints/
+  converters/default: those describe the payload, not the blob.
+- **STRING payload NUL policy:** the payload is stored inside the blob
+  WITHOUT its own trailing NUL (`value_to_storage`'s STRING arm already
+  yields NUL-less bytes); the NUL is re-added only when materializing a
+  STRING carrier (`value_from_raw`). The blob's single interior NUL is the
+  key/payload separator, found with `memchr` - user keys cannot contain NUL
+  so this is unambiguous. The slot's `value_max_size` is
+  `max_key_len + max_size` (blob bound); `large_store_set_raw`'s "+1 for
+  STRING" logic never fires for a slot because the slot's own type is BYTES.
+- **Ordinal separator is `#`.** Verified against Zephyr's settings naming:
+  only `/` is special (hierarchy separator, `settings_name_next`); `#` is an
+  ordinary name byte, so `"<subsystem>/<prefix>#<i>"` needs no escaping.
+  Since every tested/expected `key_prefix` itself ends with `/` (e.g.
+  `macro/`), a slot's full storage name looks like
+  `custom_settings/test/macro/#0` - the `#<i>` component is simply the last
+  hierarchy element. The per-slot ordinal-name buffer is
+  `CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN + 16` bytes, and the macro
+  BUILD_ASSERTs `max_key_len <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN` (the
+  blob scratch and load staging buffers are sized off the same bound).
+- **Load-time bind is by parsed index, not free-slot search.** The
+  SETTINGS_STATIC_HANDLER set callback parses `"<prefix>#<i>"`, range-checks
+  `i` against `max_entries` (out-of-range → `LOG_WRN` + skip, boot never
+  fails), and binds slot `i` directly - a record's slot index is its
+  identity, so re-binding is deterministic across reboots and needs no key
+  at bind time. "Doesn't fit the pool" during the subsequent value apply
+  keeps Phase 1's LOG_WRN + skip policy via the generic pooled-load path.
+- **Keyspace registry is a linker section**, per §5.2 point 1:
+  `STRUCT_SECTION_ITERABLE(zmk_custom_setting_keyspace, ...)` + a second
+  `ITERABLE_SECTION_RAM` line in `include/linker/zmk-custom-settings.ld`
+  (const/ROM split deferred to Phase 4 as planned).
+  `zmk_custom_settings_register_keyspace()`, the keyspace `_next` field, and
+  the keyspace foreach function pair are deleted; former register-time
+  validation moved to BUILD_ASSERTs in the macro (no SYS_INIT check was
+  needed - every remaining register-time check was compile-time expressible;
+  the duplicate-prefix runtime check was dropped, as two keyspaces with the
+  same subsystem+prefix in one firmware is a programming error whose
+  first-match lookup behavior is at least deterministic).
+- **`_default_value` was REMOVED from `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE`**
+  (signature change beyond §5's sketch). A slot's blob always carries its
+  user key, so no shared static default value can represent a
+  not-yet-created entry; the old per-slot default only mattered for
+  discard/reset of a never-persisted entry, which now leave the blob
+  unchanged instead of reverting the payload to a keyless default.
+- **`max_key_len` survives** as a create-time validation bound only (plus
+  its share of the pool sizing `max_entries * (max_key_len + max_size)`);
+  the `keys[max_entries][max_key_len]` table and `value_bufs` are gone.
+  Every keyspace's pool is now unconditional (small keyspaces too - the blob
+  always needs pool space for the key even when the payload is tiny), so
+  pool usage reported by `zmk_custom_setting_large_pool_used()` includes
+  key + NUL bytes per entry (the self-tests assert this).
+- **TEMPORARY-mode overrides for keyspace slots keep working** because the
+  temp pool keys by descriptor pointer and slots are stable static objects;
+  a temp override stores the full blob bytes and `keyspace_read_payload()`
+  strips the key from whatever `effective_value()` returns, override or not.
+  `keyspace_release_slot_locked` (delete path) clears any active override
+  and releases the pool region before marking the slot free.
+- **Audited `ZMK_CUSTOM_SETTING_FOREACH` call sites** (every use, checked
+  for whether it previously relied on seeing keyspace slots through the
+  runtime list):
+  - `custom_settings.c zmk_custom_setting_find` — DID rely on it → now
+    falls back to `zmk_custom_settings_keyspace_find_for_key` +
+    `zmk_custom_setting_keyspace_find` after the section walk misses.
+  - `custom_settings.c zmk_custom_setting_find_array` — arrays only; no
+    keyspace slot is an array → unchanged.
+  - `custom_settings.c apply_scope` (save/discard/reset scope) — DID rely
+    on it → now runs an explicit second pass over every keyspace's live
+    slots.
+  - `custom_settings.c custom_settings_init` — compile-time settings only
+    (slots are initialized at bind time by `keyspace_bind_slot_locked` →
+    `init_setting_state_locked`) → unchanged.
+  - `custom_settings_handler.c for_each_list_item` (ListSettings count +
+    batched send, and therefore list notifications) — DID rely on it → now
+    runs an explicit second pass over live keyspace slots.
+  - `custom_settings_handler.c scope_has_permission` — permission pre-gate
+    for scope mutations; keyspace slots inherit their keyspace's
+    permissions, and the subsequent apply still enforces unlock per
+    setting, so the pre-gate staying compile-time-only is conservative,
+    not a hole → unchanged.
+  - `custom_settings_handler.c custom_settings_list_array_test_init`
+    (self-test) — counts array registrations only → unchanged.
+  - deleted sites: `runtime_setting_exists_locked` (removed with
+    registration), the virtual iterator itself.
+  - Notifications (`raise_setting_notification` → `setting_to_proto`) do
+    not iterate; they present whatever descriptor they are handed, and the
+    `Setting.key`/`Setting.value` encode paths (`zmk_custom_setting_public_key`,
+    `encode_setting_scalar_value` via `zmk_custom_setting_read`/
+    `with_large_raw_bytes`) are keyspace-aware, so create/delete/write
+    notifications for keyspace entries present the user key + payload.
+- **RPC serializer converters still apply to keyspace entries' small
+  payloads** (previously selected off the slot descriptor's copied
+  `rpc_serializer`; now off the keyspace via `zmk_custom_setting_keyspace_of`
+  inside `convert_rpc_bytes_value` - same behavior, different plumbing). The
+  large-payload path still skips converters, same as every other large value
+  (§13's open-question-4 status is unchanged).

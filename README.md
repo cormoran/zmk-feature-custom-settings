@@ -534,92 +534,37 @@ macros for zero-or-more constraints and/or custom bytes RPC converters.
 > `key/_size` entries persist and load exactly as before), so existing user
 > data survives the migration with no extra code.
 
-### Runtime Registration
-
-`ZMK_CUSTOM_SETTING_DEFINE`/`ZMK_CUSTOM_SETTING_ARRAY_DEFINE` need the
-setting's shape (subsystem, key, type, count) to be known at compile time.
-For a driver whose setting count depends on devicetree instance data or
-other runtime probing, register a setting directly with
-`zmk_custom_settings_register()` instead:
-
-```c
-static struct zmk_custom_setting_value my_driver_default =
-    ZMK_CUSTOM_SETTING_VALUE_INT32(0);
-
-/* Caller-owned storage: static (or per-devicetree-instance) so it outlives
- * the registration. No heap is used anywhere in this API. */
-static struct zmk_custom_setting my_driver_setting;
-
-static int my_driver_init(void) {
-    my_driver_setting = (struct zmk_custom_setting){
-        .custom_subsystem_id = "my_module",
-        .key = "channel_gain",
-        .array_key = NULL,
-        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
-        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-        .default_value = &my_driver_default,
-        .temp_slot = -1,
-    };
-
-    return zmk_custom_settings_register(&my_driver_setting);
-}
-SYS_INIT(my_driver_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
-```
-
-A runtime-registered setting behaves exactly like a compile-time one
-afterwards: it is find-able (`zmk_custom_setting_find`), shows up in
-`ZMK_CUSTOM_SETTING_FOREACH`, participates in save/discard/reset scope
-operations, and is listed/read/written over Studio RPC. If registration
-happens after this module's own boot-time settings load (the common case
-for anything registering outside its own early `SYS_INIT`),
-`zmk_custom_settings_register()` also loads any value already persisted
-under this setting's storage key from a previous boot, so a user's saved
-value is not silently replaced by the compile-time default. Registering
-the same subsystem id + key twice fails with `-EEXIST`; a malformed
-descriptor fails with `-EINVAL`.
-
-Only the descriptor struct itself needs to be filled in by hand this
-way - array settings still need a `struct zmk_custom_setting_array_state`
-(see `ZMK_CUSTOM_SETTING_ARRAY_DEFINE`'s expansion in
-`include/cormoran/zmk/custom_settings.h` for the exact shape) if a runtime
-array is needed; register its descriptor with `.array_key` set and
-`.array_state` pointing at that state the same way the macro does.
-
 ### RPC-Creatable Keyspaces
 
-For entries whose *keys* are not known at compile time either - user-created
-profiles, named macros, and similar - register a **keyspace**: a fixed-size
+For entries whose *keys* are not known at compile time - user-created
+profiles, named macros, and similar - define a **keyspace**: a fixed-size
 pool of slots under a shared key prefix, with entries created and deleted at
 runtime by RPC clients (or firmware) instead of by `ZMK_CUSTOM_SETTING_DEFINE`.
 No heap is used: `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE` statically allocates
-`max_entries` slots, each with its own `max_key_len`-sized key buffer -
-independent of `CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN`, so a keyspace for
-short suffixes (e.g. `macro/<name>`) does not pay for a buffer sized for the
-global maximum key length.
+`max_entries` slots plus one shared per-keyspace byte pool that every entry's
+key + value are carved from on demand. Like `ZMK_CUSTOM_SETTING_DEFINE`, the
+macro registers the keyspace at compile time (a linker section entry) - there
+is no runtime registration call.
 
 ```c
 ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(
     my_macros, "my_module", /* key prefix = */ "macro/",
     ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
     /* max_size = */ sizeof(int32_t), /* max_key_len = */ 16,
-    /* max_entries = */ 8, ZMK_CUSTOM_SETTING_VALUE_INT32(0),
+    /* max_entries = */ 8,
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
-
-static int my_module_init(void) {
-    return zmk_custom_settings_register_keyspace(&my_macros);
-}
-SYS_INIT(my_module_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 ```
 
-Register the keyspace before `settings_load()` runs (i.e. from a `SYS_INIT`,
-like any other setting) so persisted entries are picked up correctly - see
-below.
+`max_key_len` bounds a created entry's key length (including the NUL
+terminator; it must not exceed `CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN`), and
+`max_size` bounds each entry's value size. `max_entries` bounds how many
+entries can exist at once. The keyspace's pool is sized
+`max_entries * (max_key_len + max_size)` bytes and is shared across entries,
+so a mix of long-key/short-value and short-key/large-value entries draws from
+one budget instead of every slot reserving its own worst case.
 
 Create and delete entries with `zmk_custom_setting_keyspace_create` /
 `zmk_custom_setting_keyspace_delete`, or over Studio RPC with the
@@ -631,8 +576,9 @@ const struct zmk_custom_setting *created;
 int ret = zmk_custom_setting_keyspace_create(
     &my_macros, "macro/my-macro-1", &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
     ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
-/* -ENOSPC if every slot is in use, -EEXIST if the key already has a live
- * slot, -ENAMETOOLONG if the key does not fit, -EINVAL for a mismatched
+/* -ENOSPC if every slot is in use (or the pool cannot fit the new
+ * key + value), -EEXIST if the key already has a live slot,
+ * -ENAMETOOLONG if the key does not fit, -EINVAL for a mismatched
  * prefix or value type. */
 
 zmk_custom_setting_keyspace_delete(&my_macros, "macro/my-macro-1");
@@ -641,32 +587,41 @@ zmk_custom_setting_keyspace_delete(&my_macros, "macro/my-macro-1");
 
 For a `BYTES`/`STRING` keyspace, `max_size` can exceed
 `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` exactly like
-[`ZMK_CUSTOM_SETTING_DEFINE_SIZED`](#large-values-per-setting-max_size): every
-entry then draws its region from one pool private to that keyspace (sized
-`max_entries * (max_size + 1)` bytes, the same worst-case budget a per-slot
-buffer would have reserved), so `max_size` and `max_entries` stay independent
-knobs — a handful of near-`max_size` entries and many small ones draw from the
-same budget rather than each slot reserving its own worst case. Large entries
-read and write like any other [large value](#large-values-per-setting-max_size)
-(streamed on read, chunked on write).
+[`ZMK_CUSTOM_SETTING_DEFINE_SIZED`](#large-values-per-setting-max_size). Large
+entries read and write like any other
+[large value](#large-values-per-setting-max_size) (streamed on read, chunked
+on write).
 
-Once created, an entry is a full citizen of the registry: it is find-able
-(`zmk_custom_setting_find("my_module", "macro/my-macro-1")`), discoverable via
-the existing `key_prefix` scope filter (`ListSettingsRequest{scope:{key_prefix:
-"macro/"}}` returns every live entry), and covered by save/discard/reset scope
-operations - all for free through the same `ZMK_CUSTOM_SETTING_FOREACH`
-virtual iterator that runtime-registered settings use (see Runtime
-Registration above), since `zmk_custom_setting_keyspace_create` registers each
-slot's descriptor through the same mechanism.
+Once created, an entry behaves like any other setting: it is find-able
+(`zmk_custom_setting_find("my_module", "macro/my-macro-1")`), readable and
+writable by its key with the ordinary firmware API and `GetSetting`/
+`WriteSetting` RPC, discoverable via the existing `key_prefix` scope filter
+(`ListSettingsRequest{scope:{key_prefix:"macro/"}}` returns every live
+entry), and covered by save/discard/reset scope operations.
 
 Persisted entries survive a reboot with **no module code running on their
-behalf**: while `settings_load()` is loading `custom_settings/my_module/*`
-records, any key matching a registered keyspace's prefix that is not yet
-bound to a live slot is automatically bound to a free one before its loaded
-value is applied. If more entries were persisted than `max_entries` allows
-(e.g. after lowering `max_entries` across a firmware update), the extras are
-silently left unbound rather than failing boot; deleting some entries and
-raising `max_entries` again makes room for them.
+behalf**: each entry persists under a stable per-slot storage record
+(internally named `custom_settings/<subsystem>/<prefix>#<slot>`, with the
+user-visible key stored inside the record's value), and while
+`settings_load()` is loading those records each one is re-bound to its slot
+before its value is applied. If a persisted entry no longer fits (e.g. after
+lowering `max_entries` or shrinking the pool across a firmware update), it is
+skipped with a warning rather than failing boot.
+
+> **Upgrade note (storage format change):** keyspace entries created by
+> firmware built before this version persisted under their literal user key
+> with a bare value. This version persists them under the per-slot record
+> name above with the key embedded in the value, and does not migrate old
+> records - previously created entries are dropped (ignored on load) after
+> upgrading. Compile-time settings, arrays, and pooled/large values are
+> unaffected. Recreate keyspace entries once after upgrading.
+
+> **Removed in this version:** the general runtime-registration API
+> (`zmk_custom_settings_register()` / `zmk_custom_settings_unregister()`)
+> existed only to support the previous keyspace implementation and has been
+> deleted. Settings are registered at compile time via the
+> `ZMK_CUSTOM_SETTING_DEFINE`/`ZMK_CUSTOM_SETTING_ARRAY_DEFINE` macros;
+> runtime-created *entries* are the keyspace feature above.
 
 ### Firmware API
 
