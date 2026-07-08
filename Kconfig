@@ -36,7 +36,6 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
 
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUES
     bool "Enable large (>single-frame) setting values and the shared value pool"
-    default y
     help
       Compiles in per-setting large values and the shared large-value pool
       (ZMK_CUSTOM_SETTING_DEFINE_SIZED / _POOLED / LARGE_POOL_DEFINE, the
@@ -190,7 +189,6 @@ config ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE
 
 config ZMK_CUSTOM_SETTINGS_ARRAY
     bool "Enable array settings"
-    default y
     help
       Compiles in fixed-length array settings (ZMK_CUSTOM_SETTING_ARRAY_DEFINE,
       push/pop/insert/remove, the array index-view pool, and array RPC).
@@ -213,7 +211,6 @@ config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
 
 config ZMK_CUSTOM_SETTINGS_KEYSPACE
     bool "Enable RPC-creatable keyspaces (namespaces)"
-    default y
     select ZMK_CUSTOM_SETTINGS_LARGE_VALUES
     help
       Compiles in runtime-creatable keyspaces (ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE,
@@ -224,7 +221,6 @@ config ZMK_CUSTOM_SETTINGS_KEYSPACE
 
 config ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS
     bool "Enable per-setting RPC bytes converter hooks"
-    default y
     help
       Compiles in the ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS
       serialize/deserialize hooks that transform a BYTES value between its
@@ -233,7 +229,6 @@ config ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS
 
 config ZMK_CUSTOM_SETTINGS_RECORD
     bool "Enable record/struct settings (TLV codec)"
-    default y
     help
       Compiles in ZMK_CUSTOM_SETTING_RECORD_* struct settings (a versioned
       TLV codec over a BYTES setting). Disable to shrink firmware when no

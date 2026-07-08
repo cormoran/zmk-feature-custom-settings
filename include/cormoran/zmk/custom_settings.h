@@ -129,6 +129,9 @@ struct zmk_custom_setting_large_pool {
  * statics. Pass _name (not &_name) as ZMK_CUSTOM_SETTING_DEFINE_POOLED's
  * _pool argument; that macro takes the address itself. */
 #define ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(_name, _pool_size)                                    \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES),                              \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES to use "                          \
+                 "ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE");                                          \
     static uint8_t _name##_pool_data[_pool_size];                                                  \
     static struct zmk_custom_setting_large_pool _name = {                                          \
         .data = _name##_pool_data,                                                                 \
@@ -501,6 +504,9 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS(                                             \
     _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,              \
     _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, _constraint)          \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS),                            \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS to use "                        \
+                 "ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS");                                 \
     ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                                 \
         _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
         _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, _constraint)
@@ -626,6 +632,9 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
     _name, _max_size, _pool, _custom_subsystem_id, _key, _value_type, _default_value,              \
     _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
     ...)                                                                                           \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES),                              \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES to use "                          \
+                 "ZMK_CUSTOM_SETTING_DEFINE_SIZED/_POOLED");                                       \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -711,6 +720,9 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
     _name, _custom_subsystem_id, _key, _value_type, _max_count, _default_size, _defaults,          \
     _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
     _constraint)                                                                                   \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS),                            \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS to use "                        \
+                 "ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS");                           \
     ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                           \
         _name, _custom_subsystem_id, _key, _value_type, _max_count, _default_size, _defaults,      \
         _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, \
@@ -727,6 +739,9 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
     _name, _custom_subsystem_id, _key, _value_type, _max_count, _default_size, _defaults,          \
     _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
     ...)                                                                                           \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY),                                     \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY to use "                                 \
+                 "ZMK_CUSTOM_SETTING_ARRAY_DEFINE");                                               \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -1086,6 +1101,9 @@ struct zmk_custom_setting_record_schema {
  * literal) static objects -- required so this expands to a valid constant
  * initializer under strict -std=c11 (see ZMK_CUSTOM_SETTING_RANGE_INT32). */
 #define ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE(_name, _struct, ...)                               \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_RECORD),                                    \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_RECORD to use "                                \
+                 "ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE");                                       \
     static const struct zmk_custom_setting_record_field _name##_fields[] = {__VA_ARGS__};          \
     static const struct zmk_custom_setting_record_schema _name = {                                 \
         .fields = _name##_fields,                                                                  \
@@ -1329,6 +1347,17 @@ zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting) {
         _max_entries, _confidentiality, _read_permission, _write_permission, NULL, NULL,           \
         __VA_ARGS__)
 
+/* No separate BUILD_ASSERT(CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS) here
+ * (compare ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS /
+ * ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS): unlike those two
+ * features, keyspaces have no separate "plain" entry point that bypasses
+ * this macro - ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_CONSTRAINTS (the
+ * no-converters path) funnels through here too, passing NULL/NULL. Asserting
+ * here would misfire on that plain path with RPC_CONVERTERS off. A keyspace
+ * registered with real converters while RPC_CONVERTERS is off silently no-ops
+ * the conversion (falls through to identity passthrough) instead of failing
+ * to build; document CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS as a
+ * prerequisite for keyspace converters in the README instead. */
 #define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                    \
     _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
     _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
@@ -1359,6 +1388,9 @@ zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting) {
     _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
     _pool_size, _confidentiality, _read_permission, _write_permission, _rpc_serializer,            \
     _rpc_deserializer, ...)                                                                        \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE),                                  \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE to use "                              \
+                 "ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE");                                            \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
