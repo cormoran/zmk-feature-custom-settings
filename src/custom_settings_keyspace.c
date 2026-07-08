@@ -140,8 +140,8 @@ static int keyspace_free_slot_index_locked(struct zmk_custom_setting_keyspace *k
  * holds custom_settings_lock. Never fails: the ordinal name buffer is sized by
  * ZMK_CUSTOM_SETTINGS_KEYSPACE_ORDINAL_NAME_SIZE generously enough for any
  * key_prefix + max_entries this module's BUILD_ASSERTs allow. */
-struct zmk_custom_setting *
-keyspace_bind_slot_locked(struct zmk_custom_setting_keyspace *keyspace, uint32_t index) {
+struct zmk_custom_setting *keyspace_bind_slot_locked(struct zmk_custom_setting_keyspace *keyspace,
+                                                     uint32_t index) {
     struct zmk_custom_setting_keyspace_slot *slot = &keyspace->slots[index];
 
     snprintf(slot->ordinal_name, sizeof(slot->ordinal_name), "%s#%u", keyspace->key_prefix, index);

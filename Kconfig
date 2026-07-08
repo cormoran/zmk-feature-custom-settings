@@ -222,6 +222,25 @@ config ZMK_CUSTOM_SETTINGS_KEYSPACE
       ZMK_CUSTOM_SETTINGS_LARGE_VALUES. Disable to shrink firmware when no
       module registers a keyspace.
 
+config ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS
+    bool "Enable per-setting RPC bytes converter hooks"
+    default y
+    help
+      Compiles in the ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS
+      serialize/deserialize hooks that transform a BYTES value between its
+      stored form and its RPC form. Disable to shrink firmware when no setting
+      uses a converter (values pass through unchanged).
+
+config ZMK_CUSTOM_SETTINGS_RECORD
+    bool "Enable record/struct settings (TLV codec)"
+    default y
+    help
+      Compiles in ZMK_CUSTOM_SETTING_RECORD_* struct settings (a versioned
+      TLV codec over a BYTES setting). Disable to shrink firmware when no
+      setting is a record. A record larger than
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE additionally needs
+      ZMK_CUSTOM_SETTINGS_LARGE_VALUES.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 

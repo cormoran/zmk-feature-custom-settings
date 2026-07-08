@@ -9,9 +9,12 @@
  * (core lifecycle: always compiled with ZMK_CUSTOM_SETTINGS) and the
  * optional feature translation units split out of it: src/custom_settings_pool.c
  * (CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES), src/custom_settings_array.c
- * (CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY), and src/custom_settings_keyspace.c
+ * (CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY), src/custom_settings_keyspace.c
  * (CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE, which selects LARGE_VALUES: a
- * keyspace slot is a pool-backed blob).
+ * keyspace slot is a pool-backed blob), and src/custom_settings_rpc_convert.c
+ * (CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS). src/custom_settings_record.c
+ * (CONFIG_ZMK_CUSTOM_SETTINGS_RECORD) does NOT need this header - it only
+ * calls the public API.
  *
  * NOT a public header - lives under src/, not include/. Only files inside
  * this module may include it.
@@ -203,9 +206,29 @@ const char *keyspace_public_key_locked(const struct zmk_custom_setting *setting)
 
 /*
  * ---------------------------------------------------------------------
+ * RPC_CONVERTERS entry point (defined in custom_settings_rpc_convert.c when
+ * CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS is enabled). Declared here
+ * unconditionally so zmk_custom_setting_serialize_rpc_value/
+ * _deserialize_rpc_value (core, always compiled) can call it from inside an
+ * IS_ENABLED-guarded branch without custom_settings_rpc_convert.c needing to
+ * be compiled.
+ * ---------------------------------------------------------------------
+ */
+
+/* Convert a BYTES value between its stored form and its RPC-presented form
+ * via `converter` (a setting's or - for a keyspace slot - its owning
+ * keyspace's rpc_serializer/rpc_deserializer), or copy it through unchanged
+ * when the presented type isn't BYTES or `converter` is NULL. */
+int convert_rpc_bytes_value(const struct zmk_custom_setting *setting,
+                            const struct zmk_custom_setting_value *src,
+                            struct zmk_custom_setting_value *dest,
+                            zmk_custom_setting_rpc_bytes_converter_t converter);
+
+/*
+ * ---------------------------------------------------------------------
  * CORE internals used by custom_settings_pool.c / custom_settings_array.c /
- * custom_settings_keyspace.c (and any future feature translation unit).
- * Defined (non-static) in custom_settings.c.
+ * custom_settings_keyspace.c / custom_settings_rpc_convert.c (and any future
+ * feature translation unit). Defined (non-static) in custom_settings.c.
  * ---------------------------------------------------------------------
  */
 
