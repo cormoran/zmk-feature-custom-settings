@@ -47,6 +47,7 @@ PASS: custom_settings_pool_release used_before=171 used_after=101
 PASS: custom_settings_pool_persist_discard size=100
 PASS: custom_settings_pool_string_member value=hello
 PASS: custom_settings_keyspace_large_value size=100
+PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
 zmk: Welcome to ZMK!
 pressed: position 0 keycode 0x70004
 released: position 0 keycode 0x70004

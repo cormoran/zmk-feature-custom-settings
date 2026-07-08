@@ -1313,6 +1313,32 @@ zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting);
     _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
     _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
     ...)                                                                                           \
+    ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS(              \
+        _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len,            \
+        _max_entries, (_max_entries) * ((_max_key_len) + (_max_size)), _confidentiality,           \
+        _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, __VA_ARGS__)
+
+/* Same as ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE, but takes an explicit blob-pool
+ * budget (_pool_size) instead of sizing the pool at the worst case
+ * max_entries * (max_key_len + max_size). See docs/design/
+ * simplification-redesign.md §5.3: over-committing the pool lets a keyspace
+ * hold many small entries or a handful of large ones from one shared budget,
+ * instead of always paying for max_entries full-size entries. _pool_size
+ * must be large enough for at least one full-size entry (max_key_len +
+ * max_size); create()/write() return -ENOSPC once the budget is exhausted,
+ * same as any other pooled BYTES setting. */
+#define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE(                                         \
+    _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
+    _pool_size, _confidentiality, _read_permission, _write_permission, _constraint)                \
+    ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS(              \
+        _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len,            \
+        _max_entries, _pool_size, _confidentiality, _read_permission, _write_permission, NULL,     \
+        NULL, _constraint)
+
+#define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS(          \
+    _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
+    _pool_size, _confidentiality, _read_permission, _write_permission, _rpc_serializer,            \
+    _rpc_deserializer, ...)                                                                        \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -1329,13 +1355,17 @@ zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting);
                      (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,                        \
                  "A keyspace max_size larger than the fixed carrier requires a BYTES/STRING "      \
                  "value_type");                                                                    \
+    BUILD_ASSERT((_pool_size) >= (_max_key_len) + (_max_size),                                     \
+                 "Keyspace pool_size must fit at least one full-size entry (max_key_len + "        \
+                 "max_size)");                                                                     \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
     static struct zmk_custom_setting_keyspace_slot _name##_slots[_max_entries];                    \
     /* Every entry's [key\0][payload] blob is pool-backed unconditionally -                        \
      * see the .large_pool field comment on struct                                                 \
-     * zmk_custom_setting_keyspace. */                                                             \
-    ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(_name##_pool,                                             \
-                                         (_max_entries) * ((_max_key_len) + (_max_size)));         \
+     * zmk_custom_setting_keyspace. _pool_size may be smaller than the                             \
+     * worst-case max_entries * (max_key_len + max_size) budget - see                              \
+     * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE. */                                       \
+    ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(_name##_pool, (_pool_size));                              \
     STRUCT_SECTION_ITERABLE(zmk_custom_setting_keyspace, _name) = {                                \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key_prefix = _key_prefix,                                                                 \

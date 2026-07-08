@@ -356,6 +356,28 @@ ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_blob_keyspace, "test", "blob/",
                                    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 /*
+ * Enabler A (for zmk-feature-runtime-macro's keyspace migration): a keyspace
+ * whose pool is deliberately smaller than the worst-case max_entries *
+ * (max_key_len + max_size) budget - the over-commit promised by
+ * docs/design/simplification-redesign.md §5.3 ("a pool smaller than
+ * max_entries × max_size lets a keyspace hold many small entries or few
+ * large ones"). max_entries=8 but the pool only holds 3 full-size entries
+ * worth of bytes, so create() must start failing with -ENOSPC well before
+ * the 8-entry slot-count ceiling is reached.
+ */
+#define TEST_OVERCOMMIT_MAX_SIZE 16
+#define TEST_OVERCOMMIT_MAX_KEY_LEN 12
+#define TEST_OVERCOMMIT_MAX_ENTRIES 8
+#define TEST_OVERCOMMIT_POOL_SIZE (3 * (TEST_OVERCOMMIT_MAX_KEY_LEN + TEST_OVERCOMMIT_MAX_SIZE))
+
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE(
+    test_overcommit_keyspace, "test", "oc/", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    TEST_OVERCOMMIT_MAX_SIZE, TEST_OVERCOMMIT_MAX_KEY_LEN, TEST_OVERCOMMIT_MAX_ENTRIES,
+    TEST_OVERCOMMIT_POOL_SIZE, ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/*
  * issue #16: a BYTES setting able to store a value much larger than the fixed
  * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE carrier, using its own right-sized
  * per-setting backing buffer (ZMK_CUSTOM_SETTING_DEFINE_SIZED). Large values
@@ -2604,6 +2626,67 @@ static int test_keyspace_large_value(void) {
     return 0;
 }
 
+/*
+ * Enabler A: prove the over-commit budget actually bites before max_entries
+ * does. TEST_OVERCOMMIT_POOL_SIZE fits exactly 3 full-size entries; a 4th
+ * full-size entry must fail with -ENOSPC even though 5 of the keyspace's 8
+ * slots are still free.
+ */
+static int test_keyspace_pool_overcommit(void) {
+    if (zmk_custom_setting_large_pool_used(test_overcommit_keyspace.large_pool) != 0) {
+        LOG_ERR("Overcommit keyspace pool should start empty");
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting_value value = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+        .size = TEST_OVERCOMMIT_MAX_SIZE,
+    };
+    fill_pool_test_pattern(value.bytes_value, TEST_OVERCOMMIT_MAX_SIZE, 3);
+
+    char key[16];
+    int created_count = 0;
+    for (int i = 0; i < TEST_OVERCOMMIT_MAX_ENTRIES; i++) {
+        snprintf(key, sizeof(key), "oc/%d", i);
+        int ret = zmk_custom_setting_keyspace_create(&test_overcommit_keyspace, key, &value,
+                                                     ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+        if (ret == -ENOSPC) {
+            break;
+        }
+        if (ret < 0) {
+            LOG_ERR("Unexpected error creating overcommit entry %d: %d", i, ret);
+            return ret;
+        }
+        created_count++;
+    }
+
+    /* The pool (3 * (12 + 16) = 84 bytes) fits at most 3 entries whose blob
+     * is "oc/<i>\0" (5-6 bytes) + 16-byte payload (~21-22 bytes each) - so
+     * capacity runs out well before all 8 slots are used. */
+    if (created_count >= TEST_OVERCOMMIT_MAX_ENTRIES) {
+        LOG_ERR("Overcommit pool should have run out before filling every slot (created %d/%d)",
+                created_count, TEST_OVERCOMMIT_MAX_ENTRIES);
+        return -EINVAL;
+    }
+    if (created_count == 0) {
+        LOG_ERR("Overcommit pool should fit at least one full-size entry");
+        return -EINVAL;
+    }
+
+    for (int i = 0; i < created_count; i++) {
+        snprintf(key, sizeof(key), "oc/%d", i);
+        zmk_custom_setting_keyspace_delete(&test_overcommit_keyspace, key);
+    }
+    if (zmk_custom_setting_large_pool_used(test_overcommit_keyspace.large_pool) != 0) {
+        LOG_ERR("Overcommit keyspace pool should be empty after deleting every entry");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_pool_overcommit created=%d max_entries=%d",
+            created_count, TEST_OVERCOMMIT_MAX_ENTRIES);
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2691,6 +2774,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_keyspace_large_value();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_pool_overcommit();
     if (ret < 0) {
         return ret;
     }
