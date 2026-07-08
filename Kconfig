@@ -5,6 +5,17 @@ config ZMK_CUSTOM_SETTINGS
 
 if ZMK_CUSTOM_SETTINGS
 
+# settings_load() runs on the main thread at boot, and this module's load
+# path (pool-backed large values, keyspace slot binding + blob decode) needs
+# more headroom than Zephyr's bare 1024-byte MAIN_STACK_SIZE default.
+# Found on real hardware: with a persisted keyspace entry present, boot
+# overflowed the 1024-byte main stack (usage fault in arch_system_halt with
+# a corrupted return address) before USB even enumerated, while the same
+# image booted fine with 2048. configdefault only raises the default; an
+# explicit board/user setting still wins.
+configdefault MAIN_STACK_SIZE
+    default 2048
+
 config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum single-frame custom setting value size"
     default 64
