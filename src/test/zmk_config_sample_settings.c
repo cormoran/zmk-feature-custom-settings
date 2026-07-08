@@ -388,3 +388,21 @@ ZMK_CUSTOM_SETTING_ARRAY_DEFINE(zmk_config_sample_array, "zmk_config_sample", "a
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
+/*
+ * Simplification P3: an RPC-creatable keyspace sample. Studio clients can
+ * create/delete named STRING entries under the "profile/" prefix at runtime
+ * (CreateSetting/DeleteSetting); each entry persists under an ordinal
+ * storage record ("zmk_config_sample/profile/#<slot>") whose value is the
+ * [user_key\0][payload] blob, so the user-chosen key survives reboot without
+ * a separate key table. Included in the sample builds so the keyspace path
+ * is exercised on real hardware, not only under native_sim.
+ */
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(zmk_config_sample_profiles, "zmk_config_sample", "profile/",
+                                   ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                   /* max_size = */ 32, /* max_key_len = */ 24,
+                                   /* max_entries = */ 4,
+                                   ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_NO_CONSTRAINT);

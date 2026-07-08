@@ -989,3 +989,74 @@ sketch:
 - **No proto or web changes**, as planned. Golden snapshots
   (tests/{test,studio,split_peripheral}) did not change - the rewritten
   internals kept every PASS line identical.
+
+## 16. Hardware validation (2026-07-08, post-Phase 4)
+
+Full-stack validation on the rig's good XIAO nRF52840 (J-Link flash + pyusb
+Studio RPC), exercising write → streamed read → keyspace create/list →
+hard reset → NVS reload → delete. **Found and fixed two real bugs that every
+native test had missed**, then passed 7/7 checks end-to-end.
+
+### Bug 1: nanopb wipes SettingValue decode callbacks inside oneof arms
+
+Symptom: `CreateSetting` (and any `WriteSetting`) carrying a STRING/BYTES
+value failed with "Invalid request", while INT32 writes worked. Two stacked
+causes, both in nanopb's oneof handling (`pb_decode.c`):
+
+1. When the decoder selects a oneof's submessage arm it **memsets the arm to
+   zero** ("so that any callbacks are set to NULL"), wiping the SettingValue
+   payload callbacks that Phase 2 wired before `pb_decode()` into
+   `Request.write_setting` / `.create_setting` / a relayed `Notification`'s
+   setting arm. Official fix: the `submsg_callback:true` generator option +
+   a message-level `cb_<oneof>` hook that wires the inner callbacks at the
+   moment the arm's tag is known (`*_arm_wire_precallback` in the handler);
+   applied to `Request`, `RelayRequest`, and `Notification`.
+2. nanopb **never sets `which_<oneof>` for PB_ATYPE_CALLBACK arms** (only
+   static arms get it in `decode_static_field`), so even with the callback
+   running, `which_value_type` stayed 0 and `proto_to_value()` returned
+   -EINVAL. The value decode callback (`decode_into_bounded_scratch`) now
+   records `which_value_type = field->tag` itself via `field->message`.
+
+Why native missed it: the only self-test decoding a STRING/BYTES value
+(`test_decode_setting`) decodes a bare `Setting` — no oneof in between — and
+nothing decoded a full wire-format `Request` with a payload-carrying arm.
+A regression self-test now does exactly that through the shared
+`decode_custom_settings_request()` (the production entry path); it fails on
+the pre-fix code and passes now. Note for future test authors: the
+`keycode_events` snapshots only capture the filtered log (PASS lines), so a
+SYS_INIT self-test that fails with LOG_ERR is *invisible* to snapshot
+comparison — check `keycode_events_full.log` when a new test's PASS line
+does not appear.
+
+### Bug 2: boot stack overflow loading a persisted keyspace entry
+
+Symptom: after writing a keyspace entry + hard reset, the board never
+re-enumerated on USB. J-Link showed the core spinning in
+`arch_system_halt(reason=2 /* K_ERR_STACK_CHK_FAIL */)` with the exception
+frame's PC pointing into `z_main_stack` (a corrupted return address — a
+genuine stack smash). `settings_load()` runs on the main thread, whose
+Zephyr default `MAIN_STACK_SIZE` is a bare 1024 bytes; the Phase 3 keyspace
+bind + blob load path pushed boot past it. The same image with a 2048-byte
+main stack boots and reloads everything correctly.
+
+Fix: `configdefault MAIN_STACK_SIZE → default 2048` in this module's
+Kconfig (raises the default only; explicit board/user values still win).
+Follow-up worth filing: measure and trim the load path's worst-case stack
+instead of only raising the floor.
+
+Why native missed it: native_sim threads have far larger stacks, and no
+native test boots with a populated real NVS.
+
+### Validation record (final build: module-default stack, no overrides)
+
+Board `zmk-10E4D16A1E4BFE9C` via probe 1057792823; sample keyspace
+(`profile/`, STRING, max 32B x 4 entries) added to
+`zmk_config_sample_settings.c` so the keyspace path is exercised on real
+hardware. All 7 checks passed: small int32 write/read; 200B chunked write +
+**streamed single-request GetSetting read-back byte-exact** (the Phase 2
+headline; pre-P2 firmware omitted the value); keyspace create + get + list
+under the user key; J-Link reset; 200B value and keyspace entry (ordinal
+blob record) both reloaded from NVS; delete removes the entry. Split-relay
+behavior on real radio remains covered only by the native
+`split_peripheral` suite (two-board relay validation is a separate rig
+session).
