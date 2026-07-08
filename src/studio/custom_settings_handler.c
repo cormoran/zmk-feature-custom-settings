@@ -462,6 +462,17 @@ static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *
         return false;
     }
 
+    /* Feature-gating P1 gap closed by P3's combined-gate verification build:
+     * -EMSGSIZE above only ever happens for a >carrier (pool-backed) value,
+     * which cannot exist when CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES is off
+     * - but that fact is a runtime property the compiler cannot see, so
+     * without this IS_ENABLED guard a CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=n
+     * build fails to link (zmk_custom_setting_with_large_raw_bytes is only
+     * defined in custom_settings_pool.c). */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES)) {
+        return false;
+    }
+
     /* Large value (> carrier): stream straight from the backing store under
      * custom_settings_lock, with no intermediate copy (this is why the old
      * chunk_read_buffer staging buffer is gone). */
