@@ -6,9 +6,7 @@
 
 /*
  * Large (> single-frame) setting values and the shared value pool
- * (CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES). Split out of custom_settings.c
- * (simplification/feature-gating P1) - see
- * docs/design/feature-gating-and-modularization.md.
+ * (CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES).
  *
  * A pooled setting (descriptor blob.pool != NULL) does not own a fixed
  * buffer; instead its value lives in a region of its pool's shared backing

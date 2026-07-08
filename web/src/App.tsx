@@ -477,10 +477,9 @@ export function RPCTestSection() {
       }
 
       setSetting(fetched);
-      // GetSetting now streams a value of any size directly (simplification
-      // P2), so formatSetting already has everything it needs - a missing
-      // `value` here means the setting is device-private or secure while
-      // locked, not "too large for one frame".
+      // GetSetting streams a value of any size directly, so formatSetting has
+      // everything it needs - a missing `value` here means the setting is
+      // device-private or secure while locked.
       setResponse(formatSetting(fetched));
     } catch (error) {
       console.error("Get setting failed:", error);
@@ -519,7 +518,7 @@ export function RPCTestSection() {
   const writeSetting = async () => {
     // A BYTES/STRING value larger than one frame cannot ride the single-frame
     // SettingValue field, so it is written over the chunked WriteValueChunk
-    // RPC (issue #16). Small values and arrays keep the plain write path.
+    // RPC. Small values and arrays keep the plain write path.
     if (
       !isArray &&
       (valueType === EditorValueType.Bytes ||

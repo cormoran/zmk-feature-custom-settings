@@ -1,12 +1,11 @@
-// Chunked large-value write helper (issue #16 / simplification P2).
+// Chunked large-value write helper.
 //
 // The RX path buffers a whole frame before nanopb decodes it, so a BYTES /
-// STRING value bigger than one frame still has to be written over several
-// WriteValueChunk RPCs. Reading no longer needs chunking: GetSetting/
-// ListSettings now stream a value of any size directly (the RPC transport's
-// TX path streams its response incrementally, unlike RX), so
-// ReadValueChunk/readValueChunked is gone - see App.tsx's getSetting, which
-// just uses the plain GetSetting response.
+// STRING value bigger than one frame must be written over several
+// WriteValueChunk RPCs. Reading does not need chunking: the TX path streams
+// its response incrementally, so GetSetting/ListSettings return a value of any
+// size directly through the plain GetSetting response (see App.tsx's
+// getSetting).
 //
 // This helper takes a plain `callRPC(request) => Promise<Response>` so it can
 // be unit tested without a live connection.

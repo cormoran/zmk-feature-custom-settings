@@ -282,26 +282,24 @@ static const char *custom_subsystem_identifier_for_index(uint32_t index);
 #endif
 
 /*
- * Simplification P2: SettingValue.bytes_value/string_value are nanopb
- * callback fields (see the .options file) instead of fixed inline arrays, so
- * GetSetting/ListSettings can stream a value of any size instead of omitting
- * one that does not fit CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. This
- * requires a matching *decode* callback wherever a SettingValue is decoded
- * (WriteSettingRequest.value, CreateSettingRequest.value, and their relayed
- * equivalents) since the field no longer has `.bytes`/`.size` struct members
- * to read directly - decode copies into a bounded scratch buffer instead
- * (see decode_into_bounded_scratch below).
+ * SettingValue.bytes_value/string_value are nanopb callback fields (see the
+ * .options file), not fixed inline arrays, so GetSetting/ListSettings can
+ * stream a value of any size instead of omitting one that does not fit
+ * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. This requires a matching *decode*
+ * callback wherever a SettingValue is decoded (WriteSettingRequest.value,
+ * CreateSettingRequest.value, and their relayed equivalents) since the field
+ * has no `.bytes`/`.size` struct members to read directly - decode copies into
+ * a bounded scratch buffer instead (see decode_into_bounded_scratch below).
  *
  * `struct bounded_decode_scratch` also doubles as the source for a small
  * *encode* callback (encode_bounded_scratch_value) used at the handful of
  * sites that must re-encode a value they just decoded into a different
  * message: the split relay forwarding a WriteSetting to a peripheral, and a
  * central republishing a relay-decoded Notification to the local Studio
- * session. Every decode call site below owns its own scratch instance -
- * decode happens synchronously while processing exactly one request/
- * notification at a time (see docs/design/simplification-redesign.md#12),
- * but using distinct instances per call site (rather than one shared global)
- * avoids relying on that being true forever.
+ * session. Every decode call site below owns its own scratch instance; decode
+ * happens synchronously while processing exactly one request/notification at a
+ * time, but distinct instances per call site (rather than one shared global)
+ * avoid relying on that being true forever.
  */
 struct bounded_decode_scratch {
     uint8_t *buf;    /* capacity+1 bytes: the last byte is reserved for a NUL
@@ -412,14 +410,11 @@ static void retarget_value_to_encode_scratch(cormoran_zmk_custom_settings_Settin
 
 /* Streams a live setting's BYTES/STRING scalar payload directly against the
  * effective backing store at pb_encode time (small carrier or a large-store
- * pool region), instead of the old eager read that capped GetSetting at
- * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. Small and large values share
- * this one path. The RPC serializer converter (zmk_custom_setting_
- * serialize_rpc_value) is applied only when the value still fits the fixed
- * carrier - it is bounded by that carrier and was never applied to the
- * >carrier chunked-read path before this change either; that limitation is
- * preserved rather than fixed here (see docs/design/simplification-redesign.md
- * open question 4). */
+ * pool region), so GetSetting is not capped at
+ * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. Small and large values share this
+ * one path. The RPC serializer converter (zmk_custom_setting_serialize_rpc_value)
+ * is applied only when the value still fits the fixed carrier - it is bounded
+ * by that carrier and is not applied to the >carrier path. */
 struct encode_large_value_ctx {
     pb_ostream_t *stream;
     const pb_field_t *field;
@@ -462,20 +457,18 @@ static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *
         return false;
     }
 
-    /* Feature-gating P1 gap closed by P3's combined-gate verification build:
-     * -EMSGSIZE above only ever happens for a >carrier (pool-backed) value,
-     * which cannot exist when CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES is off
-     * - but that fact is a runtime property the compiler cannot see, so
-     * without this IS_ENABLED guard a CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=n
-     * build fails to link (zmk_custom_setting_with_large_raw_bytes is only
-     * defined in custom_settings_pool.c). */
+    /* -EMSGSIZE above only ever happens for a >carrier (pool-backed) value,
+     * which cannot exist when CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES is off -
+     * but that is a runtime property the compiler cannot see, so without this
+     * IS_ENABLED guard a CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=n build fails
+     * to link (zmk_custom_setting_with_large_raw_bytes is only defined in
+     * custom_settings_pool.c). */
     if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES)) {
         return false;
     }
 
     /* Large value (> carrier): stream straight from the backing store under
-     * custom_settings_lock, with no intermediate copy (this is why the old
-     * chunk_read_buffer staging buffer is gone). */
+     * custom_settings_lock, with no intermediate copy. */
     struct encode_large_value_ctx ctx = {.stream = stream, .field = field, .ok = false};
     int lock_ret =
         zmk_custom_setting_with_large_raw_bytes(setting, encode_large_value_visitor, &ctx);
@@ -542,11 +535,9 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
             return -EINVAL;
         }
         /* decode_into_bounded_scratch already rejected anything past the
-         * scratch's own capacity; CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
-         * is that capacity for every call site that feeds this function
-         * (matches the old SettingValue.bytes_value/string_value
-         * max_size:64 cap - a value bigger than one frame still needs
-         * WriteValueChunk). */
+         * scratch's own capacity; CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE is
+         * that capacity for every call site that feeds this function - a value
+         * bigger than one frame still needs WriteValueChunk. */
         dest->size = value_scratch->size;
         if (src->which_value_type == cormoran_zmk_custom_settings_SettingValue_bytes_value_tag) {
             dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES;
@@ -653,10 +644,10 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
 
     /* BYTES/STRING never reach here: setting_value_to_proto intercepts those
      * (non-array) before calling value_to_proto and streams them through
-     * encode_setting_scalar_value instead (simplification P2) - this
-     * function's non-array branch only ever sees INT32/BOOL/BEHAVIOR, whose
-     * RPC-serialized form (rpc_serializer never changes a value's type, see
-     * convert_rpc_bytes_value) is small enough to copy inline as before. */
+     * encode_setting_scalar_value instead - this function's non-array branch
+     * only ever sees INT32/BOOL/BEHAVIOR, whose RPC-serialized form (the RPC
+     * serializer never changes a value's type) is small enough to copy
+     * inline. */
     switch (scalar.which_value_type) {
     case cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag:
         dest->which_value_type = cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
@@ -784,13 +775,12 @@ static int setting_value_to_proto(const struct zmk_custom_setting *setting,
     if (!zmk_custom_setting_is_array(setting) &&
         (presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
          presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING)) {
-        /* Simplification P2: defer the actual read to pb_encode time instead
-         * of reading eagerly here - see encode_setting_scalar_value, which
-         * (simplification P3) is itself keyspace-aware via
-         * zmk_custom_setting_read/with_large_raw_bytes already stripping a
-         * keyspace slot's key prefix - so this callback wiring needs no
-         * further change for keyspace slots. The oneof arm (bytes_value vs
-         * string_value) only depends on the PRESENTED value_type, which is
+        /* Defer the actual read to pb_encode time rather than reading eagerly
+         * here - see encode_setting_scalar_value, which is keyspace-aware
+         * (zmk_custom_setting_read/with_large_raw_bytes already strip a
+         * keyspace slot's key prefix), so this callback wiring needs no further
+         * change for keyspace slots. The oneof arm (bytes_value vs
+         * string_value) depends only on the PRESENTED value_type, which is
          * fixed at registration, so it is safe to select now even though the
          * bytes themselves are read later. */
         dest->which_value_type = presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES
@@ -858,13 +848,13 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
         dest->has_value = true;
         LOG_DBG("Custom settings proto value start: subsystem=%s key=%s",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting));
-        /* Simplification P2: a BYTES/STRING value of any size streams through
+        /* A BYTES/STRING value of any size streams through
          * encode_setting_scalar_value at pb_encode time (see
-         * setting_value_to_proto), so there is no longer a "too large for one
-         * frame, omit it" case here for a direct (non-relay) response/
-         * notification - that omission is now only needed on the
-         * bandwidth-bounded split relay path (see the retry-without-value
-         * fallback in raise_setting_notification). */
+         * setting_value_to_proto), so there is no "too large for one frame,
+         * omit it" case here for a direct (non-relay) response/notification -
+         * that omission is only needed on the bandwidth-bounded split relay
+         * path (see the retry-without-value fallback in
+         * raise_setting_notification). */
         ret = setting_value_to_proto(setting, &dest->value);
         if (ret < 0) {
             dest->has_value = false;
@@ -1080,11 +1070,10 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
         pb_ostream_from_buffer(relay_notification->payload, sizeof(relay_notification->payload));
     bool encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
     if (!encoded && relay->notification.notification_type.setting.setting.has_value) {
-        /* Large values are not relayed (README limitation): unlike the direct
-         * GetSetting/list path, which now streams a value of any size
-         * (simplification P2), the relay envelope is still a fixed
-         * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN buffer. Retry once with the
-         * value omitted so the rest of the notification (has_unsaved_value,
+        /* Large values are not relayed: unlike the direct GetSetting/list
+         * path, which streams a value of any size, the relay envelope is a
+         * fixed CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN buffer. Retry once with
+         * the value omitted so the rest of the notification (has_unsaved_value,
          * kind, etc.) still reaches the central instead of losing the whole
          * notification. */
         relay->notification.notification_type.setting.setting.has_value = false;
@@ -1142,21 +1131,19 @@ static bool setting_matches_scope(const struct zmk_custom_setting *setting,
 }
 
 /*
- * Since P3, ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered
- * zmk_custom_setting per array (the descriptor, with array_index ==
- * ZMK_CUSTOM_SETTING_ARRAY_NONE) instead of one per active element, so list
- * enumeration (which is one notification per element, matching the pre-P3
- * per-element registrations that Studio/the web UI expect) has to expand
- * each array descriptor into its active elements itself instead of relying
- * on the registry walk to do it. setting_is_active() above already reports
+ * ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered zmk_custom_setting
+ * per array (the descriptor, with array_index == ZMK_CUSTOM_SETTING_ARRAY_NONE),
+ * not one per active element, but list enumeration sends one notification per
+ * element (what Studio/the web UI expect), so this walk expands each array
+ * descriptor into its active elements itself. setting_is_active() above reports
  * false for a bare array descriptor (ZMK_CUSTOM_SETTING_ARRAY_NONE is never
- * < any array_size), so a plain ZMK_CUSTOM_SETTING_FOREACH would silently
- * skip every array setting entirely - this callback-based walk fixes that
- * for both the "how many items match" count and the "send the Nth item"
- * paths without duplicating the expansion logic between them.
+ * < any array_size), so a plain ZMK_CUSTOM_SETTING_FOREACH would silently skip
+ * every array setting entirely - this callback-based walk fixes that for both
+ * the "how many items match" count and the "send the Nth item" paths without
+ * duplicating the expansion logic between them.
  *
- * Returns false from the visitor to stop iterating early (used for
- * resuming a batched send at a specific flattened index).
+ * The visitor returns false to stop iterating early (used to resume a batched
+ * send at a specific flattened index).
  */
 typedef bool (*list_item_visitor_t)(const struct zmk_custom_setting *item, void *user_data);
 
@@ -1187,14 +1174,11 @@ static bool for_each_list_item(const struct zmk_custom_settings_setting_scope *s
         }
     }
 
-    /* Simplification P3: keyspace slots are no longer reachable through
-     * ZMK_CUSTOM_SETTING_FOREACH (they were, via the now-deleted general
-     * runtime-registration list) - walk every keyspace's live slots
-     * explicitly so ListSettings/GetSetting/notifications still surface
-     * user-created entries (docs/design/simplification-redesign.md §5,
-     * Goal A audit). A slot is never an array, so no expansion step is
-     * needed the way array descriptors need one above.
-     * IS_ENABLED-guarded (feature-gating P3) so a
+    /* Keyspace slots are not reachable through ZMK_CUSTOM_SETTING_FOREACH -
+     * walk every keyspace's live slots explicitly so
+     * ListSettings/GetSetting/notifications still surface user-created
+     * entries. A slot is never an array, so it needs no expansion step the way
+     * array descriptors do above. IS_ENABLED-guarded so a
      * CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=n build never walks keyspace slot
      * state. */
     if (IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
@@ -1561,9 +1545,8 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
  * handle_create_setting / relay_request_unlock_required / request_to_relay_
  * request while processing that same decoded Request - safe to share since
  * decode happens synchronously while processing exactly one Request at a
- * time. Bounded to one RPC frame's worth of value (matches the pre-P2
- * SettingValue.bytes_value/string_value max_size:64 cap - a bigger value
- * still needs WriteValueChunk). */
+ * time. Bounded to one RPC frame's worth of value - a bigger value still
+ * needs WriteValueChunk. */
 static uint8_t g_write_value_decode_buf[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
 static struct bounded_decode_scratch g_write_value_decode_scratch = {
     .buf = g_write_value_decode_buf,
@@ -1753,7 +1736,7 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
                                          cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                          cormoran_zmk_custom_settings_Response *resp,
                                          bool value_uses_rpc_format) {
-    /* Feature-gating P3: everything below resolves through a
+    /* Everything below resolves through a
      * struct zmk_custom_setting_keyspace * (zmk_custom_settings_keyspace_find_for_key/
      * zmk_custom_setting_keyspace_create, defined in
      * custom_settings_keyspace.c) - unlike every other handler, there is no
@@ -2036,11 +2019,11 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
     int ret;
     if (chunk_session.total_size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
         /* Large value: write the assembled payload straight to the setting's
-         * large store (issue #16). RPC deserializer converters are bounded by
-         * the fixed carrier and are not applied on this path. The write is
-         * done while still holding chunk_session_lock (consistent lock order:
-         * chunk_session_lock is always taken before custom_settings_lock), then the
-         * session is released. */
+         * large store. RPC deserializer converters are bounded by the fixed
+         * carrier and are not applied on this path. The write is done while
+         * still holding chunk_session_lock (consistent lock order:
+         * chunk_session_lock is always taken before custom_settings_lock), then
+         * the session is released. */
         ret = zmk_custom_setting_write_bytes(setting, chunk_session.buffer,
                                              chunk_session.total_size, mode);
         reset_chunk_session_locked();
@@ -2860,11 +2843,10 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 /* Test helper: pb_encode `setting` into buf, returning the byte count or -1
- * on failure. Simplification P2 made Setting.value's bytes_value/string_value
- * a callback field (see the .options file), so there is no struct member a
- * test can peek at directly any more - a value only exists on the wire after
- * a real pb_encode (mirroring what the RPC transport actually does for
- * GetSetting/ListSettings). */
+ * on failure. Setting.value's bytes_value/string_value is a callback field
+ * (see the .options file), so there is no struct member a test can peek at
+ * directly - a value only exists on the wire after a real pb_encode
+ * (mirroring what the RPC transport does for GetSetting/ListSettings). */
 static int test_encode_setting(const cormoran_zmk_custom_settings_Setting *setting, uint8_t *buf,
                                size_t buf_size) {
     pb_ostream_t stream = pb_ostream_from_buffer(buf, buf_size);
@@ -2981,14 +2963,13 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
 
 SYS_INIT(custom_settings_rpc_bytes_converter_test_init, APPLICATION, 99);
 
-/* Since P3, ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered
- * zmk_custom_setting per array (see for_each_list_item's comment); this
- * regression-tests that handle_private_list_settings still reports one
- * counted item per *active array element* (matching the pre-P3 per-element
- * registrations that the web UI/Studio protocol expect), not zero (which is
- * what a naive ZMK_CUSTOM_SETTING_FOREACH-only count would now produce,
- * since a bare array descriptor's array_index is never < its own size) and
- * not one (counting the descriptor itself as a single list item). */
+/* ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered zmk_custom_setting
+ * per array (see for_each_list_item's comment); this regression-tests that
+ * handle_private_list_settings still reports one counted item per *active
+ * array element* (what the web UI/Studio protocol expect), not zero (which a
+ * naive ZMK_CUSTOM_SETTING_FOREACH-only count would produce, since a bare
+ * array descriptor's array_index is never < its own size) and not one
+ * (counting the descriptor itself as a single list item). */
 static int custom_settings_list_array_test_init(void) {
     const struct zmk_custom_setting *array_setting =
         zmk_custom_setting_find_array("test", "array_value");
@@ -3045,14 +3026,13 @@ static int custom_settings_list_array_test_init(void) {
 
 SYS_INIT(custom_settings_list_array_test_init, APPLICATION, 99);
 
-/* Simplification P3: ListSettings/GetSetting must surface keyspace entries
- * by their USER key with their PAYLOAD value, even though a slot is stored
- * internally as an anonymous [key\0][payload] BYTES blob under an ordinal
- * storage name. Exercises for_each_list_item's explicit keyspace-slot pass
- * (Goal A audit) plus the full setting_to_proto presentation path. Uses the
- * "test"/"macro/" keyspace registered by custom_settings_test.c (reached
- * through the compile-time keyspace section, so no cross-file symbol is
- * needed). */
+/* ListSettings/GetSetting must surface keyspace entries by their USER key
+ * with their PAYLOAD value, even though a slot is stored internally as an
+ * anonymous [key\0][payload] BYTES blob under an ordinal storage name.
+ * Exercises for_each_list_item's explicit keyspace-slot pass plus the full
+ * setting_to_proto presentation path. Uses the "test"/"macro/" keyspace
+ * registered by custom_settings_test.c (reached through the compile-time
+ * keyspace section, so no cross-file symbol is needed). */
 static int custom_settings_list_keyspace_test_init(void) {
     struct zmk_custom_setting_keyspace *keyspace =
         zmk_custom_settings_keyspace_find_for_key("test", "macro/list-test");
@@ -3207,11 +3187,11 @@ static int custom_settings_chunked_rpc_test_init(void) {
         return -EINVAL;
     }
 
-    /* Read the value back the plain way (simplification P2 deleted
-     * ReadValueChunk): GetSetting's Setting.value now streams the assembled
-     * value through the same callback path as any other BYTES/STRING
-     * setting - round-trip it through a real pb_encode/pb_decode and check
-     * the RPC-serialized bytes the client would actually see. */
+    /* Read the value back the plain way (there is no ReadValueChunk):
+     * GetSetting's Setting.value streams the assembled value through the same
+     * callback path as any other BYTES/STRING setting - round-trip it through
+     * a real pb_encode/pb_decode and check the RPC-serialized bytes the client
+     * would actually see. */
     static cormoran_zmk_custom_settings_Setting proto_setting;
     proto_setting =
         (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
@@ -3248,11 +3228,11 @@ static int custom_settings_chunked_rpc_test_init(void) {
 
 SYS_INIT(custom_settings_chunked_rpc_test_init, APPLICATION, 99);
 
-/* issue #16 / simplification P2: a value larger than the fixed carrier (and
- * larger than one chunk frame) must round-trip over WriteValueChunk into a
- * large-sized setting's backing buffer, and then back out through the plain
- * (non-chunked) GetSetting encode path - the streaming callback added by P2
- * is what makes that possible without ReadValueChunk. */
+/* A value larger than the fixed carrier (and larger than one chunk frame)
+ * must round-trip over WriteValueChunk into a large-sized setting's backing
+ * buffer, and then back out through the plain (non-chunked) GetSetting encode
+ * path - the streaming callback is what makes that possible without
+ * ReadValueChunk. */
 static int custom_settings_large_chunked_rpc_test_init(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "large_bytes");
     if (!setting) {
@@ -3305,12 +3285,11 @@ static int custom_settings_large_chunked_rpc_test_init(void) {
         return -EINVAL;
     }
 
-    /* Read it back the plain way (simplification P2 deleted ReadValueChunk):
-     * a plain GetSetting-style pb_encode into a native_sim buffer large
-     * enough for the whole value, streamed through
-     * encode_setting_scalar_value's large-store path (no
-     * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE cap), then decoded back and
-     * compared byte-exact against the original payload. */
+    /* Read it back the plain way (there is no ReadValueChunk): a plain
+     * GetSetting-style pb_encode into a native_sim buffer large enough for the
+     * whole value, streamed through encode_setting_scalar_value's large-store
+     * path (no CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE cap), then decoded
+     * back and compared byte-exact against the original payload. */
     static cormoran_zmk_custom_settings_Setting proto_setting;
     proto_setting =
         (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;

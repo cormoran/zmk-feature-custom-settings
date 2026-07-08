@@ -5,9 +5,7 @@
  */
 
 /*
- * Array settings (CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY). Split out of
- * custom_settings.c (feature-gating P2) - see
- * docs/design/feature-gating-and-modularization.md.
+ * Array settings (CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY).
  *
  * A registered ZMK_CUSTOM_SETTING_ARRAY_DEFINE array has exactly one
  * compile-time struct zmk_custom_setting descriptor (array_index ==
@@ -53,11 +51,11 @@
  */
 struct zmk_custom_setting_array_view_slot {
     bool in_use;
-    /* Simplification P4: a view is a runtime-built RAM instance of the
-     * (normally const/flash) struct zmk_custom_setting, so it embeds its
-     * own state block; the only view state that actually matters is the
-     * TEMPORARY_ACTIVE flag + temp_slot (element values/dirty/has_persistent
-     * live in the shared array_state). */
+    /* A view is a runtime-built RAM instance of the (normally const/flash)
+     * struct zmk_custom_setting, so it embeds its own state block; the only
+     * view state that actually matters is the TEMPORARY_ACTIVE flag +
+     * temp_slot (element values/dirty/has_persistent live in the shared
+     * array_state). */
     struct zmk_custom_setting_state state;
     struct zmk_custom_setting view;
 };
@@ -105,7 +103,7 @@ struct zmk_custom_setting *array_view_acquire(const struct zmk_custom_setting *a
     free_slot->view.default_value = NULL;
     /* Redirect the copied descriptor's state pointer away from the array
      * descriptor's own state block to this view's embedded one, then reset
-     * it (P4). */
+     * it. */
     free_slot->state = (struct zmk_custom_setting_state){.temp_slot = -1};
     free_slot->view.state = &free_slot->state;
     return &free_slot->view;
@@ -237,8 +235,7 @@ int array_size_storage_name(const struct zmk_custom_setting *setting, char *name
 
 /* Delete on-flash records for slots at or past array_size. Operates
  * directly on the descriptor's array_state buffer (O(max_size), bounded by
- * the array's own max element count) instead of walking the full setting
- * registry looking for "sibling" registrations. */
+ * the array's own max element count). */
 static int delete_inactive_array_values_locked(const struct zmk_custom_setting *array_descriptor,
                                                uint32_t array_size) {
     struct zmk_custom_setting_array_state *array_state = array_descriptor->array_state;
@@ -270,10 +267,9 @@ static int delete_inactive_array_values_locked(const struct zmk_custom_setting *
 
 /* Save all active elements (indices [0, array_size)) plus the "_size"
  * marker, then delete any now-inactive elements. Operates directly on the
- * descriptor's array_state buffer instead of walking the full setting
- * registry for "sibling" element registrations - this is the O(N)-elimination
- * point for saving arrays. Non-static: save_setting_locked (custom_settings.c)
- * calls this directly for an array setting. Declared in
+ * descriptor's array_state buffer, so cost is O(array_size) rather than a
+ * walk of the full setting registry. Non-static: save_setting_locked
+ * (custom_settings.c) calls this directly for an array setting. Declared in
  * custom_settings_internal.h. */
 int save_array_locked(const struct zmk_custom_setting *array_descriptor) {
     char size_name[SETTINGS_MAX_NAME_LEN];
@@ -609,8 +605,8 @@ int zmk_custom_setting_array_remove_at(const struct zmk_custom_setting *const_se
  * default, and (once per call, harmless if repeated) restore the whole
  * array's active length to its persisted length. Called once per active
  * element by apply_scope so zmk_custom_settings_discard_scope's
- * affected_count matches "one per active element", same as the pre-P3
- * per-element registrations. Non-static: zmk_custom_setting_discard
+ * affected_count matches "one per active element". Non-static:
+ * zmk_custom_setting_discard
  * (custom_settings.c) calls this directly per active element. Declared in
  * custom_settings_internal.h. */
 int discard_array_element_locked(struct zmk_custom_setting *view) {
@@ -713,12 +709,11 @@ bool split_array_size_key(const char *name, char *array_key, size_t array_key_si
 }
 
 /* Split a stored per-element name (e.g. "array_value/2") into its array_key
- * ("array_value") and numeric index (2). Array elements are no longer
- * individually registered (see ZMK_CUSTOM_SETTING_ARRAY_DEFINE), so
- * custom_settings_handle_set can no longer resolve them with a plain
+ * ("array_value") and numeric index (2). Array elements are not individually
+ * registered (see ZMK_CUSTOM_SETTING_ARRAY_DEFINE), so
+ * custom_settings_handle_set cannot resolve them with a plain
  * zmk_custom_setting_find(name) lookup and needs this to route into
- * zmk_custom_setting_find_array_element instead. Storage key format is
- * unchanged from the pre-P3 per-element registrations. Non-static:
+ * zmk_custom_setting_find_array_element instead. Non-static:
  * custom_settings_handle_set (custom_settings.c) calls this to recognize a
  * loaded per-element record. Declared in custom_settings_internal.h. */
 bool split_array_element_key(const char *name, char *array_key, size_t array_key_size,
