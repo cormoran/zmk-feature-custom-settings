@@ -168,3 +168,90 @@ opens a PR; the orchestrator reviews + hardware-validates between phases.
   types beyond adding the macro guards.
 - No new features. TEMPORARY mode, BEHAVIOR values, constraints stay core.
 - The descriptor fields are not gated out of the struct (see §3 rationale).
+
+## P5 (as landed)
+
+All five gates now `default n` (Kconfig: dropping the `default y` line is
+enough - a `bool` with no default is `n`). `ZMK_CUSTOM_SETTINGS_KEYSPACE`'s
+`select ZMK_CUSTOM_SETTINGS_LARGE_VALUES` is unchanged.
+
+**Macro `BUILD_ASSERT` guards** were added to the innermost registration
+macro each public `*_DEFINE*` variant funnels through, so registering a
+setting whose feature is off fails to compile with a clear "enable
+CONFIG_..." message instead of an undefined-reference at link time:
+
+- `ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE` and
+  `ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS`
+  (which `DEFINE_SIZED`/`DEFINE_POOLED` both funnel through) →
+  `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES`.
+- `ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS` →
+  `CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY`.
+- `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS`
+  → `CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE`.
+- `ZMK_CUSTOM_SETTING_RECORD_SCHEMA_DEFINE` → `CONFIG_ZMK_CUSTOM_SETTINGS_RECORD`.
+- `ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS` and
+  `ZMK_CUSTOM_SETTING_ARRAY_DEFINE_WITH_RPC_CONVERTERS` (the wrapper macros
+  that only a caller passing explicit converters reaches - the plain,
+  no-converter path bypasses them entirely and calls the shared
+  `..._AND_CONSTRAINTS` innermost directly with `NULL, NULL`) →
+  `CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS`.
+  **Keyspace converters are the one exception**: unlike `DEFINE`/`ARRAY_DEFINE`,
+  `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS` has
+  no separate plain-path bypass - the no-converter
+  `KEYSPACE_DEFINE_WITH_CONSTRAINTS` funnels through the very same macro,
+  passing `NULL, NULL`. Asserting there would misfire on every plain keyspace
+  registration with `RPC_CONVERTERS` off. Per §3's escape hatch this assert
+  is skipped for keyspaces (documented at the macro); a keyspace registered
+  with real converter functions while the gate is off silently falls back to
+  identity passthrough (`zmk_custom_setting_serialize/deserialize_rpc_value`'s
+  existing `IS_ENABLED` branch in `custom_settings.c`) rather than failing to
+  build. Documented as a `CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS`
+  prerequisite in the README instead.
+
+**Self-tests** (`tests/{test,studio,split_peripheral}/native_sim.conf`) now
+explicitly set all five gates to `y` - `src/test/custom_settings_test.c`
+exercises every feature unconditionally and was left untouched, so the three
+snapshot files stay byte-identical (confirmed: empty `git diff` on all three
+`keycode_events.snapshot` files).
+
+**Sample settings** (`src/test/zmk_config_sample_settings.c`, used by the
+`tests/zmk-config` hardware targets) are now `#if IS_ENABLED(CONFIG_...)`
+guarded per feature, so the file - and any target that includes it - builds
+in any gate combination: the large-bytes/pooled-bytes samples under
+`LARGE_VALUES`, the array sample under `ARRAY`, the keyspace sample under
+`KEYSPACE`, and the bytes-RPC-converter sample (plus its converter function)
+under `RPC_CONVERTERS`. The scalar samples (int32/bool/string/bytes/
+hid_usage/layer_id/secure_int32/device_private_string, plus behavior samples
+under their own independent `CONFIG_ZMK_BEHAVIOR_LOCAL_IDS` gate) are
+unconditional, so even the minimal build has something to read/write.
+
+**`tests/zmk-config/build.yaml`**: `custom_settings_board_with_rpc`,
+`custom_settings_board_without_rpc`, and the two split-relay targets (via the
+`custom-settings-split-rpc-relay` snippet's `.conf`, since that is how they
+already pulled in `CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES`) now
+explicitly enable all five gates, so they keep exercising every feature. A
+new `custom_settings_board_minimal` target enables only the module, Studio
+RPC, and the samples - all five feature gates left at their opt-in default
+(`n`) - to prove the opt-out path builds and to measure its size.
+
+**Measured size** (`arm-zephyr-eabi-size` on the `tests/zmk-config` ELF,
+xiao_ble/zmk + tester_xiao shield, both images carrying the same sample
+settings file):
+
+| Artifact                        | text   | data  | bss   | FLASH (text+data) | RAM (data+bss) |
+| -------------------------------- | ------ | ----- | ----- | ------------------ | --------------- |
+| `custom_settings_board_minimal`  | 212672 | 30785 | 75526 | 243,457            | 106,311         |
+| `custom_settings_board_with_rpc` | 220072 | 32533 | 79222 | 252,605            | 111,755         |
+| **Delta**                        |        |       |       | **9,148 B smaller (~8.9 KiB, 3.6%)** | **5,444 B smaller (~5.3 KiB, 4.9%)** |
+
+The delta is a floor, not a ceiling: `with_rpc` also raises
+`CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE=256` (irrelevant when
+`LARGE_VALUES` is off in `minimal`) and both images carry every sample
+setting regardless of gate state where possible; a real keyboard that only
+uses core settings would see a larger relative reduction.
+
+**Cross-repo follow-up** (tracked separately, not part of this PR):
+`zmk-feature-runtime-macro` registers a keyspace and needs
+`select ZMK_CUSTOM_SETTINGS_KEYSPACE` (or an explicit
+`CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y` default) added to its own Kconfig
+before it can build against this version, now that the gate defaults to `n`.

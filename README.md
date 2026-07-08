@@ -75,6 +75,45 @@ settings can hold larger values (up to
 explicit per-setting `max_size` and writing the value over the chunked RPC —
 see [Large Values](#large-values-per-setting-max_size).
 
+### Feature Selection
+
+Beyond the always-available core (scalar/BYTES/STRING/BEHAVIOR settings,
+memory/persist/temporary writes, save/discard/reset, Studio RPC list/get/write),
+five optional features are gated behind their own Kconfig option and are
+**opt-in — `default n`**:
+
+| Kconfig                                  | Enables                                                                          |
+| ----------------------------------------- | --------------------------------------------------------------------------------- |
+| `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES` | Values larger than `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` and the shared value pool (`ZMK_CUSTOM_SETTING_DEFINE_SIZED`/`_POOLED`, `ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE`, the chunked write RPC). |
+| `CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY`        | Array settings (`ZMK_CUSTOM_SETTING_ARRAY_DEFINE`, push/pop/insert/remove, array RPC). |
+| `CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE`     | RPC-creatable keyspaces (`ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE`, `CreateSetting`/`DeleteSetting` RPC). Automatically selects `LARGE_VALUES` (a keyspace slot's `[key][payload]` blob is always pool-backed). |
+| `CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS` | Per-setting bytes RPC serializer/deserializer hooks (`ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS` and the array/keyspace equivalents). |
+| `CONFIG_ZMK_CUSTOM_SETTINGS_RECORD`       | Record/struct settings (`ZMK_CUSTOM_SETTING_RECORD_*`, the TLV codec). A record whose encoded size exceeds `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` additionally needs `LARGE_VALUES`. |
+
+Enable only the features your firmware actually registers settings for — each
+one you leave off drops its translation unit from the build entirely (the
+module is split one file per feature; see
+[`docs/design/feature-gating-and-modularization.md`](docs/design/feature-gating-and-modularization.md)),
+shrinking flash and RAM. Registering a setting with a macro whose feature is
+disabled fails to *build* (a `BUILD_ASSERT` in the macro names the missing
+`CONFIG_...`), not to link, so a misconfigured build is easy to diagnose.
+
+As measured on `tests/zmk-config`'s `custom_settings_board_minimal` (module +
+Studio RPC on, all five features off) vs `custom_settings_board_with_rpc`
+(all five on), both with the same sample settings compiled in: minimal is
+**~9.1 KiB smaller in flash** (243,457 vs 252,605 bytes, `text+data`) and
+**~5.3 KiB smaller in RAM** (106,311 vs 111,755 bytes, `data+bss`). The exact
+delta depends on which settings you register and their sizing knobs (see
+[Memory Notes](#memory-notes)).
+
+> **Upgrading from an earlier version:** these five gates previously defaulted
+> to `y`. If your `.conf` does not already set them explicitly, a firmware
+> update to this version will silently compile out any array/keyspace/large-
+> value/converter/record setting you use — re-enable the gates your config
+> needs (e.g. a module that registers a keyspace needs
+> `CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y`, which pulls in `LARGE_VALUES` via
+> `select`) before upgrading.
+
 ### Split Keyboards
 
 For split keyboards, enable ZMK's relay-event transport on both halves:
@@ -168,7 +207,12 @@ and Studio custom subsystem requests.
 
 Bytes settings may define RPC serializer/deserializer hooks. Firmware APIs and
 flash storage keep the internal byte format; RPC read/write uses the converted
-byte format. When hooks are omitted, bytes are copied as-is.
+byte format. When hooks are omitted, bytes are copied as-is. Requires
+[`CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS=y`](#feature-selection):
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS=y
+```
 
 ```c
 static int my_blob_to_rpc(const struct zmk_custom_setting *setting,
@@ -220,7 +264,14 @@ validated separately, and the encoding tolerates schema evolution: a field
 added to the struct later does not invalidate previously stored data (it is
 just absent from old records, so the caller's own default for that field
 applies), and a field removed from the schema is silently skipped when
-decoding old data.
+decoding old data. Requires
+[`CONFIG_ZMK_CUSTOM_SETTINGS_RECORD=y`](#feature-selection) (plus
+`LARGE_VALUES` if the encoded record exceeds
+`CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE`):
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_RECORD=y
+```
 
 ```c
 struct my_profile {
@@ -320,7 +371,12 @@ The custom Studio subsystem identifier for this module is
 By default every setting value is capped at
 `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` (64 bytes, the size of one RPC
 frame). A `BYTES`/`STRING` setting that needs to store more than that registers
-with an explicit per-setting `max_size` using `ZMK_CUSTOM_SETTING_DEFINE_SIZED`:
+with an explicit per-setting `max_size` using `ZMK_CUSTOM_SETTING_DEFINE_SIZED`.
+Requires [`CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=y`](#feature-selection):
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=y
+```
 
 ```c
 /* Store up to 256 bytes for this one setting. */
@@ -495,7 +551,12 @@ to `key/index` (plus a `key/_size` entry for the active length), but the
 public API and RPC protocol use the base key plus an explicit array index and
 active length. Flash storage saves the active length and only the active
 array items. RPC does not expose the maximum length; appending past it
-returns an error.
+returns an error. Requires
+[`CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY=y`](#feature-selection):
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY=y
+```
 
 ```c
 /* Declare the per-index defaults first (a plain macro argument works for
@@ -545,7 +606,14 @@ No heap is used: `ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE` statically allocates
 `max_entries` slots plus one shared per-keyspace byte pool that every entry's
 key + value are carved from on demand. Like `ZMK_CUSTOM_SETTING_DEFINE`, the
 macro registers the keyspace at compile time (a linker section entry) - there
-is no runtime registration call.
+is no runtime registration call. Requires
+[`CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y`](#feature-selection), which
+automatically selects `CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES` (a slot's
+`[key][payload]` blob is always pool-backed):
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y
+```
 
 ```c
 ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(
