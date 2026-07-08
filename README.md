@@ -79,8 +79,9 @@ see [Large Values](#large-values-per-setting-max_size).
 
 Beyond the always-available core (scalar/BYTES/STRING/BEHAVIOR settings,
 memory/persist/temporary writes, save/discard/reset, Studio RPC list/get/write),
-five optional features are gated behind their own Kconfig option and are
-**opt-in — `default n`**:
+five optional features are gated behind their own Kconfig option. Each is
+**enabled by default (`default y`)** so existing configurations keep working
+unchanged; disable the ones your firmware doesn't use to shrink flash/RAM:
 
 | Kconfig                                  | Enables                                                                          |
 | ----------------------------------------- | --------------------------------------------------------------------------------- |
@@ -90,8 +91,8 @@ five optional features are gated behind their own Kconfig option and are
 | `CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS` | Per-setting bytes RPC serializer/deserializer hooks (`ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS` and the array/keyspace equivalents). |
 | `CONFIG_ZMK_CUSTOM_SETTINGS_RECORD`       | Record/struct settings (`ZMK_CUSTOM_SETTING_RECORD_*`, the TLV codec). A record whose encoded size exceeds `CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE` additionally needs `LARGE_VALUES`. |
 
-Enable only the features your firmware actually registers settings for — each
-one you leave off drops its translation unit from the build entirely (the
+Disable any feature your firmware doesn't actually register settings for —
+each one you turn off drops its translation unit from the build entirely (the
 module is split one file per feature; see
 [`docs/design/feature-gating-and-modularization.md`](docs/design/feature-gating-and-modularization.md)),
 shrinking flash and RAM. Registering a setting with a macro whose feature is

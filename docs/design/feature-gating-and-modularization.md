@@ -255,3 +255,25 @@ uses core settings would see a larger relative reduction.
 `select ZMK_CUSTOM_SETTINGS_KEYSPACE` (or an explicit
 `CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y` default) added to its own Kconfig
 before it can build against this version, now that the gate defaults to `n`.
+
+## P6 — defaults reverted to `y` (owner decision, post-hardware-validation)
+
+After the measured minimal-vs-full delta above (~8.9 KiB flash / ~5.3 KiB RAM)
+turned out smaller than expected, the owner decided the breaking-change cost
+of opt-in defaults (every existing consumer, including
+`zmk-feature-runtime-macro`, would need a Kconfig change to keep building) was
+not worth it. All five gates are `default y` again - each still independently
+toggleable to `n` to shrink firmware, but no consumer's build breaks by
+default. This removes the P5 cross-repo follow-up above:
+`zmk-feature-runtime-macro` needs no change.
+
+Only two other files needed a matching change, since everything else in P1-P5
+(the file split, the `IS_ENABLED`-foldable predicates, the `BUILD_ASSERT`
+macro guards, the self-test configs, the sample file's per-feature `#if`
+guards) is orthogonal to which way the default points:
+
+- `Kconfig`: re-added `default y` to all five gates.
+- `tests/zmk-config/build.yaml`: `custom_settings_board_minimal` now passes
+  explicit `-DCONFIG_ZMK_CUSTOM_SETTINGS_*=n` for all five gates (previously
+  relied on the opt-in default to stay minimal); the other targets' existing
+  explicit `=y` flags are now redundant but harmless, left as-is.
