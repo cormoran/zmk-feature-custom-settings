@@ -458,7 +458,7 @@ static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *
     }
 
     /* Large value (> carrier): stream straight from the backing store under
-     * settings_lock, with no intermediate copy (this is why the old
+     * custom_settings_lock, with no intermediate copy (this is why the old
      * chunk_read_buffer staging buffer is gone). */
     struct encode_large_value_ctx ctx = {.stream = stream, .field = field, .ok = false};
     int lock_ret =
@@ -1972,7 +1972,7 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
          * large store (issue #16). RPC deserializer converters are bounded by
          * the fixed carrier and are not applied on this path. The write is
          * done while still holding chunk_session_lock (consistent lock order:
-         * chunk_session_lock is always taken before settings_lock), then the
+         * chunk_session_lock is always taken before custom_settings_lock), then the
          * session is released. */
         ret = zmk_custom_setting_write_bytes(setting, chunk_session.buffer,
                                              chunk_session.total_size, mode);

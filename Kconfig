@@ -34,6 +34,16 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
       is written over the chunked WriteValueChunk RPC and read via the
       ordinary (streamed) GetSetting.
 
+config ZMK_CUSTOM_SETTINGS_LARGE_VALUES
+    bool "Enable large (>single-frame) setting values and the shared value pool"
+    default y
+    help
+      Compiles in per-setting large values and the shared large-value pool
+      (ZMK_CUSTOM_SETTING_DEFINE_SIZED / _POOLED / LARGE_POOL_DEFINE, the
+      chunked write RPC, and the >carrier read/write firmware API). Disable to
+      shrink firmware when every setting fits
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. Keyspaces require this.
+
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
     int "Maximum per-setting large value size"
     default ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
@@ -130,6 +140,7 @@ config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
 config ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
     bool "Enable chunked write RPC for large setting values"
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    depends on ZMK_CUSTOM_SETTINGS_LARGE_VALUES
     default y
     help
       Adds the WriteValueChunk RPC request that transfers a bytes/string

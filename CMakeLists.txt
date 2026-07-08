@@ -6,6 +6,9 @@ if(CONFIG_ZMK_CUSTOM_SETTINGS)
     zephyr_linker_sources(DATA_SECTIONS include/linker/zmk-custom-settings.ld)
 
     target_sources(app PRIVATE src/custom_settings.c src/custom_settings_record.c)
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES)
+        target_sources(app PRIVATE src/custom_settings_pool.c)
+    endif()
 
     if(CONFIG_ZMK_CUSTOM_SETTINGS_TEST)
         target_sources(app PRIVATE src/test/custom_settings_test.c)
