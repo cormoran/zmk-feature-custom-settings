@@ -188,10 +188,19 @@ config ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE
       Writing a larger value in temporary mode fails with -EMSGSIZE; other
       write modes are unaffected.
 
+config ZMK_CUSTOM_SETTINGS_ARRAY
+    bool "Enable array settings"
+    default y
+    help
+      Compiles in fixed-length array settings (ZMK_CUSTOM_SETTING_ARRAY_DEFINE,
+      push/pop/insert/remove, the array index-view pool, and array RPC).
+      Disable to shrink firmware when no setting is an array.
+
 config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
     int "Array element index view pool size"
     default 16
     range 1 64
+    depends on ZMK_CUSTOM_SETTINGS_ARRAY
     help
       Number of struct zmk_custom_setting "index view" instances shared
       across all array settings. zmk_custom_setting_find_array_element

@@ -811,7 +811,16 @@ zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const cha
                                       uint32_t index);
 /* Return the public key exposed by RPC. Array elements return their base key. */
 const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setting);
-bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting);
+/* static inline (not out-of-line) so it folds to a compile-time constant
+ * `false` when CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY is off (feature-gating P2):
+ * every `if (zmk_custom_setting_is_array(setting)) { ...array-only code... }`
+ * branch then becomes provably dead code, so the array-only functions it
+ * calls (defined in src/custom_settings_array.c, not compiled when the
+ * feature is off) are dropped by the compiler/linker without needing an
+ * #ifdef at each call site. See docs/design/feature-gating-and-modularization.md. */
+static inline bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting) {
+    return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) && setting && setting->array_key != NULL;
+}
 /* Return the active array length for an array element. */
 uint32_t zmk_custom_setting_array_size(const struct zmk_custom_setting *setting);
 /* Return the maximum array length allocated by the registry. */
