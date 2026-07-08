@@ -175,16 +175,21 @@ setting_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
         return NULL;
     }
 
-    return ref->has_array_index
-               ? zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
-                                                       setting_ref_key(ref), ref->array_index)
-               : zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref),
-                                         setting_ref_key(ref));
+    /* IS_ENABLED-guarded (not a plain ref->has_array_index check) so the
+     * zmk_custom_setting_find_array_element call - only defined in
+     * src/custom_settings_array.c when CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY is
+     * enabled - is provably dead code when the feature is off, matching the
+     * zmk_custom_setting_is_array() fold pattern. */
+    if (IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) && ref->has_array_index) {
+        return zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
+                                                     setting_ref_key(ref), ref->array_index);
+    }
+    return zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
 }
 
 static const struct zmk_custom_setting *
 array_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
-    if (!ref->has_key) {
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) || !ref->has_key) {
         return NULL;
     }
 
@@ -457,8 +462,19 @@ static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *
         return false;
     }
 
+    /* Feature-gating P1 gap closed by P3's combined-gate verification build:
+     * -EMSGSIZE above only ever happens for a >carrier (pool-backed) value,
+     * which cannot exist when CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES is off
+     * - but that fact is a runtime property the compiler cannot see, so
+     * without this IS_ENABLED guard a CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=n
+     * build fails to link (zmk_custom_setting_with_large_raw_bytes is only
+     * defined in custom_settings_pool.c). */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES)) {
+        return false;
+    }
+
     /* Large value (> carrier): stream straight from the backing store under
-     * settings_lock, with no intermediate copy (this is why the old
+     * custom_settings_lock, with no intermediate copy (this is why the old
      * chunk_read_buffer staging buffer is gone). */
     struct encode_large_value_ctx ctx = {.stream = stream, .field = field, .ok = false};
     int lock_ret =
@@ -556,7 +572,8 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
         dest->behavior_value.param2 = src->value_type.behavior_value.param2;
         return 0;
     case cormoran_zmk_custom_settings_SettingValue_array_value_tag:
-        if (!src->value_type.array_value.has_value) {
+        if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) ||
+            !src->value_type.array_value.has_value) {
             return -EINVAL;
         }
         *is_array = true;
@@ -1176,18 +1193,23 @@ static bool for_each_list_item(const struct zmk_custom_settings_setting_scope *s
      * explicitly so ListSettings/GetSetting/notifications still surface
      * user-created entries (docs/design/simplification-redesign.md §5,
      * Goal A audit). A slot is never an array, so no expansion step is
-     * needed the way array descriptors need one above. */
-    ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(keyspace) {
-        for (uint32_t i = 0; i < keyspace->max_entries; i++) {
-            if (!keyspace->slots[i].in_use) {
-                continue;
-            }
-            const struct zmk_custom_setting *slot_setting = &keyspace->slots[i].setting;
-            if (!setting_matches_scope(slot_setting, scope)) {
-                continue;
-            }
-            if (!visitor(slot_setting, user_data)) {
-                return false;
+     * needed the way array descriptors need one above.
+     * IS_ENABLED-guarded (feature-gating P3) so a
+     * CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=n build never walks keyspace slot
+     * state. */
+    if (IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
+        ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(keyspace) {
+            for (uint32_t i = 0; i < keyspace->max_entries; i++) {
+                if (!keyspace->slots[i].in_use) {
+                    continue;
+                }
+                const struct zmk_custom_setting *slot_setting = &keyspace->slots[i].setting;
+                if (!setting_matches_scope(slot_setting, scope)) {
+                    continue;
+                }
+                if (!visitor(slot_setting, user_data)) {
+                    return false;
+                }
             }
         }
     }
@@ -1487,7 +1509,14 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
     if (!setting) {
         return -ENOENT;
     }
-    if (value_is_array) {
+    /* IS_ENABLED-guarded so the zmk_custom_setting_array_max_size /
+     * zmk_custom_setting_write_array_element calls below - only defined in
+     * src/custom_settings_array.c when CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY is
+     * enabled - are provably dead code when the feature is off (value_is_array
+     * is a runtime flag decoded off the wire, so it alone cannot make that
+     * provable to the compiler). */
+    bool write_as_array = IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) && value_is_array;
+    if (write_as_array) {
         if (array_size == 0 || array_size > zmk_custom_setting_array_max_size(setting) ||
             setting->array_index >= array_size) {
             return -EINVAL;
@@ -1514,7 +1543,7 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
         value = &internal_value;
     }
 
-    ret = value_is_array ? zmk_custom_setting_write_array_element(setting, value, array_size, mode)
+    ret = write_as_array ? zmk_custom_setting_write_array_element(setting, value, array_size, mode)
                          : zmk_custom_setting_write(setting, value, mode);
     if (ret < 0) {
         return ret;
@@ -1573,6 +1602,15 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
                                           cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                           cormoran_zmk_custom_settings_Response *resp,
                                           bool value_uses_rpc_format) {
+    /* Whole-function guard (rather than only guarding the
+     * zmk_custom_setting_array_push_back call below): array_for_ref already
+     * returns NULL when the feature is off, but the compiler cannot prove
+     * that across the call, so without this the push_back call would still
+     * need custom_settings_array.c's symbol at link time. */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)) {
+        return -ENOTSUP;
+    }
+
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1618,6 +1656,9 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
 
 static int handle_push_back_array(const cormoran_zmk_custom_settings_PushBackArrayRequest *req,
                                   cormoran_zmk_custom_settings_Response *resp) {
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)) {
+        return -ENOTSUP;
+    }
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_ref private_ref;
     int ret = setting_ref_to_private(&req->setting, &private_ref);
@@ -1640,6 +1681,12 @@ static int handle_push_back_array(const cormoran_zmk_custom_settings_PushBackArr
 static int handle_private_pop_back_array(const struct zmk_custom_settings_setting_ref *ref,
                                          cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                          cormoran_zmk_custom_settings_Response *resp) {
+    /* Whole-function guard, mirroring handle_private_push_back_array - see
+     * its comment. */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)) {
+        return -ENOTSUP;
+    }
+
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1675,6 +1722,9 @@ static int handle_private_pop_back_array(const struct zmk_custom_settings_settin
 
 static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArrayRequest *req,
                                  cormoran_zmk_custom_settings_Response *resp) {
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)) {
+        return -ENOTSUP;
+    }
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     struct zmk_custom_settings_setting_ref private_ref;
     int ret = setting_ref_to_private(&req->setting, &private_ref);
@@ -1703,6 +1753,18 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
                                          cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                          cormoran_zmk_custom_settings_Response *resp,
                                          bool value_uses_rpc_format) {
+    /* Feature-gating P3: everything below resolves through a
+     * struct zmk_custom_setting_keyspace * (zmk_custom_settings_keyspace_find_for_key/
+     * zmk_custom_setting_keyspace_create, defined in
+     * custom_settings_keyspace.c) - unlike every other handler, there is no
+     * live struct zmk_custom_setting to guard with zmk_custom_setting_keyspace_of(),
+     * so this early return is what keeps a
+     * CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=n build from referencing those
+     * symbols. */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
+        return -ENOTSUP;
+    }
+
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1808,6 +1870,11 @@ static int handle_create_setting(const cormoran_zmk_custom_settings_CreateSettin
 
 static int handle_private_delete_setting(const struct zmk_custom_settings_setting_ref *ref,
                                          cormoran_zmk_custom_settings_Response *resp) {
+    /* See the matching guard/comment in handle_private_create_setting. */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
+        return -ENOTSUP;
+    }
+
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1972,7 +2039,7 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
          * large store (issue #16). RPC deserializer converters are bounded by
          * the fixed carrier and are not applied on this path. The write is
          * done while still holding chunk_session_lock (consistent lock order:
-         * chunk_session_lock is always taken before settings_lock), then the
+         * chunk_session_lock is always taken before custom_settings_lock), then the
          * session is released. */
         ret = zmk_custom_setting_write_bytes(setting, chunk_session.buffer,
                                              chunk_session.total_size, mode);
@@ -2439,15 +2506,23 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
     case cormoran_zmk_custom_settings_Request_write_setting_tag:
         return handle_write_setting(&req->request_type.write_setting, resp);
     case cormoran_zmk_custom_settings_Request_push_back_array_tag:
-        return handle_push_back_array(&req->request_type.push_back_array, resp);
+        return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)
+                   ? handle_push_back_array(&req->request_type.push_back_array, resp)
+                   : -ENOTSUP;
     case cormoran_zmk_custom_settings_Request_pop_back_array_tag:
-        return handle_pop_back_array(&req->request_type.pop_back_array, resp);
+        return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)
+                   ? handle_pop_back_array(&req->request_type.pop_back_array, resp)
+                   : -ENOTSUP;
     case cormoran_zmk_custom_settings_Request_write_value_chunk_tag:
         return handle_write_value_chunk(&req->request_type.write_value_chunk, resp);
     case cormoran_zmk_custom_settings_Request_create_setting_tag:
-        return handle_create_setting(&req->request_type.create_setting, resp);
+        return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
+                   ? handle_create_setting(&req->request_type.create_setting, resp)
+                   : -ENOTSUP;
     case cormoran_zmk_custom_settings_Request_delete_setting_tag:
-        return handle_delete_setting(&req->request_type.delete_setting, resp);
+        return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
+                   ? handle_delete_setting(&req->request_type.delete_setting, resp)
+                   : -ENOTSUP;
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);

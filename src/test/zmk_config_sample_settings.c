@@ -35,6 +35,7 @@ ZMK_RPC_CUSTOM_SUBSYSTEM(zmk_config_sample, &zmk_config_sample_custom_settings_m
                          zmk_config_sample_handle_request);
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS)
 static int zmk_config_sample_reverse_bytes(const struct zmk_custom_setting *setting,
                                            const uint8_t *src, size_t src_size, uint8_t *dest,
                                            size_t *dest_size, size_t dest_capacity) {
@@ -50,6 +51,7 @@ static int zmk_config_sample_reverse_bytes(const struct zmk_custom_setting *sett
     *dest_size = src_size;
     return 0;
 }
+#endif /* CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS */
 
 static const struct zmk_custom_setting_constraint zmk_config_sample_no_constraints[] = {
     {.type = ZMK_CUSTOM_SETTING_CONSTRAINT_NONE},
@@ -182,6 +184,7 @@ const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes) = {
     .state = &zmk_config_sample_bytes_state,
 };
 
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS)
 static const struct zmk_custom_setting_value zmk_config_sample_bytes_rpc_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
     .size = 4,
@@ -209,7 +212,9 @@ const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes_rpc) =
     .blob = {.max_size = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, .pool = NULL},
     .state = &zmk_config_sample_bytes_rpc_state,
 };
+#endif /* CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS */
 
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES)
 /*
  * issue #16: a BYTES setting able to store a value larger than the fixed
  * carrier, using the ZMK_CUSTOM_SETTING_DEFINE_SIZED macro. When
@@ -241,6 +246,7 @@ ZMK_CUSTOM_SETTING_DEFINE_POOLED(
     ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, ZMK_CUSTOM_SETTING_VALUE_BYTES(0),
     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+#endif /* CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES */
 
 static const struct zmk_custom_setting_value zmk_config_sample_private_string_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
@@ -379,6 +385,7 @@ const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_val
  * instead; the scalar settings above still exercise the "hand-built
  * STRUCT_SECTION_ITERABLE instead of macros" path.
  */
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)
 ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(zmk_config_sample_array_defaults, 10, 20, 30, 40);
 
 ZMK_CUSTOM_SETTING_ARRAY_DEFINE(zmk_config_sample_array, "zmk_config_sample", "array_value",
@@ -388,7 +395,9 @@ ZMK_CUSTOM_SETTING_ARRAY_DEFINE(zmk_config_sample_array, "zmk_config_sample", "a
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+#endif /* CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY */
 
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
 /*
  * Simplification P3: an RPC-creatable keyspace sample. Studio clients can
  * create/delete named STRING entries under the "profile/" prefix at runtime
@@ -406,3 +415,4 @@ ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(zmk_config_sample_profiles, "zmk_config_sampl
                                    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+#endif /* CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE */

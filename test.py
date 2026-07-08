@@ -30,7 +30,7 @@ class ConfigAndDeviceTree:
     # Expected rows in devicetree_generated.h
     device: list[str | NotFound]
     # Expected byte strings in zephyr.elf
-    binary: list[bytes] = field(default_factory=list)
+    binary: list[bytes | NotFound] = field(default_factory=list)
 
 
 class WestCommandsTests(unittest.TestCase):
@@ -78,6 +78,11 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
                         "CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128",
                         "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RECORD=y",
                     ],
                     device=[],
                     binary=[
@@ -99,6 +104,11 @@ class WestCommandsTests(unittest.TestCase):
                         "# CONFIG_ZMK_STUDIO is not set",
                         NotFound("CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF"),
                         NotFound("CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC"),
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RECORD=y",
                     ],
                     device=[],
                     binary=[
@@ -111,6 +121,43 @@ class WestCommandsTests(unittest.TestCase):
                         b"array_value",
                         b"large_bytes_value",
                         b"pooled_bytes_value",
+                    ],
+                ),
+                "custom_settings_board_minimal": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES=y",
+                        # Feature gating P5: the whole point of this artifact - module
+                        # + Studio RPC on, all five optional features left at their
+                        # opt-in default (n). Each still has a Kconfig prompt (so
+                        # Kconfig emits a "not set" comment rather than omitting the
+                        # line entirely) - assert the comment form, not NotFound.
+                        "# CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES is not set",
+                        "# CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY is not set",
+                        "# CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE is not set",
+                        "# CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS is not set",
+                        "# CONFIG_ZMK_CUSTOM_SETTINGS_RECORD is not set",
+                    ],
+                    device=[],
+                    binary=[
+                        b"zmk_config_sample",
+                        b"int32_value",
+                        b"bool_value",
+                        b"string_value",
+                        b"bytes_value",
+                        # These samples are #if-guarded out in
+                        # src/test/zmk_config_sample_settings.c when their gate is
+                        # off - confirm the minimal build really strips them.
+                        # (array_value is not checked here: it collides with an
+                        # unrelated, always-present RPC oneof field name of the
+                        # same spelling in the generated protobuf code.)
+                        NotFound("bytes_rpc_value"),
+                        NotFound("large_bytes_value"),
+                        NotFound("pooled_bytes_value"),
+                        NotFound("profile/"),
                     ],
                 ),
                 "custom_settings_split_peripheral_with_rpc_relay": ConfigAndDeviceTree(
@@ -126,6 +173,11 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
                         "CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y",
                         "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RECORD=y",
                     ],
                     device=[],
                     binary=[
@@ -156,6 +208,11 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY=y",
                         "CONFIG_ZMK_STUDIO_TRANSPORT_UART=y",
                         "CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS=y",
+                        "CONFIG_ZMK_CUSTOM_SETTINGS_RECORD=y",
                     ],
                     device=[],
                     binary=[
@@ -226,14 +283,21 @@ class WestCommandsTests(unittest.TestCase):
                     self.fail(f"{hint}: {expected} not found in {file_path}")
 
     def _test_binary_strings_in_file(
-        self, file_path: Path, expected_strings: list[bytes], hint: str
+        self, file_path: Path, expected_strings: list[bytes | NotFound], hint: str
     ):
         self.assertTrue(file_path.exists(), f"{hint}: {file_path} is missing")
         file_bytes = file_path.read_bytes()
 
         for expected in expected_strings:
-            if expected not in file_bytes:
-                self.fail(f"{hint}: {expected!r} not found in {file_path}")
+            if isinstance(expected, NotFound):
+                needle = expected.text.encode()
+                if needle in file_bytes:
+                    self.fail(
+                        f"{hint}: {needle!r} found in {file_path}, but it should not be present"
+                    )
+            else:
+                if expected not in file_bytes:
+                    self.fail(f"{hint}: {expected!r} not found in {file_path}")
 
 
 if __name__ == "__main__":

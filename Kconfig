@@ -34,6 +34,16 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
       is written over the chunked WriteValueChunk RPC and read via the
       ordinary (streamed) GetSetting.
 
+config ZMK_CUSTOM_SETTINGS_LARGE_VALUES
+    bool "Enable large (>single-frame) setting values and the shared value pool"
+    default y
+    help
+      Compiles in per-setting large values and the shared large-value pool
+      (ZMK_CUSTOM_SETTING_DEFINE_SIZED / _POOLED / LARGE_POOL_DEFINE, the
+      chunked write RPC, and the >carrier read/write firmware API). Disable to
+      shrink firmware when every setting fits
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. Keyspaces require this.
+
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
     int "Maximum per-setting large value size"
     default ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
@@ -130,6 +140,7 @@ config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
 config ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
     bool "Enable chunked write RPC for large setting values"
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
+    depends on ZMK_CUSTOM_SETTINGS_LARGE_VALUES
     default y
     help
       Adds the WriteValueChunk RPC request that transfers a bytes/string
@@ -177,10 +188,19 @@ config ZMK_CUSTOM_SETTINGS_TEMP_SLOT_SIZE
       Writing a larger value in temporary mode fails with -EMSGSIZE; other
       write modes are unaffected.
 
+config ZMK_CUSTOM_SETTINGS_ARRAY
+    bool "Enable array settings"
+    default y
+    help
+      Compiles in fixed-length array settings (ZMK_CUSTOM_SETTING_ARRAY_DEFINE,
+      push/pop/insert/remove, the array index-view pool, and array RPC).
+      Disable to shrink firmware when no setting is an array.
+
 config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
     int "Array element index view pool size"
     default 16
     range 1 64
+    depends on ZMK_CUSTOM_SETTINGS_ARRAY
     help
       Number of struct zmk_custom_setting "index view" instances shared
       across all array settings. zmk_custom_setting_find_array_element
@@ -190,6 +210,36 @@ config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
       same (array, index) pair, so this only needs to cover how many
       distinct array elements are referenced at once (RPC handling, list
       enumeration, tests); it does not bound array length.
+
+config ZMK_CUSTOM_SETTINGS_KEYSPACE
+    bool "Enable RPC-creatable keyspaces (namespaces)"
+    default y
+    select ZMK_CUSTOM_SETTINGS_LARGE_VALUES
+    help
+      Compiles in runtime-creatable keyspaces (ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE,
+      the CreateSetting/DeleteSetting Studio RPC, and per-keyspace slot pools).
+      A keyspace slot is a pool-backed blob, so this requires
+      ZMK_CUSTOM_SETTINGS_LARGE_VALUES. Disable to shrink firmware when no
+      module registers a keyspace.
+
+config ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS
+    bool "Enable per-setting RPC bytes converter hooks"
+    default y
+    help
+      Compiles in the ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS
+      serialize/deserialize hooks that transform a BYTES value between its
+      stored form and its RPC form. Disable to shrink firmware when no setting
+      uses a converter (values pass through unchanged).
+
+config ZMK_CUSTOM_SETTINGS_RECORD
+    bool "Enable record/struct settings (TLV codec)"
+    default y
+    help
+      Compiles in ZMK_CUSTOM_SETTING_RECORD_* struct settings (a versioned
+      TLV codec over a BYTES setting). Disable to shrink firmware when no
+      setting is a record. A record larger than
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE additionally needs
+      ZMK_CUSTOM_SETTINGS_LARGE_VALUES.
 
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
