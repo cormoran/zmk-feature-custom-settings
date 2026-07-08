@@ -960,6 +960,18 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     }
 
     *notification = relay->notification;
+    /* CRITICAL: the struct copy above brought along cb_notification_type,
+     * whose funcs union still holds the DECODE-role precallback wired before
+     * pb_decode(). nanopb's encoder invokes cb_<oneof>.funcs.encode for
+     * PB_LTYPE_SUBMSG_W_CB arms too (pb_encode.c, "Message callback is
+     * stored right before pSize"), so re-encoding this notification with the
+     * stale callback in place makes the precallback run in encode context
+     * and overwrite the SettingValue union with the decode callback's
+     * pointers - observed on real hardware as every relayed INT32 turning
+     * into 362819 (0x58943, the Thumb address of decode_into_bounded_scratch)
+     * and every relayed BYTES/STRING value vanishing. Clear it so the
+     * republish encode sees no message-level callback. */
+    notification->cb_notification_type = (pb_callback_t){0};
     if (notification->which_notification_type !=
             cormoran_zmk_custom_settings_Notification_setting_tag ||
         !notification->notification_type.setting.has_setting) {
@@ -3370,6 +3382,130 @@ static int custom_settings_request_decode_regression_test_init(void) {
 }
 
 SYS_INIT(custom_settings_request_decode_regression_test_init, APPLICATION, 99);
+
+/*
+ * Regression test for the second oneof-callback hazard found on real
+ * hardware (split rig): a Notification DECODED with the message-level
+ * precallback wired must have cb_notification_type cleared before it is
+ * RE-ENCODED (the central's relayed-notification republish path,
+ * relayed_notification_to_public). nanopb's encoder invokes
+ * cb_<oneof>.funcs.encode for SUBMSG_W_CB arms, and after a struct copy the
+ * funcs union still holds the decode precallback - which then runs in
+ * encode context and overwrites the value union with the decode callback's
+ * pointers. On hardware every relayed INT32 read back as 362819 (the Thumb
+ * address of decode_into_bounded_scratch) and every BYTES/STRING value
+ * vanished. This mirrors the decode -> sanitize -> re-encode sequence and
+ * asserts both an INT32 and a STRING value survive the round trip.
+ */
+static int custom_settings_notification_reencode_regression_test_init(void) {
+    static uint8_t value_buf[64];
+    static struct bounded_decode_scratch value_scratch = {.buf = value_buf,
+                                                          .capacity = sizeof(value_buf) - 1};
+    static uint8_t payload_buf[64];
+    static struct bounded_decode_scratch payload_scratch = {.buf = payload_buf,
+                                                            .capacity = sizeof(payload_buf) - 1};
+    static const char str_payload[] = "relay-p4";
+    uint8_t wire[160];
+    uint8_t wire2[160];
+
+    for (int use_string = 0; use_string <= 1; use_string++) {
+        /* 1. Encode a source notification (as a peripheral would). */
+        cormoran_zmk_custom_settings_Notification src =
+            cormoran_zmk_custom_settings_Notification_init_zero;
+        src.which_notification_type = cormoran_zmk_custom_settings_Notification_setting_tag;
+        src.notification_type.setting.kind =
+            cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
+        src.notification_type.setting.has_setting = true;
+        copy_string(src.notification_type.setting.setting.key,
+                    sizeof(src.notification_type.setting.setting.key), "int32_value");
+        src.notification_type.setting.setting.has_value = true;
+        if (use_string) {
+            payload_scratch.size = sizeof(str_payload) - 1;
+            memcpy(payload_scratch.buf, str_payload, payload_scratch.size);
+            src.notification_type.setting.setting.value.which_value_type =
+                cormoran_zmk_custom_settings_SettingValue_string_value_tag;
+            src.notification_type.setting.setting.value.value_type.string_value.funcs.encode =
+                encode_bounded_scratch_value;
+            src.notification_type.setting.setting.value.value_type.string_value.arg =
+                &payload_scratch;
+        } else {
+            src.notification_type.setting.setting.value.which_value_type =
+                cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
+            src.notification_type.setting.setting.value.value_type.int32_value = 63;
+        }
+        pb_ostream_t out = pb_ostream_from_buffer(wire, sizeof(wire));
+        if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &src)) {
+            LOG_ERR("notification reencode regression: encode failed: %s", PB_GET_ERROR(&out));
+            return -EIO;
+        }
+
+        /* 2. Decode it the way relayed_notification_to_public does. */
+        cormoran_zmk_custom_settings_Notification decoded =
+            cormoran_zmk_custom_settings_Notification_init_zero;
+        value_scratch.size = 0;
+        decoded.cb_notification_type.funcs.decode = notification_arm_wire_precallback;
+        decoded.cb_notification_type.arg = &value_scratch;
+        pb_istream_t in = pb_istream_from_buffer(wire, out.bytes_written);
+        if (!pb_decode(&in, cormoran_zmk_custom_settings_Notification_fields, &decoded)) {
+            LOG_ERR("notification reencode regression: decode failed: %s", PB_GET_ERROR(&in));
+            return -EIO;
+        }
+
+        /* 3. Sanitize + retarget exactly like the republish path, then
+         * re-encode. Without the cb clear this second encode corrupts the
+         * value (the hardware bug). */
+        cormoran_zmk_custom_settings_Notification republish = decoded;
+        republish.cb_notification_type = (pb_callback_t){0};
+        if (republish.notification_type.setting.setting.has_value) {
+            retarget_value_to_encode_scratch(&republish.notification_type.setting.setting.value,
+                                             &value_scratch);
+        }
+        out = pb_ostream_from_buffer(wire2, sizeof(wire2));
+        if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &republish)) {
+            LOG_ERR("notification reencode regression: re-encode failed: %s", PB_GET_ERROR(&out));
+            return -EIO;
+        }
+
+        /* 4. Decode the re-encoded wire and check the value survived. */
+        cormoran_zmk_custom_settings_Notification final_msg =
+            cormoran_zmk_custom_settings_Notification_init_zero;
+        static uint8_t final_buf[64];
+        static struct bounded_decode_scratch final_scratch = {.buf = final_buf,
+                                                              .capacity = sizeof(final_buf) - 1};
+        final_scratch.size = 0;
+        final_msg.cb_notification_type.funcs.decode = notification_arm_wire_precallback;
+        final_msg.cb_notification_type.arg = &final_scratch;
+        in = pb_istream_from_buffer(wire2, out.bytes_written);
+        if (!pb_decode(&in, cormoran_zmk_custom_settings_Notification_fields, &final_msg)) {
+            LOG_ERR("notification reencode regression: final decode failed: %s", PB_GET_ERROR(&in));
+            return -EIO;
+        }
+        const cormoran_zmk_custom_settings_SettingValue *v =
+            &final_msg.notification_type.setting.setting.value;
+        if (use_string) {
+            if (v->which_value_type != cormoran_zmk_custom_settings_SettingValue_string_value_tag ||
+                final_scratch.size != sizeof(str_payload) - 1 ||
+                memcmp(final_scratch.buf, str_payload, final_scratch.size) != 0) {
+                LOG_ERR("notification reencode regression: STRING lost (which=%u size=%u)",
+                        v->which_value_type, (unsigned)final_scratch.size);
+                return -EINVAL;
+            }
+        } else {
+            if (v->which_value_type != cormoran_zmk_custom_settings_SettingValue_int32_value_tag ||
+                v->value_type.int32_value != 63) {
+                LOG_ERR("notification reencode regression: INT32 lost (which=%u val=%d)",
+                        v->which_value_type, v->value_type.int32_value);
+                return -EINVAL;
+            }
+        }
+    }
+
+    LOG_INF("PASS: custom_settings_notification_reencode_regression int32=63 string=%s",
+            str_payload);
+    return 0;
+}
+
+SYS_INIT(custom_settings_notification_reencode_regression_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
