@@ -31,11 +31,7 @@ import {
   scalarValueToNumber,
   validateConstraintValue,
 } from "./constraints";
-import {
-  readValueChunked,
-  writeValueChunked,
-  SINGLE_FRAME_VALUE_MAX,
-} from "./chunkedValue";
+import { writeValueChunked, SINGLE_FRAME_VALUE_MAX } from "./chunkedValue";
 
 export const SUBSYSTEM_IDENTIFIER = "cormoran_custom_settings";
 const LIST_NOTIFICATION_TIMEOUT_MS = 750;
@@ -481,26 +477,11 @@ export function RPCTestSection() {
       }
 
       setSetting(fetched);
-      let text = formatSetting(fetched);
-
-      // A value larger than one frame is omitted from the single-frame
-      // response (issue #16); fetch it over the chunked ReadValueChunk RPC.
-      // Value-less settings that are not large (device-private / secure while
-      // locked) simply fail the chunk read, which we ignore.
-      if (!fetched.value) {
-        try {
-          const bytes = await readValueChunked(callCustomRequest, settingRef);
-          if (bytes.length > 0) {
-            text += `\nlarge value (${bytes.length} bytes): ${formatBytesValue(
-              bytes
-            )}`;
-          }
-        } catch (chunkError) {
-          console.debug("[custom-settings] chunked read skipped", chunkError);
-        }
-      }
-
-      setResponse(text);
+      // GetSetting now streams a value of any size directly (simplification
+      // P2), so formatSetting already has everything it needs - a missing
+      // `value` here means the setting is device-private or secure while
+      // locked, not "too large for one frame".
+      setResponse(formatSetting(fetched));
     } catch (error) {
       console.error("Get setting failed:", error);
       setResponse(

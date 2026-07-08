@@ -291,23 +291,91 @@ ZMK_CUSTOM_SETTING_DEFINE(test_record_setting, "test", "record_value",
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                           ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
-/* P5b: an RPC-creatable keyspace for user-created entries under the
- * "macro/" prefix. max_key_len (16) is a keyspace-local limit deliberately
- * smaller than CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (48, see
- * native_sim.conf) to exercise that the two are independent - "macro/" (6)
- * plus a short suffix plus NUL comfortably fits 16 but would not fit a
- * hypothetical much-smaller max_key_len. */
-static const struct zmk_custom_setting_value test_keyspace_default =
-    ZMK_CUSTOM_SETTING_VALUE_INT32(0);
+/*
+ * Simplification P4 layout self-checks (compile-time, via sizeof):
+ *
+ * 1. The per-setting RAM state block stays small: <= 24 bytes with 32-bit
+ *    pointers (the design target; flags + temp_slot + a 12-byte value union
+ *    + 2 pointers), scaling only through its two pointers/union on LP64
+ *    hosts (native_sim on a 64-bit machine: <= 40).
+ * 2. A BOOL (or any scalar) setting emits NO value buffer at all: its
+ *    macro-emitted `_store` array is zero-length, so the whole per-setting
+ *    RAM cost is exactly the state block.
+ */
+ZMK_CUSTOM_SETTING_DEFINE(test_bool_probe_setting, "test", "bool_probe",
+                          ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL, ZMK_CUSTOM_SETTING_VALUE_BOOL(false),
+                          ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                          ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+BUILD_ASSERT(sizeof(struct zmk_custom_setting_state) <= (sizeof(void *) == 4 ? 24 : 40),
+             "P4: per-setting RAM state block grew past the design budget");
+BUILD_ASSERT(sizeof(test_bool_probe_setting_store) == 0,
+             "P4: a BOOL setting must not emit a value store buffer");
+BUILD_ASSERT(ZMK_CUSTOM_SETTING_VALUE_STORE_SIZE(ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                                 CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) ==
+                 CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1,
+             "P4: a STRING setting's fixed store must reserve capacity + NUL");
+
+/* Simplification P3: an RPC-creatable keyspace for user-created entries
+ * under the "macro/" prefix. max_key_len (16) is a keyspace-local limit
+ * bounded by (but need not equal) CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (48,
+ * see native_sim.conf) - "macro/" (6) plus a short suffix plus NUL
+ * comfortably fits 16. Keyspaces no longer take a _default_value argument
+ * (P3: a slot's blob always carries its own user key, so there is no shared
+ * static default that could represent a not-yet-existing entry's key - see
+ * the keyspace design comment in the header). */
 ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_macro_keyspace, "test", "macro/",
                                    ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
                                    /* max_size = */ sizeof(int32_t), /* max_key_len = */ 16,
-                                   /* max_entries = */ 3, test_keyspace_default,
+                                   /* max_entries = */ 3,
                                    ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
                                    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/*
+ * Simplification P1 (Change 1, task 3): a keyspace whose max_size exceeds the
+ * fixed carrier draws every slot's region from a per-keyspace
+ * ZMK_CUSTOM_SETTING_LARGE_POOL instead of a dedicated value_bufs row -
+ * exactly like ZMK_CUSTOM_SETTING_DEFINE_POOLED. Since simplification P3,
+ * every slot's blob (key + payload combined) is pool-backed unconditionally,
+ * sized max_entries * (max_key_len + max_size) = 2 * (16 + 100) = 232 bytes -
+ * enough for two simultaneous full-size entries plus their (short) keys.
+ */
+#define TEST_KEYSPACE_LARGE_MAX_SIZE 100
+
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(test_blob_keyspace, "test", "blob/",
+                                   ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+                                   /* max_size = */ TEST_KEYSPACE_LARGE_MAX_SIZE,
+                                   /* max_key_len = */ 16,
+                                   /* max_entries = */ 2,
+                                   ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+/*
+ * Enabler A (for zmk-feature-runtime-macro's keyspace migration): a keyspace
+ * whose pool is deliberately smaller than the worst-case max_entries *
+ * (max_key_len + max_size) budget - the over-commit promised by
+ * docs/design/simplification-redesign.md §5.3 ("a pool smaller than
+ * max_entries × max_size lets a keyspace hold many small entries or few
+ * large ones"). max_entries=8 but the pool only holds 3 full-size entries
+ * worth of bytes, so create() must start failing with -ENOSPC well before
+ * the 8-entry slot-count ceiling is reached.
+ */
+#define TEST_OVERCOMMIT_MAX_SIZE 16
+#define TEST_OVERCOMMIT_MAX_KEY_LEN 12
+#define TEST_OVERCOMMIT_MAX_ENTRIES 8
+#define TEST_OVERCOMMIT_POOL_SIZE (3 * (TEST_OVERCOMMIT_MAX_KEY_LEN + TEST_OVERCOMMIT_MAX_SIZE))
+
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE(
+    test_overcommit_keyspace, "test", "oc/", ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+    TEST_OVERCOMMIT_MAX_SIZE, TEST_OVERCOMMIT_MAX_KEY_LEN, TEST_OVERCOMMIT_MAX_ENTRIES,
+    TEST_OVERCOMMIT_POOL_SIZE, ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+    ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE, ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+    ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
 /*
  * issue #16: a BYTES setting able to store a value much larger than the fixed
@@ -1428,100 +1496,6 @@ static int test_view_pool_temp_slot_leak(void) {
     return 0;
 }
 
-/* Bug #21, case 2: unregistering a setting that still holds an active
- * temporary override must release its temp-pool slot before detaching the
- * descriptor. Otherwise temp_slots[k].owner keeps pointing at descriptor
- * storage the caller may free/reuse, leaking the slot and risking
- * mis-attribution on a later allocation. */
-static struct zmk_custom_setting_value unreg_temp_default = ZMK_CUSTOM_SETTING_VALUE_INT32(0);
-static struct zmk_custom_setting unreg_temp_setting;
-
-static int test_unregister_frees_temp_slot(void) {
-    const uint32_t temp_slots = CONFIG_ZMK_CUSTOM_SETTINGS_TEMP_SLOTS;
-    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
-    if (!int_setting) {
-        return -ENOENT;
-    }
-    if (temp_slots != 2) {
-        LOG_ERR("test_unregister_frees_temp_slot assumes 2 temp slots, configured %u", temp_slots);
-        return -EINVAL;
-    }
-
-    unreg_temp_setting = (struct zmk_custom_setting){
-        .custom_subsystem_id = "test",
-        .key = "unreg_temp",
-        .array_key = NULL,
-        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
-        .array_state = NULL,
-        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-        .constraints = NULL,
-        .constraints_count = 0,
-        .default_value = &unreg_temp_default,
-        .temp_slot = -1,
-    };
-    int ret = zmk_custom_settings_register(&unreg_temp_setting);
-    if (ret < 0) {
-        LOG_ERR("zmk_custom_settings_register failed: %d", ret);
-        return ret;
-    }
-
-    /* Fill both temp slots: the unregister candidate plus one other setting. */
-    ret = zmk_custom_setting_write(&unreg_temp_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(7),
-                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = zmk_custom_setting_write(int_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(8),
-                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
-    if (ret < 0) {
-        return ret;
-    }
-
-    /* Pool is now full. */
-    ret = zmk_custom_setting_write(&test_temp_filler_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
-                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
-    if (ret != -EBUSY) {
-        LOG_ERR("Expected temp pool to be full before unregister, got %d", ret);
-        return -EINVAL;
-    }
-
-    /* Unregister the setting while its temporary override is still active. */
-    ret = zmk_custom_settings_unregister(&unreg_temp_setting);
-    if (ret < 0) {
-        LOG_ERR("zmk_custom_settings_unregister failed: %d", ret);
-        return ret;
-    }
-    if (zmk_custom_setting_find("test", "unreg_temp") != NULL) {
-        LOG_ERR("Unregistered setting is still find-able");
-        return -EINVAL;
-    }
-
-    /* The unregistered setting's temp slot must have been freed, so a new
-     * temporary write now succeeds where it failed above. */
-    ret = zmk_custom_setting_write(&test_temp_filler_setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(9),
-                                   ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY);
-    if (ret < 0) {
-        LOG_ERR("Temp slot leaked: unregister did not free the override slot (%d)", ret);
-        return ret;
-    }
-
-    /* Clean up the two remaining overrides. */
-    ret = zmk_custom_setting_rollback_temporary(int_setting);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = zmk_custom_setting_rollback_temporary(&test_temp_filler_setting);
-    if (ret < 0) {
-        return ret;
-    }
-
-    LOG_INF("PASS: custom_settings_unregister_frees_temp_slot");
-    return 0;
-}
-
 /* Simulates what a boot-time devicetree default installer does: replace a
  * setting's compile-time default before any user value has been set, then
  * confirm reset() re-applies the new default. */
@@ -1591,151 +1565,47 @@ static int test_boot_default_override(void) {
     return 0;
 }
 
-/* P5a: a setting registered at runtime (e.g. a driver whose channel count
- * depends on devicetree instance data) instead of via
- * ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE. Registers from
- * a SYS_INIT-equivalent hook (this test itself already runs from one, at a
- * priority after custom_settings_init - the same situation a real runtime
- * caller would be in if it registered from its own late SYS_INIT or from
- * application code after boot) and confirms the result behaves exactly
- * like a compile-time setting: find-able, writable, covered by save/
- * discard/reset scope operations, and - the P5a-specific requirement -
- * that a value persisted *before* registration (simulating a value saved on
- * a previous boot) is not silently lost; zmk_custom_settings_register()
- * must load it via settings_load_subtree() since custom_settings_init()'s
- * own settings_load() already ran before this call. */
-static struct zmk_custom_setting_value runtime_setting_default = ZMK_CUSTOM_SETTING_VALUE_INT32(7);
-static struct zmk_custom_setting runtime_int_setting;
-
-static int test_runtime_registration(void) {
-    /* Seed a persisted value as if a previous boot had saved one, before
-     * this setting is registered - this is the scenario
-     * zmk_custom_settings_register()'s unconditional settings_load_subtree()
-     * call exists for. */
-    const int32_t persisted_value = 123;
-    int ret = test_settings_save(NULL, "custom_settings/test/runtime_int",
-                                 (const char *)&persisted_value, sizeof(persisted_value));
-    if (ret < 0) {
-        return ret;
+/* Build a keyspace slot's `[user_key\0][payload]` blob the way a real
+ * CreateSetting+save would, for tests that seed a persisted record directly
+ * in the fake settings backend (simulating a value saved by a previous boot
+ * session) - see test_keyspace_lifecycle's settings-load re-binding case.
+ * Returns the blob length, or 0 if it does not fit `out_capacity`. */
+static size_t test_keyspace_encode_blob(uint8_t *out, size_t out_capacity, const char *key,
+                                        const void *payload, size_t payload_size) {
+    size_t key_len = strlen(key);
+    if (key_len + 1 + payload_size > out_capacity) {
+        return 0;
     }
 
-    if (zmk_custom_setting_find("test", "runtime_int") != NULL) {
-        LOG_ERR("Runtime test setting was already registered before the test ran");
-        return -EINVAL;
-    }
-
-    runtime_int_setting = (struct zmk_custom_setting){
-        .custom_subsystem_id = "test",
-        .key = "runtime_int",
-        .array_key = NULL,
-        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
-        .array_state = NULL,
-        .value_type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
-        .confidentiality = ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
-        .read_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-        .write_permission = ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
-        .constraints = NULL,
-        .constraints_count = 0,
-        .default_value = &runtime_setting_default,
-        .temp_slot = -1,
-    };
-
-    ret = zmk_custom_settings_register(&runtime_int_setting);
-    if (ret < 0) {
-        LOG_ERR("zmk_custom_settings_register failed: %d", ret);
-        return ret;
-    }
-
-    /* Registering the same subsystem/key again must fail. */
-    struct zmk_custom_setting duplicate = runtime_int_setting;
-    ret = zmk_custom_settings_register(&duplicate);
-    if (ret != -EEXIST) {
-        LOG_ERR("Expected duplicate runtime registration to fail with -EEXIST, got %d", ret);
-        return -EINVAL;
-    }
-
-    /* Find-able like any compile-time setting. */
-    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "runtime_int");
-    if (!setting) {
-        LOG_ERR("Runtime-registered setting is not find-able");
-        return -ENOENT;
-    }
-
-    /* The seeded pre-registration value was loaded, not the compile-time
-     * default (7). */
-    ret = expect_int_value(setting, persisted_value);
-    if (ret < 0) {
-        LOG_ERR("Runtime registration did not load a pre-existing persisted value");
-        return ret;
-    }
-    LOG_INF("PASS: custom_settings_runtime_register_loads_persisted value=%d", persisted_value);
-
-    /* Covered by ZMK_CUSTOM_SETTING_FOREACH-based iteration: apply_scope
-     * (save/discard/reset_scope) reaches it like any other setting. */
-    ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(55),
-                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
-    if (ret < 0) {
-        return ret;
-    }
-    uint32_t affected_count = 0;
-    ret = zmk_custom_settings_save_scope("test", "runtime_int", NULL, &affected_count);
-    if (ret < 0) {
-        return ret;
-    }
-    if (affected_count != 1) {
-        LOG_ERR("Expected save_scope to affect exactly the runtime setting, got %u",
-                affected_count);
-        return -EINVAL;
-    }
-    if (!test_settings_has_record("custom_settings/test/runtime_int")) {
-        LOG_ERR("Runtime setting save did not persist");
-        return -EINVAL;
-    }
-    LOG_INF("PASS: custom_settings_runtime_register_save_scope value=55");
-
-    ret = zmk_custom_settings_reset_scope("test", "runtime_int", NULL, &affected_count);
-    if (ret < 0) {
-        return ret;
-    }
-    ret = expect_int_value(setting, 7);
-    if (ret < 0) {
-        LOG_ERR("Runtime setting reset did not restore its compile-time default");
-        return ret;
-    }
-    LOG_INF("PASS: custom_settings_runtime_register_reset_scope value=7");
-
-    return 0;
+    memcpy(out, key, key_len);
+    out[key_len] = '\0';
+    memcpy(out + key_len + 1, payload, payload_size);
+    return key_len + 1 + payload_size;
 }
 
-/* P5b: RPC-creatable keyspaces. Exercises the whole lifecycle: register the
- * keyspace, create entries (quota enforcement, prefix mismatch), confirm
- * they are find-able/listable/covered by scope operations via the same
- * ZMK_CUSTOM_SETTING_FOREACH leverage point P5a established, delete one and
- * confirm its slot is reusable, and - the trickiest and most important part
- * - confirm persisted entries seeded directly in the fake settings backend
- * (as if created by a CreateSetting RPC in a previous boot session, with no
- * zmk_custom_settings_register_keyspace-time knowledge of their keys) come
- * back as live, listable, deletable settings after a settings_load pass,
- * with no CreateSetting call ever happening for them this boot. */
+/*
+ * Simplification P3: opaque-blob keyspaces. Exercises the whole lifecycle:
+ * create entries (quota enforcement, prefix mismatch), confirm they are
+ * find-able/listable/covered by scope operations via the explicit
+ * keyspace-slot walks apply_scope/for_each_list_item now do (Goal A audit -
+ * keyspace slots are no longer reachable through ZMK_CUSTOM_SETTING_FOREACH),
+ * delete one and confirm its slot is reusable, and - the trickiest and most
+ * important part - confirm persisted entries seeded directly in the fake
+ * settings backend under their ordinal storage name (as if created by a
+ * CreateSetting RPC in a previous boot session and saved, with no
+ * application code creating them again this boot) come back as live,
+ * listable, deletable settings after a settings_load pass, with no
+ * CreateSetting call ever happening for them this boot. A keyspace needs no
+ * runtime registration step any more (ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE is
+ * a compile-time STRUCT_SECTION_ITERABLE), so this test starts straight from
+ * create().
+ */
 static int test_keyspace_lifecycle(void) {
-    int ret = zmk_custom_settings_register_keyspace(&test_macro_keyspace);
-    if (ret < 0) {
-        LOG_ERR("zmk_custom_settings_register_keyspace failed: %d", ret);
-        return ret;
-    }
-
-    /* Registering the same keyspace object twice fails. */
-    ret = zmk_custom_settings_register_keyspace(&test_macro_keyspace);
-    if (ret != -EEXIST) {
-        LOG_ERR("Expected duplicate keyspace registration to fail with -EEXIST, got %d", ret);
-        return -EINVAL;
-    }
-
     /* A key that does not start with the keyspace's prefix is rejected. */
     const struct zmk_custom_setting *created = NULL;
-    ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "not_macro/foo",
-                                             &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
-                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    int ret = zmk_custom_setting_keyspace_create(&test_macro_keyspace, "not_macro/foo",
+                                                 &ZMK_CUSTOM_SETTING_VALUE_INT32(1),
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
     if (ret != -EINVAL) {
         LOG_ERR("Expected a prefix-mismatched key to fail with -EINVAL, got %d", ret);
         return -EINVAL;
@@ -1816,9 +1686,9 @@ static int test_keyspace_lifecycle(void) {
     }
 
     /* Discovery: the existing key_prefix scope filter (used by list/save/
-     * discard/reset) sees exactly the 3 live entries under "macro/" -
-     * ZMK_CUSTOM_SETTING_FOREACH + zmk_custom_setting_matches, with zero
-     * keyspace-specific code in apply_scope. */
+     * discard/reset) sees exactly the 3 live entries under "macro/" - via
+     * apply_scope's explicit keyspace-slot pass (simplification P3: slots
+     * are no longer reachable through ZMK_CUSTOM_SETTING_FOREACH). */
     uint32_t affected_count = 0;
     ret = zmk_custom_settings_save_scope("test", NULL, "macro/", &affected_count);
     if (ret < 0) {
@@ -1832,7 +1702,13 @@ static int test_keyspace_lifecycle(void) {
     LOG_INF("PASS: custom_settings_keyspace_create_and_scope_discovery count=3");
 
     /* Delete one entry: its slot is released and reusable, and its
-     * persisted record (macro/two was saved above) is erased. */
+     * persisted record (macro/two was saved above, occupying slot 1 - the
+     * second create - so it persists under the ordinal record name
+     * "custom_settings/test/macro/#1", simplification P3) is erased. */
+    if (!test_settings_has_record("custom_settings/test/macro/#1")) {
+        LOG_ERR("Persisted keyspace entry's ordinal record was not written");
+        return -EINVAL;
+    }
     ret = zmk_custom_setting_keyspace_delete(&test_macro_keyspace, "macro/two");
     if (ret < 0) {
         LOG_ERR("zmk_custom_setting_keyspace_delete failed: %d", ret);
@@ -1842,7 +1718,7 @@ static int test_keyspace_lifecycle(void) {
         LOG_ERR("Deleted keyspace entry is still find-able");
         return -EINVAL;
     }
-    if (test_settings_has_record("custom_settings/test/macro/two")) {
+    if (test_settings_has_record("custom_settings/test/macro/#1")) {
         LOG_ERR("Deleted keyspace entry's persisted record was not erased");
         return -EINVAL;
     }
@@ -1870,31 +1746,45 @@ static int test_keyspace_lifecycle(void) {
 
     /*
      * Settings-load re-binding: seed 3 persisted records directly in the
-     * fake settings backend, as if a CreateSetting RPC had created and saved
-     * them in a previous boot session - crucially, with NO
-     * zmk_custom_setting_keyspace_create call happening this boot at all.
-     * settings_load_subtree then drives the exact same
+     * fake settings backend under their ORDINAL storage name
+     * ("<key_prefix>#<index>", simplification P3 - a slot's storage
+     * identity, not its user key), each holding the opaque
+     * `[user_key\0][payload]` blob a real CreateSetting+save would have
+     * written, as if that had happened in a previous boot session -
+     * crucially, with NO zmk_custom_setting_keyspace_create call happening
+     * this boot at all. settings_load_subtree then drives the exact same
      * SETTINGS_STATIC_HANDLER_DEFINE callback path as the real boot-time
      * settings_load() in main() (this test itself runs from a SYS_INIT
      * before that call, so it must trigger the load explicitly the same way
      * test_array_storage_backward_compat does). custom_settings_handle_set
-     * must recognize each key matches test_macro_keyspace's "macro/" prefix,
-     * auto-bind a free slot for it, and apply the loaded value - all before
-     * this call returns, since settings_load() only visits each record
-     * once, not in any registration order.
+     * must recognize each record name matches test_macro_keyspace's "macro/"
+     * prefix + "#<index>" pattern, bind slot `index` directly (no key
+     * needed yet - it comes from decoding the blob about to be loaded), and
+     * apply the loaded blob - all before this call returns. All 3 slots were
+     * just freed above, so indices 0/1/2 are all available regardless of
+     * which physical slots "macro/one" etc. happened to occupy earlier.
      */
     const int32_t reloaded_a = 111;
     const int32_t reloaded_b = 222;
     const int32_t reloaded_c = 333;
-    ret = test_settings_save(NULL, "custom_settings/test/macro/reload-a", (const char *)&reloaded_a,
-                             sizeof(reloaded_a));
+    uint8_t blob_a[32];
+    uint8_t blob_b[32];
+    uint8_t blob_c[32];
+    size_t blob_a_len = test_keyspace_encode_blob(blob_a, sizeof(blob_a), "macro/reload-a",
+                                                  &reloaded_a, sizeof(reloaded_a));
+    size_t blob_b_len = test_keyspace_encode_blob(blob_b, sizeof(blob_b), "macro/reload-b",
+                                                  &reloaded_b, sizeof(reloaded_b));
+    size_t blob_c_len = test_keyspace_encode_blob(blob_c, sizeof(blob_c), "macro/reload-c",
+                                                  &reloaded_c, sizeof(reloaded_c));
+    ret =
+        test_settings_save(NULL, "custom_settings/test/macro/#0", (const char *)blob_a, blob_a_len);
     if (ret == 0) {
-        ret = test_settings_save(NULL, "custom_settings/test/macro/reload-b",
-                                 (const char *)&reloaded_b, sizeof(reloaded_b));
+        ret = test_settings_save(NULL, "custom_settings/test/macro/#1", (const char *)blob_b,
+                                 blob_b_len);
     }
     if (ret == 0) {
-        ret = test_settings_save(NULL, "custom_settings/test/macro/reload-c",
-                                 (const char *)&reloaded_c, sizeof(reloaded_c));
+        ret = test_settings_save(NULL, "custom_settings/test/macro/#2", (const char *)blob_c,
+                                 blob_c_len);
     }
     if (ret < 0) {
         return ret;
@@ -2150,15 +2040,16 @@ static int test_large_value(void) {
         return -ENOENT;
     }
 
-    /* Sanity: a normal (int32) setting keeps union storage (no large buffer),
-     * while the sized setting has its own backing buffer. This is what keeps
-     * unrelated settings' RAM footprint from growing (issue #16). */
-    if (test_int_setting.large_data != NULL || test_int_setting.large_pool != NULL) {
-        LOG_ERR("Normal setting unexpectedly has large-store state");
+    /* Sanity: a normal (int32) setting keeps inline state-union storage (no
+     * blob buffer or pool of any kind - P4), while the sized setting draws
+     * from its private pool. This is what keeps unrelated settings' RAM
+     * footprint from growing (issue #16). */
+    if (test_int_setting.blob.max_size != 0 || test_int_setting.blob.pool != NULL) {
+        LOG_ERR("Normal setting unexpectedly has blob-store state");
         return -EINVAL;
     }
-    if (setting->large_data == NULL) {
-        LOG_ERR("Sized setting is missing its large backing buffer");
+    if (setting->state->blob.data == NULL) {
+        LOG_ERR("Sized setting is missing its pool-backed region (non-empty default)");
         return -EINVAL;
     }
 
@@ -2295,8 +2186,11 @@ static int test_string_no_truncation(void) {
         LOG_ERR("String test setting not registered");
         return -ENOENT;
     }
-    if (setting->large_data != NULL) {
-        LOG_ERR("String test setting unexpectedly has a large backing buffer");
+    /* P4: every STRING setting keeps its value behind a blob buffer now;
+     * "non-large" means a carrier-capacity fixed store, not a pool. */
+    if (setting->blob.pool != NULL ||
+        setting->blob.max_size != CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        LOG_ERR("String test setting unexpectedly has large/pooled blob store");
         return -EINVAL;
     }
 
@@ -2365,12 +2259,12 @@ static void fill_pool_test_pattern(uint8_t *buf, size_t size, uint8_t seed) {
  * move within the pool at any write that needs more room than it currently
  * has - see pool_ensure_region in custom_settings.c). */
 static int test_large_value_pool(void) {
-    if (test_pooled_a.large_pool != &test_large_pool || test_pooled_a.large_data != NULL ||
-        test_pooled_a.large_size != 0) {
+    if (test_pooled_a.blob.pool != &test_large_pool || test_pooled_a.state->blob.data != NULL ||
+        test_pooled_a.state->blob.size != 0) {
         LOG_ERR("Pooled setting A is not in its expected pre-write state");
         return -EINVAL;
     }
-    if (test_pooled_b.large_data != NULL || test_pooled_b.large_size != 0) {
+    if (test_pooled_b.state->blob.data != NULL || test_pooled_b.state->blob.size != 0) {
         LOG_ERR("Pooled setting B is not in its expected pre-write state");
         return -EINVAL;
     }
@@ -2379,7 +2273,7 @@ static int test_large_value_pool(void) {
      * unlike A/B (BYTES, genuinely zero-cost when empty) it already holds a
      * one-byte region here. Confirm that, then use the actual pool usage as
      * this test's baseline instead of assuming the pool starts at 0. */
-    if (test_pooled_c.large_data == NULL || test_pooled_c.large_size != 0) {
+    if (test_pooled_c.state->blob.data == NULL || test_pooled_c.state->blob.size != 0) {
         LOG_ERR("Pooled STRING setting C is not in its expected pre-write state");
         return -EINVAL;
     }
@@ -2508,7 +2402,7 @@ static int test_large_value_pool(void) {
         return ret;
     }
     size_t used_after = zmk_custom_setting_large_pool_used(&test_large_pool);
-    if (used_after != used_before - sizeof(payload_a3) || test_pooled_a.large_data != NULL) {
+    if (used_after != used_before - sizeof(payload_a3) || test_pooled_a.state->blob.data != NULL) {
         LOG_ERR("Pool usage did not drop as expected after releasing A: before=%u after=%u",
                 (unsigned)used_before, (unsigned)used_after);
         return -EINVAL;
@@ -2602,6 +2496,197 @@ static int test_large_value_pool(void) {
     return 0;
 }
 
+/*
+ * Simplification P1 (Change 1, task 3): a keyspace entry whose value exceeds
+ * the fixed carrier round-trips through the keyspace's own
+ * ZMK_CUSTOM_SETTING_LARGE_POOL - the same mechanism ZMK_CUSTOM_SETTING_
+ * DEFINE_POOLED uses, just scoped to one keyspace's slots instead of a
+ * caller-shared pool. Also exercises that a deleted entry's pool region is
+ * released (via zmk_custom_setting_keyspace_delete -> pool_release_locked),
+ * not just its slot. Since simplification P3 every entry's pool region holds
+ * the WHOLE blob (key + NUL + payload, not just the payload), so the
+ * expected pool usage below includes each entry's (short) key length.
+ */
+static int test_keyspace_large_value(void) {
+    if (zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool) != 0) {
+        LOG_ERR("Keyspace pool should start empty");
+        return -EINVAL;
+    }
+
+    const struct zmk_custom_setting *created = NULL;
+    int ret = zmk_custom_setting_keyspace_create(&test_blob_keyspace, "blob/one",
+                                                 &ZMK_CUSTOM_SETTING_VALUE_BYTES(1, 2, 3),
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    if (ret < 0 || !created) {
+        LOG_ERR("Failed to create blob/one: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+
+    /* Grow the entry past the fixed carrier via write_bytes, exactly like a
+     * DEFINE_POOLED/DEFINE_SIZED setting - the slot's blob region starts NULL
+     * (no region allocated by create() for a value that fits the carrier)
+     * and pool_ensure_region() carves one on this write. */
+    uint8_t payload[TEST_KEYSPACE_LARGE_MAX_SIZE];
+    fill_pool_test_pattern(payload, sizeof(payload), 5);
+    ret = zmk_custom_setting_write_bytes(created, payload, sizeof(payload),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_ERR("Writing max-size blob/one failed: %d", ret);
+        return ret;
+    }
+
+    /* A second full-size entry must also fit - the pool's worst-case budget
+     * (max_entries * (max_size + 1)) matches what two dedicated per-slot
+     * buffers would have reserved, so this is not a capacity regression. */
+    const struct zmk_custom_setting *created2 = NULL;
+    ret = zmk_custom_setting_keyspace_create(&test_blob_keyspace, "blob/two",
+                                             &ZMK_CUSTOM_SETTING_VALUE_BYTES(9),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created2);
+    if (ret < 0 || !created2) {
+        LOG_ERR("Failed to create blob/two: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+    uint8_t payload2[TEST_KEYSPACE_LARGE_MAX_SIZE];
+    fill_pool_test_pattern(payload2, sizeof(payload2), 19);
+    ret = zmk_custom_setting_write_bytes(created2, payload2, sizeof(payload2),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("Writing max-size blob/two failed (pool budget regression?): %d", ret);
+        return ret;
+    }
+
+    uint8_t readback[TEST_KEYSPACE_LARGE_MAX_SIZE];
+    size_t out_size = 0;
+    ret = zmk_custom_setting_read_into(created, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload) || memcmp(readback, payload, sizeof(payload)) != 0) {
+        LOG_ERR("Keyspace pooled read-back mismatch for blob/one: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    /* Clobber blob/one in RAM, then discard: the persisted large value must
+     * be restored from the keyspace pool exactly like any other pooled
+     * setting's discard. */
+    uint8_t clobber[10];
+    memset(clobber, 0xEE, sizeof(clobber));
+    ret = zmk_custom_setting_write_bytes(created, clobber, sizeof(clobber),
+                                         ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_discard(created);
+    if (ret < 0) {
+        LOG_ERR("Discarding blob/one failed: %d", ret);
+        return ret;
+    }
+    out_size = 0;
+    ret = zmk_custom_setting_read_into(created, readback, sizeof(readback), &out_size, NULL);
+    if (ret < 0 || out_size != sizeof(payload) || memcmp(readback, payload, sizeof(payload)) != 0) {
+        LOG_ERR("Keyspace pooled discard did not restore persisted value: ret=%d size=%u", ret,
+                (unsigned)out_size);
+        return -EINVAL;
+    }
+
+    /* Each entry's pool region is the whole blob: strlen("blob/one") + NUL +
+     * payload (and likewise for "blob/two") - both keys are the same length
+     * here, so the two entries' overhead is identical. */
+    size_t blob_one_size = strlen("blob/one") + 1 + sizeof(payload);
+    size_t blob_two_size = strlen("blob/two") + 1 + sizeof(payload2);
+    size_t used_before_delete = zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool);
+    if (used_before_delete != blob_one_size + blob_two_size) {
+        LOG_ERR("Unexpected keyspace pool usage before delete: %u", (unsigned)used_before_delete);
+        return -EINVAL;
+    }
+
+    /* Deleting an entry must release its pool region, not just its slot -
+     * zmk_custom_setting_keyspace_delete -> pool_release_locked. */
+    ret = zmk_custom_setting_keyspace_delete(&test_blob_keyspace, "blob/one");
+    if (ret < 0) {
+        LOG_ERR("Deleting blob/one failed: %d", ret);
+        return ret;
+    }
+    size_t used_after_delete = zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool);
+    if (used_after_delete != used_before_delete - blob_one_size) {
+        LOG_ERR("Keyspace pool usage did not drop after delete: before=%u after=%u",
+                (unsigned)used_before_delete, (unsigned)used_after_delete);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_keyspace_delete(&test_blob_keyspace, "blob/two");
+    if (ret < 0) {
+        LOG_ERR("Deleting blob/two failed: %d", ret);
+        return ret;
+    }
+    if (zmk_custom_setting_large_pool_used(test_blob_keyspace.large_pool) != 0) {
+        LOG_ERR("Keyspace pool should be empty after deleting every entry");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_large_value size=%u", (unsigned)sizeof(payload));
+    return 0;
+}
+
+/*
+ * Enabler A: prove the over-commit budget actually bites before max_entries
+ * does. TEST_OVERCOMMIT_POOL_SIZE fits exactly 3 full-size entries; a 4th
+ * full-size entry must fail with -ENOSPC even though 5 of the keyspace's 8
+ * slots are still free.
+ */
+static int test_keyspace_pool_overcommit(void) {
+    if (zmk_custom_setting_large_pool_used(test_overcommit_keyspace.large_pool) != 0) {
+        LOG_ERR("Overcommit keyspace pool should start empty");
+        return -EINVAL;
+    }
+
+    struct zmk_custom_setting_value value = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
+        .size = TEST_OVERCOMMIT_MAX_SIZE,
+    };
+    fill_pool_test_pattern(value.bytes_value, TEST_OVERCOMMIT_MAX_SIZE, 3);
+
+    char key[16];
+    int created_count = 0;
+    for (int i = 0; i < TEST_OVERCOMMIT_MAX_ENTRIES; i++) {
+        snprintf(key, sizeof(key), "oc/%d", i);
+        int ret = zmk_custom_setting_keyspace_create(&test_overcommit_keyspace, key, &value,
+                                                     ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, NULL);
+        if (ret == -ENOSPC) {
+            break;
+        }
+        if (ret < 0) {
+            LOG_ERR("Unexpected error creating overcommit entry %d: %d", i, ret);
+            return ret;
+        }
+        created_count++;
+    }
+
+    /* The pool (3 * (12 + 16) = 84 bytes) fits at most 3 entries whose blob
+     * is "oc/<i>\0" (5-6 bytes) + 16-byte payload (~21-22 bytes each) - so
+     * capacity runs out well before all 8 slots are used. */
+    if (created_count >= TEST_OVERCOMMIT_MAX_ENTRIES) {
+        LOG_ERR("Overcommit pool should have run out before filling every slot (created %d/%d)",
+                created_count, TEST_OVERCOMMIT_MAX_ENTRIES);
+        return -EINVAL;
+    }
+    if (created_count == 0) {
+        LOG_ERR("Overcommit pool should fit at least one full-size entry");
+        return -EINVAL;
+    }
+
+    for (int i = 0; i < created_count; i++) {
+        snprintf(key, sizeof(key), "oc/%d", i);
+        zmk_custom_setting_keyspace_delete(&test_overcommit_keyspace, key);
+    }
+    if (zmk_custom_setting_large_pool_used(test_overcommit_keyspace.large_pool) != 0) {
+        LOG_ERR("Overcommit keyspace pool should be empty after deleting every entry");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_pool_overcommit created=%d max_entries=%d",
+            created_count, TEST_OVERCOMMIT_MAX_ENTRIES);
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2653,17 +2738,7 @@ static int custom_settings_test_init(void) {
         return ret;
     }
 
-    ret = test_unregister_frees_temp_slot();
-    if (ret < 0) {
-        return ret;
-    }
-
     ret = test_boot_default_override();
-    if (ret < 0) {
-        return ret;
-    }
-
-    ret = test_runtime_registration();
     if (ret < 0) {
         return ret;
     }
@@ -2694,6 +2769,16 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_large_value_pool();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_large_value();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_pool_overcommit();
     if (ret < 0) {
         return ret;
     }

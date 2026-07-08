@@ -86,12 +86,18 @@ static const struct zmk_custom_setting_constraint zmk_config_sample_behavior_id_
 
 /* Registered fields directly build struct zmk_custom_setting instead of
  * using the ZMK_CUSTOM_SETTING_DEFINE macros, to exercise that path too.
- * default_value points at a static const object (kept in flash, not
- * embedded) and temp_slot must be -1, matching what the macros generate. */
+ * Simplification P4: hand-built descriptors must be declared `const` (the
+ * iterable section is ROM now), point `state` at a hand-declared RAM
+ * struct zmk_custom_setting_state (temp_slot = -1, like the macros emit),
+ * and - for BYTES/STRING - provide their own exact-size store buffer with
+ * state.blob.data pointing at it plus a matching descriptor
+ * blob.max_size. */
 static const struct zmk_custom_setting_value zmk_config_sample_int32_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = 42};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_int32) = {
+static struct zmk_custom_setting_state zmk_config_sample_int32_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_int32) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "int32_value",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -102,13 +108,15 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_int32) = {
     .constraints = zmk_config_sample_range_0_100,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_range_0_100),
     .default_value = &zmk_config_sample_int32_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_int32_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_bool_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL, .bool_value = true};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bool) = {
+static struct zmk_custom_setting_state zmk_config_sample_bool_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bool) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "bool_value",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -119,7 +127,7 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bool) = {
     .constraints = zmk_config_sample_no_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_no_constraints),
     .default_value = &zmk_config_sample_bool_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_bool_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_string_default = {
@@ -127,7 +135,13 @@ static const struct zmk_custom_setting_value zmk_config_sample_string_default = 
     .size = sizeof("hello zmk") - 1,
     .string_value = "hello zmk"};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_string) = {
+static uint8_t zmk_config_sample_string_store[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+static struct zmk_custom_setting_state zmk_config_sample_string_state = {
+    .temp_slot = -1,
+    .blob.data = zmk_config_sample_string_store,
+};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_string) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "string_value",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -138,7 +152,8 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_string) = {
     .constraints = zmk_config_sample_no_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_no_constraints),
     .default_value = &zmk_config_sample_string_default,
-    .temp_slot = -1,
+    .blob = {.max_size = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, .pool = NULL},
+    .state = &zmk_config_sample_string_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_bytes_default = {
@@ -146,7 +161,13 @@ static const struct zmk_custom_setting_value zmk_config_sample_bytes_default = {
     .size = 4,
     .bytes_value = {0x01, 0x02, 0x03, 0x04}};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes) = {
+static uint8_t zmk_config_sample_bytes_store[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+static struct zmk_custom_setting_state zmk_config_sample_bytes_state = {
+    .temp_slot = -1,
+    .blob.data = zmk_config_sample_bytes_store,
+};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "bytes_value",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -157,7 +178,8 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes) = {
     .constraints = zmk_config_sample_no_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_no_constraints),
     .default_value = &zmk_config_sample_bytes_default,
-    .temp_slot = -1,
+    .blob = {.max_size = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, .pool = NULL},
+    .state = &zmk_config_sample_bytes_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_bytes_rpc_default = {
@@ -165,7 +187,13 @@ static const struct zmk_custom_setting_value zmk_config_sample_bytes_rpc_default
     .size = 4,
     .bytes_value = {0x11, 0x22, 0x33, 0x44}};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes_rpc) = {
+static uint8_t zmk_config_sample_bytes_rpc_store[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+static struct zmk_custom_setting_state zmk_config_sample_bytes_rpc_state = {
+    .temp_slot = -1,
+    .blob.data = zmk_config_sample_bytes_rpc_store,
+};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes_rpc) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "bytes_rpc_value",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -178,7 +206,8 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_bytes_rpc) = {
     .default_value = &zmk_config_sample_bytes_rpc_default,
     .rpc_serializer = zmk_config_sample_reverse_bytes,
     .rpc_deserializer = zmk_config_sample_reverse_bytes,
-    .temp_slot = -1,
+    .blob = {.max_size = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, .pool = NULL},
+    .state = &zmk_config_sample_bytes_rpc_state,
 };
 
 /*
@@ -218,7 +247,14 @@ static const struct zmk_custom_setting_value zmk_config_sample_private_string_de
     .size = sizeof("device only") - 1,
     .string_value = "device only"};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_private_string) = {
+static uint8_t
+    zmk_config_sample_private_string_store[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+static struct zmk_custom_setting_state zmk_config_sample_private_string_state = {
+    .temp_slot = -1,
+    .blob.data = zmk_config_sample_private_string_store,
+};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_private_string) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "device_private_string",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -229,13 +265,16 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_private_string) = 
     .constraints = zmk_config_sample_no_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_no_constraints),
     .default_value = &zmk_config_sample_private_string_default,
-    .temp_slot = -1,
+    .blob = {.max_size = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, .pool = NULL},
+    .state = &zmk_config_sample_private_string_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_secure_int32_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = 7};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_secure_int32) = {
+static struct zmk_custom_setting_state zmk_config_sample_secure_int32_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_secure_int32) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "secure_int32",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -246,14 +285,16 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_secure_int32) = {
     .constraints = zmk_config_sample_range_0_10,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_range_0_10),
     .default_value = &zmk_config_sample_secure_int32_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_secure_int32_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_hid_usage_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
     .int32_value = ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_A)};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_hid_usage) = {
+static struct zmk_custom_setting_state zmk_config_sample_hid_usage_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_hid_usage) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "hid_usage",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -264,13 +305,15 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_hid_usage) = {
     .constraints = zmk_config_sample_hid_usage_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_hid_usage_constraints),
     .default_value = &zmk_config_sample_hid_usage_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_hid_usage_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_layer_id_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = 0};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_layer_id) = {
+static struct zmk_custom_setting_state zmk_config_sample_layer_id_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_layer_id) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "layer_id",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -281,14 +324,16 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_layer_id) = {
     .constraints = zmk_config_sample_layer_id_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_layer_id_constraints),
     .default_value = &zmk_config_sample_layer_id_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_layer_id_state,
 };
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
 static const struct zmk_custom_setting_value zmk_config_sample_behavior_id_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = 0};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_id) = {
+static struct zmk_custom_setting_state zmk_config_sample_behavior_id_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_id) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "behavior_id",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -299,14 +344,16 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_id) = {
     .constraints = zmk_config_sample_behavior_id_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_behavior_id_constraints),
     .default_value = &zmk_config_sample_behavior_id_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_behavior_id_state,
 };
 
 static const struct zmk_custom_setting_value zmk_config_sample_behavior_value_default = {
     .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
     .behavior_value = {.behavior_id = 0, .param1 = 0, .param2 = 0}};
 
-STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_value) = {
+static struct zmk_custom_setting_state zmk_config_sample_behavior_value_state = {.temp_slot = -1};
+
+const STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_value) = {
     .custom_subsystem_id = "zmk_config_sample",
     .key = "behavior_value",
     .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,
@@ -317,7 +364,7 @@ STRUCT_SECTION_ITERABLE(zmk_custom_setting, zmk_config_sample_behavior_value) = 
     .constraints = zmk_config_sample_no_constraints,
     .constraints_count = ARRAY_SIZE(zmk_config_sample_no_constraints),
     .default_value = &zmk_config_sample_behavior_value_default,
-    .temp_slot = -1,
+    .state = &zmk_config_sample_behavior_value_state,
 };
 #endif
 
@@ -341,3 +388,21 @@ ZMK_CUSTOM_SETTING_ARRAY_DEFINE(zmk_config_sample_array, "zmk_config_sample", "a
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_RANGE_INT32(0, 100));
+
+/*
+ * Simplification P3: an RPC-creatable keyspace sample. Studio clients can
+ * create/delete named STRING entries under the "profile/" prefix at runtime
+ * (CreateSetting/DeleteSetting); each entry persists under an ordinal
+ * storage record ("zmk_config_sample/profile/#<slot>") whose value is the
+ * [user_key\0][payload] blob, so the user-chosen key survives reboot without
+ * a separate key table. Included in the sample builds so the keyspace path
+ * is exercised on real hardware, not only under native_sim.
+ */
+ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(zmk_config_sample_profiles, "zmk_config_sample", "profile/",
+                                   ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                   /* max_size = */ 32, /* max_key_len = */ 24,
+                                   /* max_entries = */ 4,
+                                   ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                   ZMK_CUSTOM_SETTING_NO_CONSTRAINT);

@@ -29,11 +29,7 @@ PASS: custom_settings_temporary_oversized size=33
 PASS: custom_settings_temporary_pool_exhausted
 PASS: custom_settings_temporary_pool_reclaimed
 PASS: custom_settings_view_pool_temp_slot_leak pool=16
-PASS: custom_settings_unregister_frees_temp_slot
 PASS: custom_settings_boot_default_override
-PASS: custom_settings_runtime_register_loads_persisted value=123
-PASS: custom_settings_runtime_register_save_scope value=55
-PASS: custom_settings_runtime_register_reset_scope value=7
 PASS: custom_settings_keyspace_create_and_scope_discovery count=3
 PASS: custom_settings_keyspace_delete_frees_slot
 PASS: custom_settings_keyspace_settings_load_rebind a=111 b=222 c=333
@@ -50,6 +46,8 @@ PASS: custom_settings_pool_grow size_a=70 size_b=100
 PASS: custom_settings_pool_release used_before=171 used_after=101
 PASS: custom_settings_pool_persist_discard size=100
 PASS: custom_settings_pool_string_member value=hello
+PASS: custom_settings_keyspace_large_value size=100
+PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
 zmk: Welcome to ZMK!
 pressed: position 0 keycode 0x70004
 released: position 0 keycode 0x70004

@@ -5,19 +5,34 @@ config ZMK_CUSTOM_SETTINGS
 
 if ZMK_CUSTOM_SETTINGS
 
+# settings_load() runs on the main thread at boot, and this module's load
+# path (pool-backed large values, keyspace slot binding + blob decode) needs
+# more headroom than Zephyr's bare 1024-byte MAIN_STACK_SIZE default.
+# Found on real hardware: with a persisted keyspace entry present, boot
+# overflowed the 1024-byte main stack (usage fault in arch_system_halt with
+# a corrupted return address) before USB even enumerated, while the same
+# image booted fine with 2048. configdefault only raises the default; an
+# explicit board/user setting still wins.
+configdefault MAIN_STACK_SIZE
+    default 2048
+
 config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum single-frame custom setting value size"
     default 64
     range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
-      Size of the fixed struct zmk_custom_setting_value carrier and of the
-      non-chunked Studio RPC SettingValue.bytes_value/string_value fields.
-      This is the largest value that fits a single RPC frame and the default
-      per-setting max_size. It is pinned to 64 while the protobuf schema is
-      enabled (the non-chunked SettingValue fields are max_size:64). Settings
+      Size of the struct zmk_custom_setting_value API exchange carrier
+      (stack-allocated by zmk_custom_setting_read/write callers and used by
+      the array feature's element storage) and the single-frame RPC value
+      bound: the largest value an incoming single-frame write can carry.
+      Since simplification P4 this does NOT size any per-setting storage -
+      a BYTES/STRING setting's value lives in an exact-size buffer or pool
+      region, and scalars store inline in a small per-setting state block.
+      It is pinned to 64 while the protobuf schema is enabled. Settings
       that need to store a larger value register with an explicit larger
-      max_size via ZMK_CUSTOM_SETTING_DEFINE_SIZED and transfer it over the
-      chunked ReadValueChunk/WriteValueChunk RPC instead of growing this.
+      max_size via ZMK_CUSTOM_SETTING_DEFINE_SIZED/_POOLED; a larger value
+      is written over the chunked WriteValueChunk RPC and read via the
+      ordinary (streamed) GetSetting.
 
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
     int "Maximum per-setting large value size"
@@ -113,15 +128,19 @@ config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
       CONFIG_ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE.
 
 config ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
-    bool "Enable chunked read/write RPC for large setting values"
+    bool "Enable chunked write RPC for large setting values"
     depends on ZMK_CUSTOM_SETTINGS_STUDIO_RPC
     default y
     help
-      Adds ReadValueChunk/WriteValueChunk RPC requests that transfer a
-      bytes/string setting value across multiple frames. Useful when a
-      value plus request/response overhead does not fit
-      CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE, or ahead of a future increase to
-      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE beyond one frame.
+      Adds the WriteValueChunk RPC request that transfers a bytes/string
+      setting value across multiple write frames. Useful when a value plus
+      request/response overhead does not fit
+      CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE (the RX path buffers a whole frame
+      before nanopb decodes it, so a large incoming value genuinely cannot
+      arrive in one frame). Reading a large value does not need this: since
+      simplification P2, GetSetting/ListSettings stream a value of any size
+      directly (the RPC transport's TX path streams its response
+      incrementally, unlike RX), so there is no ReadValueChunk any more.
 
 config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
     int "Chunked write staging buffer size"
@@ -130,10 +149,10 @@ config ZMK_CUSTOM_SETTINGS_CHUNK_STAGING_SIZE
     depends on ZMK_CUSTOM_SETTINGS_CHUNKED_RPC
     help
       Size of the single global buffer used to assemble a chunked write
-      before it is validated and applied on commit, and to stage a chunked
-      read. One transfer session is supported at a time. The assembled value
-      still has to fit the target setting's own max_size, so a value larger
-      than CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE requires that setting to
+      before it is validated and applied on commit. One write transfer
+      session is supported at a time. The assembled value still has to fit
+      the target setting's own max_size, so a value larger than
+      CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE requires that setting to
       have been registered with a matching larger max_size (see
       ZMK_CUSTOM_SETTING_DEFINE_SIZED and
       CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE).

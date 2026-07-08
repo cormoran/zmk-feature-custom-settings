@@ -91,16 +91,37 @@ struct zmk_custom_setting;
  * A statically-allocated shared budget that multiple BYTES/STRING
  * large-value settings (see ZMK_CUSTOM_SETTING_DEFINE_POOLED) can draw
  * regions from, instead of each paying for its own worst-case max_size
- * buffer (ZMK_CUSTOM_SETTING_DEFINE_SIZED). A setting's region can be moved
- * within `data` at any write that needs more room than it currently has
- * (see pool_ensure_region in custom_settings.c); that is safe because every
- * access site re-derefs a setting's `large_data` pointer under settings_lock
- * instead of caching it across the lock - see the compaction-safety note on
- * `large_pool` in struct zmk_custom_setting below.
+ * buffer. ZMK_CUSTOM_SETTING_DEFINE_SIZED is itself sugar for a private,
+ * single-member pool of this type (see below), so this is the module's only
+ * large-value backing store. A setting's region can be moved within `data`
+ * at any write that needs more room than it currently has (see
+ * pool_ensure_region in custom_settings.c); that is safe because every
+ * access site re-derefs a setting's blob pointer (state->blob.data, see
+ * struct zmk_custom_setting_state below) under settings_lock instead of
+ * caching it across the lock - see the compaction-safety note on `blob.pool`
+ * in struct zmk_custom_setting below.
+ *
+ * `members` is the head of an intrusive singly-linked list of every setting
+ * currently holding a region of this pool - i.e. every setting with
+ * `blob.pool == this` and `state->blob.data != NULL`. Simplification
+ * P4 moved the link field itself (`_pool_next`) onto each setting's RAM
+ * state block (a const, flash-resident descriptor cannot hold a field that
+ * mutates at runtime - see struct zmk_custom_setting_state), but this list
+ * still links DESCRIPTOR pointers (not state pointers): pool code needs a
+ * member's descriptor anyway (to read its value_type for the STRING-NUL
+ * accounting in pool_member_extent, and its blob.max_size), so storing
+ * `const struct zmk_custom_setting *` and reaching the mutable link via
+ * `member->state->_pool_next` avoids an extra indirection back from a bare
+ * state pointer to its owning descriptor. pool_ensure_region/
+ * zmk_custom_setting_large_pool_used walk this list instead of the global
+ * setting registry, so a pool member does not need to be reachable through
+ * ZMK_CUSTOM_SETTING_FOREACH (e.g. a keyspace slot). Internal to
+ * custom_settings.c; callers never read or write this field.
  */
 struct zmk_custom_setting_large_pool {
     uint8_t *data;
     size_t size;
+    const struct zmk_custom_setting *members;
 };
 
 /* Statically define a shared pool of _pool_size bytes. Heap-free: declares
@@ -175,6 +196,95 @@ struct zmk_custom_setting_array_state {
     const struct zmk_custom_setting_value *defaults;
 };
 
+/*
+ * Simplification P4: per-setting mutable state, split out of the (now const,
+ * flash-resident) struct zmk_custom_setting descriptor below. One instance
+ * per setting, emitted by the same registration macro that emits the
+ * descriptor (or embedded in the keyspace slot / array-view pool entry for
+ * the runtime-built descriptor instances). ~16-24 bytes on ARM32, versus the
+ * ~160 bytes the pre-P4 monolithic RAM descriptor cost - see
+ * docs/design/simplification-redesign.md §6.
+ *
+ * All fields are internal to custom_settings.c and are only accessed under
+ * its settings_lock; callers never touch a state block directly.
+ */
+struct zmk_custom_setting_state {
+    /* ZMK_CUSTOM_SETTING_STATE_* bits below. Meaningful only for non-array
+     * settings; array settings keep the equivalent per-element state in
+     * array_state (has_persistent[i]/dirty[i]/values[i]) since a single
+     * struct zmk_custom_setting does not represent one element. An array
+     * index view still uses the TEMPORARY_ACTIVE bit (temp overrides live
+     * on the view, keyed by (array_state, array_index) - see
+     * array_view_pool in custom_settings.c). */
+    uint8_t flags;
+    /* Index into the shared temporary-override pool (see custom_settings.c),
+     * or -1 when the TEMPORARY_ACTIVE flag is clear. Avoids a full-size
+     * struct zmk_custom_setting_value slot per setting for a mode that is
+     * rarely used and never persisted. */
+    int8_t temp_slot;
+    /* The effective in-memory value, right-sized per value_type - this
+     * replaces the worst-case 64+-byte struct zmk_custom_setting_value
+     * `memory_value` union every pre-P4 descriptor embedded:
+     * - INT32/BOOL/BEHAVIOR: stored inline (<= 12 bytes);
+     * - BYTES/STRING: always behind `blob.data` - a region of the
+     *   descriptor's blob.pool (NULL until the first non-empty write, can
+     *   move on any pool compaction; never cached across settings_lock), or
+     *   the exact-size static store buffer the plain ZMK_CUSTOM_SETTING_DEFINE
+     *   macro emits (`<name>_store[capacity + 1]`, pointed at permanently).
+     *   `blob.size` is the current payload length (excluding the STRING NUL
+     *   stored in the buffer right behind it).
+     * - Array settings do not use this union at all (element values live in
+     *   array_state->values[]). */
+    union {
+        int32_t int32_value;
+        bool bool_value;
+        struct zmk_custom_setting_behavior_value behavior;
+        struct {
+            uint8_t *data;
+            uint16_t size;
+        } blob;
+    };
+    /* Runtime-replaced default installed by zmk_custom_setting_set_default()
+     * (which can no longer write the const descriptor's default_value
+     * pointer). Checked before the descriptor's default_value everywhere a
+     * default is read. NULL unless set_default was called. */
+    const struct zmk_custom_setting_value *default_override;
+    /* Intrusive singly-linked list pointer used only by the descriptor's
+     * blob.pool member list (pool_ensure_region/
+     * zmk_custom_setting_large_pool_used in custom_settings.c) - see the
+     * `members` doc on struct zmk_custom_setting_large_pool for why the
+     * list nodes are descriptor pointers while the link lives here in
+     * state. Pool-internal: NULL whenever blob.data is NULL, and must never
+     * be read or written outside those functions and
+     * zmk_custom_setting_keyspace_delete (which must unlink a setting
+     * before its storage is reused by a future slot). */
+    const struct zmk_custom_setting *_pool_next;
+};
+
+/* struct zmk_custom_setting_state.flags bits. */
+#define ZMK_CUSTOM_SETTING_STATE_INITIALIZED BIT(0)
+#define ZMK_CUSTOM_SETTING_STATE_HAS_PERSISTENT BIT(1)
+/* Set on any memory-mode write, cleared on save/discard/reset, so
+ * zmk_custom_setting_has_unsaved_value stays a cheap flag check even though
+ * it runs on the Studio RPC list hot path. */
+#define ZMK_CUSTOM_SETTING_STATE_DIRTY BIT(2)
+#define ZMK_CUSTOM_SETTING_STATE_TEMPORARY_ACTIVE BIT(3)
+
+/*
+ * The setting descriptor. Simplification P4: compile-time registrations
+ * (every ZMK_CUSTOM_SETTING_*DEFINE macro) emit this as a `const` object
+ * placed in flash/rodata (ITERABLE_SECTION_ROM in the module's linker
+ * include), with all runtime-mutable state behind the `state` pointer. This
+ * remains the public handle type - every API keeps taking
+ * `const struct zmk_custom_setting *`.
+ *
+ * Two descriptor populations are NOT flash-resident and share this struct
+ * type as plain mutable RAM instances (their identity fields are only known
+ * at runtime): keyspace slot descriptors (struct
+ * zmk_custom_setting_keyspace_slot.setting) and array index views
+ * (array_view_pool in custom_settings.c). Both embed their state block next
+ * to the descriptor instead of pointing at a macro-emitted one.
+ */
 struct zmk_custom_setting {
     const char *custom_subsystem_id;
     const char *key;
@@ -185,102 +295,92 @@ struct zmk_custom_setting {
      * by zmk_custom_setting_find_array_element, the requested element
      * index. */
     uint32_t array_index;
-    /* Non-NULL for both the array's descriptor and any index view of it;
-     * NULL for scalars. This is the "back-pointer to the owning descriptor's
-     * shared state" mentioned in the P3 design: rather than pointing at the
-     * owning struct zmk_custom_setting (which would require an extra
-     * indirection to reach the buffer), it points directly at the shared
-     * mutable array_state, since that is all effective_value()/
-     * write_value_locked()/etc. need to read or write element `array_index`. */
-    struct zmk_custom_setting_array_state *array_state;
-    enum zmk_custom_setting_value_type value_type;
-    enum zmk_custom_setting_confidentiality confidentiality;
-    enum zmk_custom_setting_permission read_permission;
-    enum zmk_custom_setting_permission write_permission;
+    /* Enums packed to uint8_t (P4) - all their values fit comfortably. */
+    uint8_t value_type;                                /* enum zmk_custom_setting_value_type */
+    uint8_t confidentiality;                           /* enum zmk_custom_setting_confidentiality */
+    uint8_t read_permission : 4, write_permission : 4; /* enum zmk_custom_setting_permission */
+    uint8_t constraints_count;
     const struct zmk_custom_setting_constraint *constraints;
-    size_t constraints_count;
     /* Points at a static const object generated by the registration macros,
-     * so the default lives in flash instead of being copied into this
-     * (mutable, RAM-resident) struct. Unused (NULL) for the array descriptor
+     * so the default lives in flash. Unused (NULL) for the array descriptor
      * and its views; array element defaults live in array_state->defaults
-     * instead, since each element has its own default. */
+     * instead, since each element has its own default.
+     * zmk_custom_setting_set_default() no longer replaces this pointer (the
+     * descriptor is const); it installs state->default_override, which is
+     * consulted first wherever a default is read. */
     const struct zmk_custom_setting_value *default_value;
     zmk_custom_setting_rpc_bytes_converter_t rpc_serializer;
     zmk_custom_setting_rpc_bytes_converter_t rpc_deserializer;
 
-    bool initialized;
-    /* The following scalar-value bookkeeping fields are meaningful only for
-     * non-array settings; array settings keep the equivalent per-element
-     * state in array_state (has_persistent[i]/dirty[i]/values[i]) since a
-     * single struct zmk_custom_setting no longer represents one element. */
-    bool has_persistent_value;
-    /* Set on any memory-mode write, cleared on save/discard/reset. Replaces
-     * comparing memory_value against a RAM-resident copy of the persisted
-     * value (removed; see zmk_custom_setting_discard) so
-     * zmk_custom_setting_has_unsaved_value stays a cheap flag check even
-     * though it runs on the Studio RPC list hot path. */
-    bool dirty;
-    bool temporary_active;
-    /* Index into the shared temporary-override pool (see custom_settings.c),
-     * or -1 when temporary_active is false. Avoids a full-size
-     * struct zmk_custom_setting_value slot per setting for a mode that is
-     * rarely used and never persisted. For an array element, this lives on
-     * the index-view instance handed out for (array, index); the pool keys
-     * views by (array_state, array_index) so the same view (and therefore
-     * the same temp_slot) is reused across lookups for the same element -
-     * see array_view_pool in custom_settings.c. */
-    int8_t temp_slot;
-    struct zmk_custom_setting_value memory_value;
+    /* Kind-specific, mutually exclusive descriptor data (P4). Which arm is
+     * meaningful follows from fields outside the union: `array_state` for an
+     * array setting (array_key != NULL, i.e. zmk_custom_setting_is_array()),
+     * `blob` for a non-array BYTES/STRING setting. Scalar INT32/BOOL/BEHAVIOR
+     * settings use neither (zero-initialized). */
+    union {
+        /* BYTES/STRING: every such value lives behind state->blob.data.
+         *
+         * `max_size` is the value's byte capacity: the fixed
+         * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE for a plain
+         * ZMK_CUSTOM_SETTING_DEFINE (backed by the macro-emitted exact-size
+         * store buffer), or the explicit per-setting max_size of
+         * ZMK_CUSTOM_SETTING_DEFINE_SIZED/_POOLED (issue #16; up to
+         * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE).
+         *
+         * `pool` is NULL for a fixed-store setting (state->blob.data points
+         * permanently at the macro-emitted buffer, which never moves), or
+         * the shared budget the value's region is carved from on demand
+         * (ZMK_CUSTOM_SETTING_DEFINE_POOLED against a caller-shared
+         * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE, ZMK_CUSTOM_SETTING_DEFINE_SIZED
+         * against its private single-member pool, or a keyspace's slot
+         * pool). This `pool == NULL` test is the single fork between the
+         * two backing stores; everything else in the read/write path is
+         * shared. See struct zmk_custom_setting_large_pool for the
+         * compaction/locking rules (nothing caches state->blob.data across
+         * settings_lock). A value larger than
+         * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE is reachable via
+         * zmk_custom_setting_read_into / zmk_custom_setting_write_bytes,
+         * the WriteValueChunk RPC (writes only - reads stream through the
+         * ordinary GetSetting/ListSettings RPC response since simplification
+         * P2), and zmk_custom_setting_with_large_raw_bytes; the
+         * fixed-carrier zmk_custom_setting_read/write report -EMSGSIZE once
+         * the value exceeds the carrier. */
+        struct {
+            uint32_t max_size;
+            struct zmk_custom_setting_large_pool *pool;
+        } blob;
+        /* Non-NULL for both the array's descriptor and any index view of
+         * it. This is the "back-pointer to the owning descriptor's shared
+         * state" from the P3 design: rather than pointing at the owning
+         * struct zmk_custom_setting (an extra indirection to reach the
+         * buffer), it points directly at the shared mutable array_state,
+         * since that is all effective_value()/write_value_locked()/etc.
+         * need to read or write element `array_index`. */
+        struct zmk_custom_setting_array_state *array_state;
+    };
 
     /*
-     * Per-setting large-value backing store (issue #16). For a normal
-     * setting these are all zero/NULL and the value lives in the fixed-size
-     * `memory_value` union above (capped at
-     * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE). A BYTES/STRING setting
-     * registered with an explicit larger max_size via
-     * ZMK_CUSTOM_SETTING_DEFINE_SIZED instead points `large_data` at a
-     * right-sized static buffer of `value_max_size`(+1) bytes and stores its
-     * payload there, so one large setting does not inflate every other
-     * setting's footprint. `large_size` is the current payload length. Large
-     * values are only reachable via the chunked ReadValueChunk/WriteValueChunk
-     * RPC and zmk_custom_setting_read_into / zmk_custom_setting_write_bytes;
-     * the fixed-carrier zmk_custom_setting_read/write and the single-frame
-     * RPC report -EMSGSIZE / omit the value once it exceeds the carrier.
+     * Simplification P3: non-NULL only for a live keyspace slot (see
+     * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE further down) - points at the
+     * owning keyspace. NULL for every compile-time (STRUCT_SECTION_ITERABLE)
+     * setting and array element view.
      *
-     * `value_max_size == 0` means "use CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE"
-     * so hand-built descriptors that leave these fields zero keep the legacy
-     * behavior with no change.
-     *
-     * `large_pool` is the shared-pool alternative (ZMK_CUSTOM_SETTING_DEFINE_POOLED):
-     * NULL for every other registration style, including DEFINE_SIZED. When
-     * set, `large_data` starts NULL (no region allocated yet - a pooled
-     * setting holding its empty/default value costs zero pool bytes) and is
-     * (re)pointed at a region inside `large_pool->data` by pool_ensure_region()
-     * (custom_settings.c) on demand, moving other members of the same pool to
-     * keep the pool compact. This is safe without any locking discipline
-     * beyond the existing settings_lock: nothing anywhere in this module
-     * caches a `large_data` pointer or a borrowed pointer into it across a
-     * lock drop - effective_value()/read_into()/write_bytes()/the chunked RPC
-     * all re-read `large_data` fresh under the lock every time - so moving a
-     * setting's region between two accesses is invisible to every caller.
+     * A keyspace slot's OWN value_type/constraints/blob.pool always
+     * describe the opaque `[user_key\0][payload]` BLOB it stores (value_type
+     * is always ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES internally, regardless of
+     * the keyspace's declared value_type) - see the keyspace design comment
+     * in custom_settings.c. Use zmk_custom_setting_keyspace_of() to get the
+     * owning keyspace and read *its* value_type/constraints/max_size to know
+     * how to interpret the slot's PAYLOAD; the generic read/write/save/pool
+     * code in this header never needs to know the difference and treats a
+     * slot as a bog-standard pooled BYTES setting.
      */
-    uint32_t value_max_size;
-    uint8_t *large_data;
-    size_t large_size;
-    struct zmk_custom_setting_large_pool *large_pool;
+    const struct zmk_custom_setting_keyspace *_keyspace;
 
-    /*
-     * Intrusive singly-linked list pointer used only by
-     * zmk_custom_settings_register() (P5a) for settings registered at
-     * runtime instead of via the compile-time ZMK_CUSTOM_SETTING_DEFINE/
-     * ZMK_CUSTOM_SETTING_ARRAY_DEFINE macros (STRUCT_SECTION_ITERABLE).
-     * NULL for every compile-time-registered setting; ZMK_CUSTOM_SETTING_FOREACH
-     * walks the compile-time section followed by this list, so callers do
-     * not need to distinguish the two registration styles. Left as a plain
-     * struct field (rather than a private companion table) so registration
-     * stays heap-free: the caller's own static storage for the descriptor
-     * is threaded directly into the list. */
-    struct zmk_custom_setting *_runtime_next;
+    /* The setting's RAM state block (macro-emitted for compile-time
+     * registrations, embedded for keyspace slots / array views). Never NULL
+     * on a registered/bound descriptor. */
+    struct zmk_custom_setting_state *state;
 };
 
 struct zmk_custom_setting_changed {
@@ -346,6 +446,22 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_BEHAVIOR_ID                                                             \
     ((struct zmk_custom_setting_constraint){.type = ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID})
 
+/* True (compile-time constant) if _value_type stores its payload behind
+ * state->blob.data (see struct zmk_custom_setting_state) instead of inline
+ * in the state union. */
+#define ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type)                                               \
+    ((_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||                                       \
+     (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING)
+
+/* Size of the exact-size static value store buffer a (non-pooled)
+ * registration macro emits for _value_type: capacity + 1 (room for the
+ * STRING NUL; also reserved for BYTES to keep this simple - one byte) for
+ * BYTES/STRING, 0 for every scalar type (whose value lives inline in the
+ * state union - a BOOL setting emits no value buffer at all; the zero-length
+ * array costs zero bytes). */
+#define ZMK_CUSTOM_SETTING_VALUE_STORE_SIZE(_value_type, _capacity)                                \
+    (ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type) ? (_capacity) + 1 : 0)
+
 /* Register one custom setting in the iterable setting registry. */
 #define ZMK_CUSTOM_SETTING_DEFINE(_name, _custom_subsystem_id, _key, _value_type, _default_value,  \
                                   _confidentiality, _read_permission, _write_permission,           \
@@ -358,14 +474,21 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
  * Register one BYTES/STRING setting able to store a value up to _max_size
  * bytes - larger than the fixed CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
  * carrier (issue #16). _max_size must not exceed
- * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE. A right-sized static
- * backing buffer is allocated only for this setting, so other settings keep
- * their small footprint. A value larger than
- * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE can only be read/written through
- * the chunked ReadValueChunk/WriteValueChunk Studio RPC and the
- * zmk_custom_setting_read_into / zmk_custom_setting_write_bytes firmware API;
- * the fixed-carrier zmk_custom_setting_read/write and the single-frame RPC
- * report -EMSGSIZE / omit the value once it exceeds the carrier.
+ * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE. This is sugar for a
+ * private, single-member ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE sized for
+ * exactly this setting plus ZMK_CUSTOM_SETTING_DEFINE_POOLED against it (see
+ * ZMK_CUSTOM_SETTING_DEFINE_SIZED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS below) -
+ * the pool is this module's only large-value backing store, so "sized" and
+ * "pooled" are the same mechanism at different sharing granularities. A
+ * one-member pool never moves (compaction is a no-op), so this behaves like a
+ * dedicated buffer while costing one small pool descriptor extra. A value
+ * larger than CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE can be read through
+ * the ordinary GetSetting/ListSettings Studio RPC (streamed, any size, since
+ * simplification P2), written through the chunked WriteValueChunk Studio RPC,
+ * and read/written through the zmk_custom_setting_read_into /
+ * zmk_custom_setting_write_bytes firmware API; the fixed-carrier
+ * zmk_custom_setting_read/write report -EMSGSIZE once the value exceeds the
+ * carrier.
  */
 #define ZMK_CUSTOM_SETTING_DEFINE_SIZED(_name, _max_size, _custom_subsystem_id, _key, _value_type, \
                                         _default_value, _confidentiality, _read_permission,        \
@@ -390,43 +513,40 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
         _read_permission, _write_permission, NULL, NULL, __VA_ARGS__)
 
+/*
+ * Innermost plain registration macro (every ZMK_CUSTOM_SETTING_DEFINE* variant
+ * that does not take an explicit max_size funnels through here). Emits a
+ * const, flash-resident descriptor plus its RAM state block (simplification
+ * P4). For a BYTES/STRING setting, an exact-size static store buffer
+ * (`_name##_store[capacity + 1]`, capacity =
+ * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) is emitted and pointed at
+ * permanently by the state block; scalar settings emit no value buffer at
+ * all (their value lives inline in the state union). Compare
+ * ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS below,
+ * which is the equivalent innermost macro for a setting whose value is
+ * carved from a shared pool instead.
+ */
 #define ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                             \
     _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,              \
-    _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, ...)                  \
-    ZMK_CUSTOM_SETTING_DEFINE_SIZED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                           \
-        _name, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, _custom_subsystem_id, _key, _value_type, \
-        _default_value, _confidentiality, _read_permission, _write_permission, _rpc_serializer,    \
-        _rpc_deserializer, __VA_ARGS__)
-
-/*
- * Innermost sized registration macro. Allocates a right-sized static backing
- * buffer ONLY when _max_size exceeds the fixed carrier size, so a normal
- * setting (default max_size) keeps large_data == NULL and its legacy
- * union-based storage. The ternary in the array size and the .large_data
- * initializer are both constant expressions (both operands compile-time
- * constants), so this stays a valid static initializer.
- */
-#define ZMK_CUSTOM_SETTING_DEFINE_SIZED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                       \
-    _name, _max_size, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,   \
     _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, ...)                  \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
     BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
                  "Custom setting key is too long");                                                \
-    BUILD_ASSERT((_max_size) <= CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE,                   \
-                 "Custom setting max_size exceeds "                                                \
-                 "CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE");                               \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
     static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
-    static uint8_t _name##_large_data                                                              \
-        [((_max_size) > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? (_max_size) : 0) + 1];         \
-    STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
+    static uint8_t _name##_store[ZMK_CUSTOM_SETTING_VALUE_STORE_SIZE(                              \
+        _value_type, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE)] __unused;                         \
+    static struct zmk_custom_setting_state _name##_state = {                                       \
+        .temp_slot = -1,                                                                           \
+        .blob.data = ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type) ? _name##_store : NULL,          \
+    };                                                                                             \
+    const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
         .array_key = NULL,                                                                         \
         .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
-        .array_state = NULL,                                                                       \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
@@ -436,20 +556,41 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .default_value = &_name##_default,                                                         \
         .rpc_serializer = _rpc_serializer,                                                         \
         .rpc_deserializer = _rpc_deserializer,                                                     \
-        .temp_slot = -1,                                                                           \
-        .value_max_size = (_max_size),                                                             \
-        .large_data =                                                                              \
-            ((_max_size) > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? _name##_large_data : NULL), \
+        .blob = {.max_size = ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type)                          \
+                                 ? CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE                       \
+                                 : 0,                                                              \
+                 .pool = NULL},                                                                    \
+        .state = &_name##_state,                                                                   \
     }
 
 /*
+ * DEFINE_SIZED's full (converters + variadic constraints) innermost macro:
+ * sugar over a private pool (see the large-value-pool doc on struct
+ * zmk_custom_setting_large_pool). The private pool is sized _max_size + 1 so
+ * a full-length STRING - whose trailing NUL is stored inside the region, see
+ * large_store_set_raw in custom_settings.c - still fits, matching what a
+ * dedicated buffer would have reserved. Emitting a (tiny) private pool even
+ * when _max_size does not exceed the fixed carrier is harmless (a one-member
+ * pool that never moves) and keeps this macro simple; use plain
+ * ZMK_CUSTOM_SETTING_DEFINE when no large-value store is wanted at all.
+ */
+#define ZMK_CUSTOM_SETTING_DEFINE_SIZED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                       \
+    _name, _max_size, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,   \
+    _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, ...)                  \
+    ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(_name##_auto_pool, (_max_size) + 1);                      \
+    ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                          \
+        _name, _max_size, _name##_auto_pool, _custom_subsystem_id, _key, _value_type,              \
+        _default_value, _confidentiality, _read_permission, _write_permission, _rpc_serializer,    \
+        _rpc_deserializer, __VA_ARGS__)
+
+/*
  * Register one BYTES/STRING setting whose payload lives in a shared
- * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE budget instead of a dedicated
- * per-setting buffer (compare ZMK_CUSTOM_SETTING_DEFINE_SIZED). Prefer this
- * over DEFINE_SIZED when many large settings (e.g. N macro bodies) share one
- * RAM budget and are not all expected to hold their maximum value
- * simultaneously; prefer DEFINE_SIZED for one standalone large setting that
- * should always have its own guaranteed capacity.
+ * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE budget instead of a private one
+ * (compare ZMK_CUSTOM_SETTING_DEFINE_SIZED). Prefer this over DEFINE_SIZED
+ * when many large settings (e.g. N macro bodies) share one RAM budget and are
+ * not all expected to hold their maximum value simultaneously; prefer
+ * DEFINE_SIZED for one standalone large setting that should always have its
+ * own guaranteed capacity.
  *
  * _pool is the pool object itself (as declared by
  * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE), not a pointer - this macro takes its
@@ -469,6 +610,22 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 #define ZMK_CUSTOM_SETTING_DEFINE_POOLED(_name, _max_size, _pool, _custom_subsystem_id, _key,      \
                                          _value_type, _default_value, _confidentiality,            \
                                          _read_permission, _write_permission, _constraint)         \
+    ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                          \
+        _name, _max_size, _pool, _custom_subsystem_id, _key, _value_type, _default_value,          \
+        _confidentiality, _read_permission, _write_permission, NULL, NULL, _constraint)
+
+/*
+ * Innermost pooled registration macro: both ZMK_CUSTOM_SETTING_DEFINE_POOLED
+ * and ZMK_CUSTOM_SETTING_DEFINE_SIZED (against its own private pool) funnel
+ * through here, so this is the only place a `struct zmk_custom_setting` with
+ * `blob.pool` set is built. No fixed store buffer is emitted: the value's
+ * region is carved from the pool on demand (state->blob.data starts NULL -
+ * an empty/default pooled value costs zero pool bytes).
+ */
+#define ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                      \
+    _name, _max_size, _pool, _custom_subsystem_id, _key, _value_type, _default_value,              \
+    _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
+    ...)                                                                                           \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
                  "Custom subsystem id is too long");                                               \
@@ -480,14 +637,16 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
     BUILD_ASSERT((_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||                           \
                      (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,                        \
                  "ZMK_CUSTOM_SETTING_DEFINE_POOLED only supports BYTES/STRING value types");       \
-    static const struct zmk_custom_setting_constraint _name##_constraints[] = {_constraint};       \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
     static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
-    STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
+    static struct zmk_custom_setting_state _name##_state = {                                       \
+        .temp_slot = -1,                                                                           \
+    };                                                                                             \
+    const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
         .array_key = NULL,                                                                         \
         .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
-        .array_state = NULL,                                                                       \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
@@ -495,12 +654,10 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .constraints = _name##_constraints,                                                        \
         .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
         .default_value = &_name##_default,                                                         \
-        .rpc_serializer = NULL,                                                                    \
-        .rpc_deserializer = NULL,                                                                  \
-        .temp_slot = -1,                                                                           \
-        .value_max_size = (_max_size),                                                             \
-        .large_data = NULL,                                                                        \
-        .large_pool = &(_pool),                                                                    \
+        .rpc_serializer = _rpc_serializer,                                                         \
+        .rpc_deserializer = _rpc_deserializer,                                                     \
+        .blob = {.max_size = (_max_size), .pool = &(_pool)},                                       \
+        .state = &_name##_state,                                                                   \
     }
 
 /*
@@ -589,7 +746,10 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .default_size = (_default_size),                                                           \
         .defaults = (_defaults),                                                                   \
     };                                                                                             \
-    STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                         \
+    static struct zmk_custom_setting_state _name##_state = {                                       \
+        .temp_slot = -1,                                                                           \
+    };                                                                                             \
+    const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
         .array_key = _key,                                                                         \
@@ -604,7 +764,7 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
         .default_value = NULL,                                                                     \
         .rpc_serializer = _rpc_serializer,                                                         \
         .rpc_deserializer = _rpc_deserializer,                                                     \
-        .temp_slot = -1,                                                                           \
+        .state = &_name##_state,                                                                   \
     }
 
 /* Declares a `static const struct zmk_custom_setting_value[]` of INT32
@@ -624,65 +784,21 @@ ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
     {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_value)}
 
 /*
- * Iterate every registered setting: compile-time (STRUCT_SECTION_ITERABLE,
- * via ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE) entries
- * first, then any settings added at runtime via
- * zmk_custom_settings_register() (P5a). Every call site that previously
- * assumed ZMK_CUSTOM_SETTING_FOREACH == STRUCT_SECTION_FOREACH (find,
- * find_array, apply_scope, the Studio RPC list handler,
- * custom_settings_init, scope_has_permission) picks up runtime-registered
- * settings for free through this macro instead of needing its own
- * modification.
+ * Iterate every compile-time registered setting (STRUCT_SECTION_ITERABLE, via
+ * ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE). Simplification
+ * P3 deleted the general runtime-registration facility (and the virtual
+ * iterator it required) along with it, so this is now a plain section walk -
+ * exactly what it was before that facility existed.
  *
- * Implemented as a virtual-iterator function pair rather than trying to
- * splice two independent `for` loops (one over the linker section, one over
- * the runtime list) so that a single shared loop variable and trailing
- * `{ body }` block works the same way STRUCT_SECTION_FOREACH's callers
- * already expect.
+ * Keyspace slots (see ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE further down) are
+ * NOT compile-time settings and are therefore NOT visited by this macro -
+ * they live in their own keyspace's `slots[]` array and are reached by
+ * iterating keyspaces (ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH) instead. The
+ * handful of call sites that need to see both (find, list/get RPC handlers,
+ * save/discard/reset scope application) do so explicitly; see
+ * docs/design/simplification-redesign.md §5 for the audited list.
  */
-#define ZMK_CUSTOM_SETTING_FOREACH(_var)                                                           \
-    for (const struct zmk_custom_setting *_var = zmk_custom_settings_foreach_first();              \
-         _var != NULL; _var = zmk_custom_settings_foreach_next(_var))
-
-/* Iterator internals for ZMK_CUSTOM_SETTING_FOREACH; not intended to be
- * called directly. */
-const struct zmk_custom_setting *zmk_custom_settings_foreach_first(void);
-const struct zmk_custom_setting *
-zmk_custom_settings_foreach_next(const struct zmk_custom_setting *current);
-
-/*
- * Register a setting at runtime instead of through the compile-time
- * ZMK_CUSTOM_SETTING_DEFINE/ZMK_CUSTOM_SETTING_ARRAY_DEFINE macros (P5a) -
- * for drivers whose setting count depends on devicetree instance data or
- * other runtime probing that macros can't express. `desc` must point at
- * caller-owned storage (typically static/BSS) that outlives the
- * registration; only the pointer is stored, so this stays heap-free. The
- * descriptor's `_runtime_next` field must be zero (e.g. a plain
- * `static struct zmk_custom_setting my_setting = {...};` with `_runtime_next`
- * left unset) - it is used internally to link registered settings together
- * and must not be touched by the caller afterwards.
- *
- * Initializes the descriptor's mutable state (memory_value from
- * default_value, has_persistent_value/dirty/temp_slot/etc.) the same way
- * custom_settings_init() does for compile-time settings, then - since
- * registration can happen after this module's own settings_load() already
- * ran at boot - loads any already-persisted value for this setting via
- * settings_load_subtree() so it does not silently fall back to the default
- * for the rest of this boot. Returns -EINVAL for a NULL/malformed
- * descriptor, -EEXIST if a setting with the same subsystem id + key (or
- * array key) is already registered.
- */
-int zmk_custom_settings_register(struct zmk_custom_setting *desc);
-
-/*
- * Unregister a setting previously added by zmk_custom_settings_register()
- * (P5b: releases a keyspace slot back to its pool via
- * zmk_custom_setting_keyspace_delete). Not meaningful for compile-time
- * (STRUCT_SECTION_ITERABLE) settings - only settings whose `_runtime_next`
- * was set by zmk_custom_settings_register() can be unlinked this way.
- * Returns -ENOENT if `desc` is not currently registered.
- */
-int zmk_custom_settings_unregister(struct zmk_custom_setting *desc);
+#define ZMK_CUSTOM_SETTING_FOREACH(_var) STRUCT_SECTION_FOREACH(zmk_custom_setting, _var)
 
 const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subsystem_id,
                                                          const char *key);
@@ -834,6 +950,33 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
                                  size_t capacity, size_t *out_size,
                                  enum zmk_custom_setting_value_type *out_type);
 
+/* Query a BYTES/STRING setting's current raw payload length without copying
+ * it. Used by the streaming RPC value-encode callback (simplification P2,
+ * see custom_settings_handler.c) and the split relay's pre-encode budget
+ * check; -EINVAL if the setting is not BYTES/STRING. */
+int zmk_custom_setting_value_size(const struct zmk_custom_setting *setting, size_t *out_size);
+
+/* Visitor invoked with a pointer straight into a large-store BYTES/STRING
+ * setting's backing region (no copy) while the settings lock is held. Runs
+ * synchronously; keep it short and do not call back into other
+ * zmk_custom_setting_* functions from within it. Lets the streaming RPC
+ * value-encode callback write a value larger than
+ * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE straight to the output stream
+ * with no intermediate copy (simplification P2 dropped the old chunk read
+ * staging buffer for this reason). */
+typedef void (*zmk_custom_setting_raw_bytes_visitor_t)(const uint8_t *data, size_t size,
+                                                       void *user_data);
+
+/* Returns -ENOTSUP if the setting is not BYTES/STRING (or is an array
+ * element, or currently has a temporary override active - use
+ * zmk_custom_setting_with_value / zmk_custom_setting_read_into for those).
+ * Since simplification P4 every non-array BYTES/STRING value lives behind
+ * state->blob.data, so this streams a value of any size, not only one
+ * exceeding the fixed carrier. */
+int zmk_custom_setting_with_large_raw_bytes(const struct zmk_custom_setting *setting,
+                                            zmk_custom_setting_raw_bytes_visitor_t visitor,
+                                            void *user_data);
+
 /* Write a BYTES or STRING setting from a runtime buffer instead of a
  * compile-time-literal value. For STRING settings, size is measured before
  * any truncation to CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. */
@@ -968,64 +1111,110 @@ int zmk_custom_setting_record_get(const struct zmk_custom_setting *setting,
                                   void *record);
 
 /*
- * P5b: RPC-creatable keyspaces.
+ * Simplification P3: RPC-creatable keyspaces, opaque-blob redesign.
  *
  * A keyspace lets a module accept user-created entries (profiles, named
  * mappings, ...) whose keys are not known at compile time, without using the
- * heap: ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE statically allocates a fixed pool
- * of `max_entries` slots, each with its own `max_key_len`-sized key buffer
- * (independent of CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN, which only bounds
- * lookup/matching scratch buffers - see zmk_custom_setting_matches). Entries
- * are created/deleted at runtime via zmk_custom_setting_keyspace_create /
- * zmk_custom_setting_keyspace_delete (wrapped by the Studio
- * CreateSetting/DeleteSetting RPC requests), each of which builds a
- * `struct zmk_custom_setting` for the slot and threads it into the same
- * runtime registration list as zmk_custom_settings_register() (P5a) - so a
- * created entry is automatically find-able, listable (via the existing
- * key_prefix scope filter and ZMK_CUSTOM_SETTING_FOREACH), and covered by
- * save/discard/reset with zero further call-site changes, the same leverage
- * point P5a already established.
+ * heap and without the general runtime-registration facility that a
+ * previous revision of this feature required (see
+ * docs/design/simplification-redesign.md §5 for the full design and
+ * rationale). ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE statically allocates a
+ * fixed `slots[max_entries]` array - the keyspace descriptor itself is a
+ * compile-time STRUCT_SECTION_ITERABLE object, so the linker section *is*
+ * the keyspace registry (ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH).
  *
- * Persisted entries are re-bound to a slot during settings_load(): see
- * zmk_custom_setting_keyspace_bind, called from the SETTINGS_STATIC_HANDLER
- * callback in custom_settings.c for any "<subsystem>/<key>" record whose key
- * matches a registered keyspace's prefix but has no live slot yet, so a
+ * The core simplification: a slot's entire entry - its user key *and* its
+ * payload - is one opaque pooled BYTES value, `[user_key\0][payload]`. A
+ * slot's own `struct zmk_custom_setting.value_type` is therefore always
+ * ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES (never the keyspace's *declared*
+ * value_type - use zmk_custom_setting_keyspace_of() for that), and its value
+ * always comes from the keyspace's pool (descriptor blob.pool) - even a
+ * tiny payload's blob still carries its key
+ * alongside it. This lets the generic read/write/save/pool code in this
+ * module treat a slot as a bog-standard pooled BYTES setting with *zero*
+ * keyspace-specific knowledge; only a handful of presentation/lookup
+ * functions (find, the RPC list/get handlers, save/discard/reset scope
+ * application) decode the blob, and they do so through the ordinary
+ * zmk_custom_setting_read/read_into/with_large_raw_bytes/public_key API,
+ * which already knows how - see zmk_custom_setting_keyspace_of().
+ *
+ * Entries are created/deleted at runtime via zmk_custom_setting_keyspace_create
+ * / zmk_custom_setting_keyspace_delete (wrapped by the Studio
+ * CreateSetting/DeleteSetting RPC requests).
+ *
+ * Persisted entries are re-bound to a slot during settings_load(): a slot
+ * persists under a stable ordinal name, "<custom_subsystem_id>/<key_prefix>#
+ * <index>", not the user key - the SETTINGS_STATIC_HANDLER_DEFINE callback
+ * in custom_settings.c recognizes that pattern for any registered keyspace
+ * and binds slot `index` directly (no free-slot search, no key needed yet),
+ * letting the normal pooled-BYTES value-load path fill in the blob - the
+ * user key is then available for free by decoding it. This means a
  * previously created entry survives reboot without any module code running
- * on its behalf.
+ * on its behalf, and without a separate key-persistence path.
  */
+
+struct zmk_custom_setting_keyspace;
+
+/* Bound for a slot's ordinal storage-name buffer ("<key_prefix>#<index>" +
+ * NUL); generous relative to the key_prefix lengths any keyspace is likely
+ * to use plus room for CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN worth of
+ * digits/prefix and then some - see ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE's
+ * BUILD_ASSERT that ties a keyspace's own max_key_len to this same config. */
+#define ZMK_CUSTOM_SETTINGS_KEYSPACE_ORDINAL_NAME_SIZE (CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN + 16)
 
 struct zmk_custom_setting_keyspace_slot {
     bool in_use;
+    /* This slot's stable storage identity, "<key_prefix>#<index>" - see the
+     * keyspace design comment above. Generated once when the slot is
+     * (re)bound (zmk_custom_setting_keyspace_create or the settings-load
+     * bind path) and pointed to by `setting.key` for the descriptor's
+     * lifetime; the *content* is only ever this slot's own fixed ordinal
+     * index formatted with this keyspace's key_prefix, so it never actually
+     * changes after the first bind in practice. */
+    char ordinal_name[ZMK_CUSTOM_SETTINGS_KEYSPACE_ORDINAL_NAME_SIZE];
+    /* Simplification P4: a slot descriptor is a runtime-built RAM instance
+     * of the (normally const/flash) struct zmk_custom_setting, so it embeds
+     * its own state block right here; keyspace_bind_slot_locked points
+     * setting.state at it. */
+    struct zmk_custom_setting_state state;
     struct zmk_custom_setting setting;
 };
 
 /*
- * Fixed-size, statically-allocated keyspace state: one `max_entries`-slot
- * pool plus one `max_entries x max_key_len` key-storage table, both declared
- * by ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE and referenced by pointer so the
- * keyspace descriptor itself stays a small, constant, read-only object.
+ * Fixed-size, statically-allocated keyspace state: the `max_entries`-slot
+ * array (which cannot itself be pooled - see docs/design/
+ * simplification-redesign.md §5.3's "Does max_entries still make sense with
+ * a pool?") plus the shared pool every slot's blob is carved from,
+ * declared by ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE and referenced by pointer
+ * so the keyspace descriptor itself stays a small, constant object.
  */
 struct zmk_custom_setting_keyspace {
     const char *custom_subsystem_id;
     /* Every created entry's key must start with this prefix, e.g. "macro/".
      * Also the prefix advertised for discovery via the existing key_prefix
-     * scope filter. */
+     * scope filter, and the prefix each slot's ordinal storage name is built
+     * from. */
     const char *key_prefix;
+    /* The PAYLOAD's presented type - what zmk_custom_setting_read/write and
+     * the RPC layer treat a slot's value as once the key prefix has been
+     * decoded/encoded away. Never equal to a slot's own (always BYTES)
+     * struct zmk_custom_setting.value_type. */
     enum zmk_custom_setting_value_type value_type;
-    /* Per-keyspace value size ceiling. May be smaller than the global
-     * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE (enforced as a tighter limit
-     * via zmk_custom_setting_keyspace_create / the settings-load bind path)
-     * or, for BYTES/STRING keyspaces, LARGER than it (up to
-     * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE) - in which case each
-     * slot gets its own large_data row from `value_bufs` and entries transfer
-     * over the chunked RPC, exactly like a ZMK_CUSTOM_SETTING_DEFINE_SIZED
-     * setting (issue #16). */
+    /* Per-keyspace payload size ceiling (BYTES/STRING payloads only; other
+     * types' encoded size is fixed by their type regardless of this field).
+     * May be smaller or larger than the global
+     * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE - up to
+     * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE - since every slot's
+     * blob is pool-backed regardless of size (issue #16 / simplification
+     * P1 §3.4). */
     uint32_t max_size;
-    /* Size of each slot's key buffer, INCLUDING the NUL terminator - a
-     * per-keyspace macro argument instead of the global
-     * CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN, so a keyspace for short
-     * suffixes (e.g. "macro/<name>") does not pay for one sized for the
-     * global maximum. */
+    /* Ceiling on a user key's length, INCLUDING the NUL terminator -
+     * validated at zmk_custom_setting_keyspace_create time only (simplification
+     * P3: there is no longer a fixed per-slot key buffer to size - a key
+     * rides inside the pooled blob like everything else). Must not exceed
+     * CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (see the BUILD_ASSERT on
+     * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE): this bounds the blob
+     * assembly/decode scratch used internally. */
     uint32_t max_key_len;
     uint32_t max_entries;
     enum zmk_custom_setting_confidentiality confidentiality;
@@ -1033,46 +1222,30 @@ struct zmk_custom_setting_keyspace {
     enum zmk_custom_setting_permission write_permission;
     const struct zmk_custom_setting_constraint *constraints;
     size_t constraints_count;
-    const struct zmk_custom_setting_value *default_value;
     zmk_custom_setting_rpc_bytes_converter_t rpc_serializer;
     zmk_custom_setting_rpc_bytes_converter_t rpc_deserializer;
 
     struct zmk_custom_setting_keyspace_slot *slots;
-    char *keys; /* max_entries * max_key_len bytes, row-major. */
-    /* Per-slot large-value backing store, row-major
-     * (max_entries * value_buf_stride bytes), or NULL when max_size fits the
-     * fixed CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE carrier (issue #16).
-     * When present, each slot's struct zmk_custom_setting.large_data points at
-     * its own row so a keyspace entry can hold a value larger than the
-     * carrier, transferred over the chunked RPC like any other large
-     * setting. */
-    uint8_t *value_bufs;
-    uint32_t value_buf_stride; /* bytes per slot row, = max_size + 1 */
-
-    /* Intrusive singly-linked list pointer, analogous to
-     * struct zmk_custom_setting's _runtime_next; used internally by
-     * zmk_custom_settings_register_keyspace and
-     * ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH. Must be zero at registration
-     * time (the macro-generated static object leaves it unset) and must
-     * not be touched by the caller afterwards. */
-    struct zmk_custom_setting_keyspace *_next;
+    /* Every slot's `[user_key\0][payload]` blob is pool-backed
+     * unconditionally (simplification P3) - unlike a plain setting, a
+     * keyspace slot's stored value is never small enough to skip pooling,
+     * since it always carries the key alongside the payload. Sized
+     * max_entries * (max_key_len + max_size) bytes by
+     * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE - the same worst-case budget the
+     * pre-P3 keys[][] + value_bufs[][] tables reserved between them. */
+    struct zmk_custom_setting_large_pool *large_pool;
 };
 
-/* Register a keyspace. Call once at boot (e.g. from a SYS_INIT), before
- * settings_load() runs, so persisted entries under this keyspace's prefix
- * are re-bound as settings_load() encounters them - see
- * zmk_custom_setting_keyspace_bind. Returns -EINVAL for a malformed
- * keyspace, -EEXIST if the same subsystem id + key_prefix is already
- * registered. */
-int zmk_custom_settings_register_keyspace(struct zmk_custom_setting_keyspace *keyspace);
-
 /* Create one entry: `key` must start with keyspace->key_prefix and fit in
- * max_key_len (including NUL). Allocates a free slot, registers it (so it is
- * immediately find-able/listable), and writes `value` to it in `mode`.
- * Returns -ENOSPC if every slot is in use, -EEXIST if `key` already has a
- * live slot, -ENAMETOOLONG if `key` does not fit, -EINVAL for a mismatched
- * prefix/value type. On success, `*out_setting` (if non-NULL) receives the
- * new entry's descriptor. */
+ * max_key_len (including NUL). Allocates a free slot and writes `value`
+ * (interpreted as keyspace->value_type - validated against
+ * keyspace->constraints/max_size) to it in `mode`. Returns -ENOSPC if every
+ * slot is in use, -EEXIST if `key` already has a live slot, -ENAMETOOLONG if
+ * `key` does not fit, -EINVAL for a mismatched prefix/value type. On
+ * success, `*out_setting` (if non-NULL) receives the new entry's descriptor
+ * - read/write it with the ordinary zmk_custom_setting_read/write API
+ * (values are always typed/validated as keyspace->value_type, never BYTES,
+ * for a BYTES-declared keyspace this is a no-op distinction). */
 int zmk_custom_setting_keyspace_create(struct zmk_custom_setting_keyspace *keyspace,
                                        const char *key,
                                        const struct zmk_custom_setting_value *value,
@@ -1085,8 +1258,10 @@ int zmk_custom_setting_keyspace_create(struct zmk_custom_setting_keyspace *keysp
 int zmk_custom_setting_keyspace_delete(struct zmk_custom_setting_keyspace *keyspace,
                                        const char *key);
 
-/* Find a keyspace's currently live entry by its literal key (e.g.
- * "macro/my-macro-1"), or NULL if not bound to a slot right now. */
+/* Find a keyspace's currently live entry by its literal user key (e.g.
+ * "macro/my-macro-1"), or NULL if not bound to a slot right now. Decodes
+ * each live slot's blob to compare (bounded by max_entries, not the pool
+ * byte size). */
 const struct zmk_custom_setting *
 zmk_custom_setting_keyspace_find(const struct zmk_custom_setting_keyspace *keyspace,
                                  const char *key);
@@ -1099,58 +1274,70 @@ zmk_custom_setting_keyspace_find(const struct zmk_custom_setting_keyspace *keysp
 struct zmk_custom_setting_keyspace *
 zmk_custom_settings_keyspace_find_for_key(const char *custom_subsystem_id, const char *key);
 
-/*
- * Internal: bind an unclaimed slot to `key` (which must match this
- * keyspace's prefix) without writing any value - used only by the
- * SETTINGS_STATIC_HANDLER_DEFINE callback in custom_settings.c while
- * settings_load() is iterating persisted records, immediately before the
- * loaded value is applied to the returned descriptor via the normal
- * value_from_storage path. Not intended to be called from module code:
- * use zmk_custom_setting_keyspace_create for that. Returns NULL (silently,
- * dropping the record) if the pool is exhausted - a reboot cannot fail, so
- * an over-quota persisted entry is skipped rather than blocking boot.
- */
-struct zmk_custom_setting *
-zmk_custom_setting_keyspace_bind_locked(struct zmk_custom_setting_keyspace *keyspace,
-                                        const char *key);
+/* Returns the owning keyspace if `setting` is a live entry created/bound by
+ * a ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE keyspace, or NULL for a normal
+ * setting. A slot's payload is typed/constrained per the returned
+ * keyspace's value_type/constraints/max_size, not setting->value_type
+ * (always ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES internally - see the keyspace
+ * design comment above). zmk_custom_setting_read/read_into/write/write_bytes/
+ * with_large_raw_bytes/public_key all consult this already; most callers
+ * never need to call it directly. */
+const struct zmk_custom_setting_keyspace *
+zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting);
 
-/* Iterate every registered keyspace (compile-time or otherwise; currently
- * only registered via zmk_custom_settings_register_keyspace, but exposed as
- * an iterator for symmetry with ZMK_CUSTOM_SETTING_FOREACH and to let the
- * settings-load hook find "does this key match any keyspace" without a
- * separate registry). Internal to this module + its Studio RPC handler. */
+/* Iterate every registered keyspace (STRUCT_SECTION_ITERABLE - the linker
+ * section is the registry, mirroring ZMK_CUSTOM_SETTING_FOREACH). Internal
+ * to this module + its Studio RPC handler. */
 #define ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(_var)                                                  \
-    for (struct zmk_custom_setting_keyspace *_var = zmk_custom_settings_keyspace_foreach_first();  \
-         _var != NULL; _var = zmk_custom_settings_keyspace_foreach_next(_var))
+    STRUCT_SECTION_FOREACH(zmk_custom_setting_keyspace, _var)
 
-struct zmk_custom_setting_keyspace *zmk_custom_settings_keyspace_foreach_first(void);
-struct zmk_custom_setting_keyspace *
-zmk_custom_settings_keyspace_foreach_next(struct zmk_custom_setting_keyspace *current);
-
-/* Register a keyspace with a fixed-size static slot pool and key buffer
- * table. _max_key_len must include room for the NUL terminator.
- * _default_value is used as every newly bound/created slot's default (the
- * same static const object is shared by every slot, matching how a scalar
- * ZMK_CUSTOM_SETTING_DEFINE setting's default_value works). */
+/* Register a keyspace with a fixed-size static slot array and shared blob
+ * pool. _max_key_len must include room for the NUL terminator and must not
+ * exceed CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN. */
 #define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE(                                                        \
     _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
-    _default_value, _confidentiality, _read_permission, _write_permission, _constraint)            \
+    _confidentiality, _read_permission, _write_permission, _constraint)                            \
     ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_CONSTRAINTS(                                           \
         _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len,            \
-        _max_entries, _default_value, _confidentiality, _read_permission, _write_permission,       \
-        _constraint)
+        _max_entries, _confidentiality, _read_permission, _write_permission, _constraint)
 
 #define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_CONSTRAINTS(                                       \
     _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
-    _default_value, _confidentiality, _read_permission, _write_permission, ...)                    \
+    _confidentiality, _read_permission, _write_permission, ...)                                    \
     ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                        \
         _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len,            \
-        _max_entries, _default_value, _confidentiality, _read_permission, _write_permission, NULL, \
-        NULL, __VA_ARGS__)
+        _max_entries, _confidentiality, _read_permission, _write_permission, NULL, NULL,           \
+        __VA_ARGS__)
 
 #define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                    \
     _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
-    _default_value, _confidentiality, _read_permission, _write_permission, _rpc_serializer,        \
+    _confidentiality, _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer,     \
+    ...)                                                                                           \
+    ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS(              \
+        _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len,            \
+        _max_entries, (_max_entries) * ((_max_key_len) + (_max_size)), _confidentiality,           \
+        _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, __VA_ARGS__)
+
+/* Same as ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE, but takes an explicit blob-pool
+ * budget (_pool_size) instead of sizing the pool at the worst case
+ * max_entries * (max_key_len + max_size). See docs/design/
+ * simplification-redesign.md §5.3: over-committing the pool lets a keyspace
+ * hold many small entries or a handful of large ones from one shared budget,
+ * instead of always paying for max_entries full-size entries. _pool_size
+ * must be large enough for at least one full-size entry (max_key_len +
+ * max_size); create()/write() return -ENOSPC once the budget is exhausted,
+ * same as any other pooled BYTES setting. */
+#define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE(                                         \
+    _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
+    _pool_size, _confidentiality, _read_permission, _write_permission, _constraint)                \
+    ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS(              \
+        _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len,            \
+        _max_entries, _pool_size, _confidentiality, _read_permission, _write_permission, NULL,     \
+        NULL, _constraint)
+
+#define ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE_RPC_CONVERTERS_AND_CONSTRAINTS(          \
+    _name, _custom_subsystem_id, _key_prefix, _value_type, _max_size, _max_key_len, _max_entries,  \
+    _pool_size, _confidentiality, _read_permission, _write_permission, _rpc_serializer,            \
     _rpc_deserializer, ...)                                                                        \
     BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
                      CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
@@ -1160,14 +1347,26 @@ zmk_custom_settings_keyspace_foreach_next(struct zmk_custom_setting_keyspace *cu
     BUILD_ASSERT((_max_key_len) > sizeof(_key_prefix),                                             \
                  "Keyspace max_key_len must leave room for at least one suffix byte plus NUL "     \
                  "after the prefix");                                                              \
+    BUILD_ASSERT((_max_key_len) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                         \
+                 "Keyspace max_key_len exceeds CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN (P3: a "     \
+                 "slot's blob-encode/decode scratch is sized off this bound)");                    \
+    BUILD_ASSERT((_max_size) <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ||                       \
+                     (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||                       \
+                     (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,                        \
+                 "A keyspace max_size larger than the fixed carrier requires a BYTES/STRING "      \
+                 "value_type");                                                                    \
+    BUILD_ASSERT((_pool_size) >= (_max_key_len) + (_max_size),                                     \
+                 "Keyspace pool_size must fit at least one full-size entry (max_key_len + "        \
+                 "max_size)");                                                                     \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
-    static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
     static struct zmk_custom_setting_keyspace_slot _name##_slots[_max_entries];                    \
-    static char _name##_keys[_max_entries][_max_key_len];                                          \
-    static uint8_t _name##_value_bufs                                                              \
-        [_max_entries]                                                                             \
-        [((_max_size) > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? (_max_size) : 0) + 1];         \
-    static struct zmk_custom_setting_keyspace _name = {                                            \
+    /* Every entry's [key\0][payload] blob is pool-backed unconditionally -                        \
+     * see the .large_pool field comment on struct                                                 \
+     * zmk_custom_setting_keyspace. _pool_size may be smaller than the                             \
+     * worst-case max_entries * (max_key_len + max_size) budget - see                              \
+     * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE_WITH_POOL_SIZE. */                                       \
+    ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE(_name##_pool, (_pool_size));                              \
+    STRUCT_SECTION_ITERABLE(zmk_custom_setting_keyspace, _name) = {                                \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key_prefix = _key_prefix,                                                                 \
         .value_type = _value_type,                                                                 \
@@ -1179,14 +1378,8 @@ zmk_custom_settings_keyspace_foreach_next(struct zmk_custom_setting_keyspace *cu
         .write_permission = _write_permission,                                                     \
         .constraints = _name##_constraints,                                                        \
         .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
-        .default_value = &_name##_default,                                                         \
         .rpc_serializer = _rpc_serializer,                                                         \
         .rpc_deserializer = _rpc_deserializer,                                                     \
         .slots = _name##_slots,                                                                    \
-        .keys = &_name##_keys[0][0],                                                               \
-        .value_bufs =                                                                              \
-            ((_max_size) > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? &_name##_value_bufs[0][0]   \
-                                                                     : NULL),                      \
-        .value_buf_stride =                                                                        \
-            ((_max_size) > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? (_max_size) + 1 : 0),       \
+        .large_pool = &_name##_pool,                                                               \
     }
