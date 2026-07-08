@@ -68,8 +68,8 @@ static struct zmk_custom_setting_array_view_slot
 /* Non-static: zmk_custom_setting_discard/zmk_custom_setting_reset's array
  * branches (custom_settings.c) call this directly for whole-array discard/
  * reset. Declared in custom_settings_internal.h. */
-struct zmk_custom_setting *
-array_view_acquire(const struct zmk_custom_setting *array_descriptor, uint32_t index) {
+struct zmk_custom_setting *array_view_acquire(const struct zmk_custom_setting *array_descriptor,
+                                              uint32_t index) {
     struct zmk_custom_setting_array_view_slot *free_slot = NULL;
 
     for (size_t i = 0; i < ARRAY_SIZE(array_view_pool); i++) {
@@ -197,7 +197,7 @@ void set_array_memory_size_locked(const struct zmk_custom_setting *array_element
 }
 
 void set_array_persistent_size_locked(const struct zmk_custom_setting *array_element,
-                                             uint32_t array_size) {
+                                      uint32_t array_size) {
     array_element->array_state->persistent_size = array_size;
 }
 

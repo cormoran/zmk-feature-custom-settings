@@ -1182,18 +1182,23 @@ static bool for_each_list_item(const struct zmk_custom_settings_setting_scope *s
      * explicitly so ListSettings/GetSetting/notifications still surface
      * user-created entries (docs/design/simplification-redesign.md §5,
      * Goal A audit). A slot is never an array, so no expansion step is
-     * needed the way array descriptors need one above. */
-    ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(keyspace) {
-        for (uint32_t i = 0; i < keyspace->max_entries; i++) {
-            if (!keyspace->slots[i].in_use) {
-                continue;
-            }
-            const struct zmk_custom_setting *slot_setting = &keyspace->slots[i].setting;
-            if (!setting_matches_scope(slot_setting, scope)) {
-                continue;
-            }
-            if (!visitor(slot_setting, user_data)) {
-                return false;
+     * needed the way array descriptors need one above.
+     * IS_ENABLED-guarded (feature-gating P3) so a
+     * CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=n build never walks keyspace slot
+     * state. */
+    if (IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
+        ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(keyspace) {
+            for (uint32_t i = 0; i < keyspace->max_entries; i++) {
+                if (!keyspace->slots[i].in_use) {
+                    continue;
+                }
+                const struct zmk_custom_setting *slot_setting = &keyspace->slots[i].setting;
+                if (!setting_matches_scope(slot_setting, scope)) {
+                    continue;
+                }
+                if (!visitor(slot_setting, user_data)) {
+                    return false;
+                }
             }
         }
     }
@@ -1737,6 +1742,18 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
                                          cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                          cormoran_zmk_custom_settings_Response *resp,
                                          bool value_uses_rpc_format) {
+    /* Feature-gating P3: everything below resolves through a
+     * struct zmk_custom_setting_keyspace * (zmk_custom_settings_keyspace_find_for_key/
+     * zmk_custom_setting_keyspace_create, defined in
+     * custom_settings_keyspace.c) - unlike every other handler, there is no
+     * live struct zmk_custom_setting to guard with zmk_custom_setting_keyspace_of(),
+     * so this early return is what keeps a
+     * CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE=n build from referencing those
+     * symbols. */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
+        return -ENOTSUP;
+    }
+
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1842,6 +1859,11 @@ static int handle_create_setting(const cormoran_zmk_custom_settings_CreateSettin
 
 static int handle_private_delete_setting(const struct zmk_custom_settings_setting_ref *ref,
                                          cormoran_zmk_custom_settings_Response *resp) {
+    /* See the matching guard/comment in handle_private_create_setting. */
+    if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)) {
+        return -ENOTSUP;
+    }
+
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -2483,9 +2505,13 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
     case cormoran_zmk_custom_settings_Request_write_value_chunk_tag:
         return handle_write_value_chunk(&req->request_type.write_value_chunk, resp);
     case cormoran_zmk_custom_settings_Request_create_setting_tag:
-        return handle_create_setting(&req->request_type.create_setting, resp);
+        return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
+                   ? handle_create_setting(&req->request_type.create_setting, resp)
+                   : -ENOTSUP;
     case cormoran_zmk_custom_settings_Request_delete_setting_tag:
-        return handle_delete_setting(&req->request_type.delete_setting, resp);
+        return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
+                   ? handle_delete_setting(&req->request_type.delete_setting, resp)
+                   : -ENOTSUP;
     case cormoran_zmk_custom_settings_Request_save_settings_tag:
         return handle_scope_mutation(&req->request_type.save_settings.scope, resp, "Settings saved",
                                      zmk_custom_settings_save_scope);

@@ -1290,9 +1290,20 @@ zmk_custom_settings_keyspace_find_for_key(const char *custom_subsystem_id, const
  * (always ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES internally - see the keyspace
  * design comment above). zmk_custom_setting_read/read_into/write/write_bytes/
  * with_large_raw_bytes/public_key all consult this already; most callers
- * never need to call it directly. */
-const struct zmk_custom_setting_keyspace *
-zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting);
+ * never need to call it directly.
+ *
+ * static inline (not out-of-line) so it folds to a compile-time constant
+ * NULL when CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE is off (feature-gating P3):
+ * every `if (zmk_custom_setting_keyspace_of(setting)) { ...keyspace-only
+ * code... }` branch then becomes provably dead code, so the keyspace-only
+ * functions it calls (defined in src/custom_settings_keyspace.c, not
+ * compiled when the feature is off) are dropped by the compiler/linker
+ * without needing an #ifdef at each call site. See
+ * docs/design/feature-gating-and-modularization.md. */
+static inline const struct zmk_custom_setting_keyspace *
+zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting) {
+    return (IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE) && setting) ? setting->_keyspace : NULL;
+}
 
 /* Iterate every registered keyspace (STRUCT_SECTION_ITERABLE - the linker
  * section is the registry, mirroring ZMK_CUSTOM_SETTING_FOREACH). Internal

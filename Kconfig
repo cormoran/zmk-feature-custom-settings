@@ -211,6 +211,17 @@ config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
       distinct array elements are referenced at once (RPC handling, list
       enumeration, tests); it does not bound array length.
 
+config ZMK_CUSTOM_SETTINGS_KEYSPACE
+    bool "Enable RPC-creatable keyspaces (namespaces)"
+    default y
+    select ZMK_CUSTOM_SETTINGS_LARGE_VALUES
+    help
+      Compiles in runtime-creatable keyspaces (ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE,
+      the CreateSetting/DeleteSetting Studio RPC, and per-keyspace slot pools).
+      A keyspace slot is a pool-backed blob, so this requires
+      ZMK_CUSTOM_SETTINGS_LARGE_VALUES. Disable to shrink firmware when no
+      module registers a keyspace.
+
 config ZMK_CUSTOM_SETTINGS_TEST
     bool "Enable custom settings self-test"
 
