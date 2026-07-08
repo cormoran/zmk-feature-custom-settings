@@ -306,7 +306,6 @@ struct bounded_decode_scratch {
 };
 
 static bool decode_into_bounded_scratch(pb_istream_t *stream, const pb_field_t *field, void **arg) {
-    ARG_UNUSED(field);
     struct bounded_decode_scratch *scratch = *arg;
     size_t size = stream->bytes_left;
     if (size > scratch->capacity) {
@@ -317,19 +316,71 @@ static bool decode_into_bounded_scratch(pb_istream_t *stream, const pb_field_t *
     }
     scratch->buf[size] = '\0';
     scratch->size = size;
+
+    /* nanopb never sets a oneof's which_<oneof> for PB_ATYPE_CALLBACK arms
+     * (decode_field only does that for STATIC arms; decode_callback_field
+     * does not touch it) - the callback is expected to record which arm
+     * arrived itself. Without this, which_value_type stays 0 after a
+     * bytes/string payload decode and proto_to_value() rejects the request
+     * (-EINVAL, seen on real hardware as "Invalid request"). field->message
+     * points at the enclosing SettingValue and field->tag is the arm's tag
+     * (bytes_value/string_value). */
+    cormoran_zmk_custom_settings_SettingValue *value = field->message;
+    value->which_value_type = field->tag;
     return true;
 }
 
 /* Wire `value`'s bytes_value/string_value callback (they alias the same
  * union member, see the generated cormoran_zmk_custom_settings_SettingValue)
- * to decode into `scratch`. Call before pb_decode()-ing a message that embeds
- * this SettingValue; harmless if the wire ends up selecting a different
- * oneof arm. */
+ * to decode into `scratch`.
+ *
+ * CAUTION: only call this on a SettingValue that pb_decode() reaches WITHOUT
+ * crossing a oneof submessage arm (e.g. a bare Setting), or from inside a
+ * message-level cb_<oneof> precallback (see *_arm_wire_precallback below).
+ * nanopb memsets a oneof's submessage arm to zero when the arm's tag is
+ * first seen during decode, wiping any callback wired in advance - the value
+ * field is then silently skipped and which_value_type stays 0. Found on real
+ * hardware (CreateSetting with a STRING value -> "Invalid request"); the
+ * submsg_callback proto option + these precallbacks are the nanopb-sanctioned
+ * fix. */
 static void wire_setting_value_decode(cormoran_zmk_custom_settings_SettingValue *value,
                                       struct bounded_decode_scratch *scratch) {
     scratch->size = 0;
     value->value_type.bytes_value.funcs.decode = decode_into_bounded_scratch;
     value->value_type.bytes_value.arg = scratch;
+}
+
+/* Message-level oneof precallback (nanopb submsg_callback option on
+ * Request): invoked when a request_type arm's tag is known, after nanopb
+ * zeroed the arm but before the arm submessage is decoded - the only point
+ * where wiring a callback inside the arm sticks. *arg is the
+ * bounded_decode_scratch the inner SettingValue payload should land in. */
+static bool request_arm_wire_precallback(pb_istream_t *stream, const pb_field_t *field,
+                                         void **arg) {
+    (void)stream;
+    struct bounded_decode_scratch *scratch = *arg;
+    if (field->tag == cormoran_zmk_custom_settings_Request_write_setting_tag) {
+        cormoran_zmk_custom_settings_WriteSettingRequest *req = field->pData;
+        wire_setting_value_decode(&req->value, scratch);
+    } else if (field->tag == cormoran_zmk_custom_settings_Request_create_setting_tag) {
+        cormoran_zmk_custom_settings_CreateSettingRequest *req = field->pData;
+        wire_setting_value_decode(&req->value, scratch);
+    }
+    return true;
+}
+
+/* Same for Notification.notification_type's setting arm (a relayed
+ * peripheral notification decoded on the central, see
+ * relayed_notification_to_public). */
+static bool notification_arm_wire_precallback(pb_istream_t *stream, const pb_field_t *field,
+                                              void **arg) {
+    (void)stream;
+    struct bounded_decode_scratch *scratch = *arg;
+    if (field->tag == cormoran_zmk_custom_settings_Notification_setting_tag) {
+        cormoran_zmk_custom_settings_SettingNotification *notification = field->pData;
+        wire_setting_value_decode(&notification->setting.value, scratch);
+    }
+    return true;
 }
 
 static bool encode_bounded_scratch_value(pb_ostream_t *stream, const pb_field_t *field,
@@ -895,8 +946,12 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     cormoran_zmk_custom_settings_RelayNotification *relay = &relay_notification_decode_buffer;
     *relay = (cormoran_zmk_custom_settings_RelayNotification)
         cormoran_zmk_custom_settings_RelayNotification_init_zero;
-    wire_setting_value_decode(&relay->notification.notification_type.setting.setting.value,
-                              &relay_notification_value_decode_scratch);
+    /* Wired via Notification's message-level oneof precallback, not in
+     * advance - see request_arm_wire_precallback's comment (nanopb zeroes
+     * the selected notification_type arm during decode). */
+    relay_notification_value_decode_scratch.size = 0;
+    relay->notification.cb_notification_type.funcs.decode = notification_arm_wire_precallback;
+    relay->notification.cb_notification_type.arg = &relay_notification_value_decode_scratch;
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
     if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
@@ -2454,6 +2509,20 @@ static struct bounded_decode_scratch relay_request_write_value_decode_scratch = 
     .capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,
 };
 
+/* RelayRequest counterpart of request_arm_wire_precallback (nanopb
+ * submsg_callback option on RelayRequest): wires the write_setting arm's
+ * inner SettingValue payload callback once the arm's tag is known. */
+static bool relay_request_arm_wire_precallback(pb_istream_t *stream, const pb_field_t *field,
+                                               void **arg) {
+    (void)stream;
+    struct bounded_decode_scratch *scratch = *arg;
+    if (field->tag == cormoran_zmk_custom_settings_RelayRequest_write_setting_tag) {
+        cormoran_zmk_custom_settings_RelayWriteSettingRequest *req = field->pData;
+        wire_setting_value_decode(&req->value, scratch);
+    }
+    return true;
+}
+
 static int process_relay_request(const struct zmk_custom_settings_relay_request *req,
                                  cormoran_zmk_custom_settings_Response *resp) {
     k_mutex_lock(&relay_request_decode_lock, K_FOREVER);
@@ -2461,8 +2530,12 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
     cormoran_zmk_custom_settings_RelayRequest *decoded_req = &relay_request_decode_buffer;
     *decoded_req = (cormoran_zmk_custom_settings_RelayRequest)
         cormoran_zmk_custom_settings_RelayRequest_init_zero;
-    wire_setting_value_decode(&decoded_req->request_type.write_setting.value,
-                              &relay_request_write_value_decode_scratch);
+    /* Wired via the message-level oneof precallback, not in advance - see
+     * request_arm_wire_precallback's comment (nanopb zeroes the selected
+     * arm during decode). */
+    relay_request_write_value_decode_scratch.size = 0;
+    decoded_req->cb_request_type.funcs.decode = relay_request_arm_wire_precallback;
+    decoded_req->cb_request_type.arg = &relay_request_write_value_decode_scratch;
     pb_istream_t req_stream = pb_istream_from_buffer(req->payload, req->payload_size);
     if (!pb_decode(&req_stream, cormoran_zmk_custom_settings_RelayRequest_fields, decoded_req)) {
         LOG_WRN("Failed to decode relayed custom settings request: %s", PB_GET_ERROR(&req_stream));
@@ -2624,23 +2697,34 @@ ZMK_LISTENER(custom_settings_studio, setting_changed_listener);
 ZMK_SUBSCRIPTION(custom_settings_studio, zmk_custom_setting_changed);
 
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+/* Decode a wire-format Request the one true way: the inner SettingValue
+ * payload callback is wired from the message-level oneof precallback, NOT
+ * before pb_decode() - nanopb zeroes the selected request_type arm during
+ * decode, which would wipe an advance wiring (see
+ * request_arm_wire_precallback). Shared by the RPC entry point below and the
+ * decode-regression self-test so the test exercises the production path. */
+static bool decode_custom_settings_request(const uint8_t *buf, size_t size,
+                                           cormoran_zmk_custom_settings_Request *req) {
+    *req = (cormoran_zmk_custom_settings_Request)cormoran_zmk_custom_settings_Request_init_zero;
+    g_write_value_decode_scratch.size = 0;
+    req->cb_request_type.funcs.decode = request_arm_wire_precallback;
+    req->cb_request_type.arg = &g_write_value_decode_scratch;
+    pb_istream_t req_stream = pb_istream_from_buffer(buf, size);
+    if (!pb_decode(&req_stream, cormoran_zmk_custom_settings_Request_fields, req)) {
+        LOG_WRN("Failed to decode custom settings request: %s", PB_GET_ERROR(&req_stream));
+        return false;
+    }
+    return true;
+}
+
 static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
                                                pb_callback_t *encode_response) {
     cormoran_zmk_custom_settings_Response *resp = ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER_ALLOCATE(
         cormoran_custom_settings, encode_response);
 
-    cormoran_zmk_custom_settings_Request req = cormoran_zmk_custom_settings_Request_init_zero;
-    /* write_setting and create_setting alias the same union memory (both
-     * WriteSettingRequest/CreateSettingRequest have identical field layout),
-     * so one wiring covers both, but wire both explicitly for clarity and
-     * robustness against that layout coincidence changing. */
-    wire_setting_value_decode(&req.request_type.write_setting.value, &g_write_value_decode_scratch);
-    wire_setting_value_decode(&req.request_type.create_setting.value,
-                              &g_write_value_decode_scratch);
-    pb_istream_t req_stream =
-        pb_istream_from_buffer(raw_request->payload.bytes, raw_request->payload.size);
-    if (!pb_decode(&req_stream, cormoran_zmk_custom_settings_Request_fields, &req)) {
-        LOG_WRN("Failed to decode custom settings request: %s", PB_GET_ERROR(&req_stream));
+    cormoran_zmk_custom_settings_Request req;
+    if (!decode_custom_settings_request(raw_request->payload.bytes, raw_request->payload.size,
+                                        &req)) {
         set_error(resp, "Failed to decode request");
         return true;
     }
@@ -3180,6 +3264,112 @@ static int custom_settings_large_chunked_rpc_test_init(void) {
 }
 
 SYS_INIT(custom_settings_large_chunked_rpc_test_init, APPLICATION, 99);
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+/*
+ * Regression test for the nanopb oneof-submessage callback wipe found on
+ * real hardware: a SettingValue payload callback wired BEFORE pb_decode()
+ * into Request.write_setting/.create_setting is zeroed when nanopb selects
+ * the oneof arm, so the STRING/BYTES payload was silently skipped and
+ * which_value_type stayed 0 ("Invalid request"). This decodes full
+ * wire-format Requests through decode_custom_settings_request() - the exact
+ * production entry path - and asserts the payload reaches the scratch. The
+ * pre-fix code passes every other native test but fails here.
+ */
+static int custom_settings_request_decode_regression_test_init(void) {
+    static uint8_t enc_buf[64];
+    static struct bounded_decode_scratch enc_scratch = {.buf = enc_buf,
+                                                        .capacity = sizeof(enc_buf) - 1};
+    static const char payload[] = "callback-ok";
+
+    /* --- write_setting arm with a STRING payload --- */
+    enc_scratch.size = sizeof(payload) - 1;
+    memcpy(enc_scratch.buf, payload, enc_scratch.size);
+
+    cormoran_zmk_custom_settings_Request req = cormoran_zmk_custom_settings_Request_init_zero;
+    req.which_request_type = cormoran_zmk_custom_settings_Request_write_setting_tag;
+    req.request_type.write_setting.has_setting = true;
+    req.request_type.write_setting.setting.has_key = true;
+    copy_string(req.request_type.write_setting.setting.key,
+                sizeof(req.request_type.write_setting.setting.key), "string_value");
+    req.request_type.write_setting.has_value = true;
+    req.request_type.write_setting.value.which_value_type =
+        cormoran_zmk_custom_settings_SettingValue_string_value_tag;
+    req.request_type.write_setting.value.value_type.string_value.funcs.encode =
+        encode_bounded_scratch_value;
+    req.request_type.write_setting.value.value_type.string_value.arg = &enc_scratch;
+
+    uint8_t wire[128];
+    pb_ostream_t ostream = pb_ostream_from_buffer(wire, sizeof(wire));
+    if (!pb_encode(&ostream, cormoran_zmk_custom_settings_Request_fields, &req)) {
+        LOG_ERR("request decode regression: encode failed: %s", PB_GET_ERROR(&ostream));
+        return -EIO;
+    }
+
+    cormoran_zmk_custom_settings_Request decoded;
+    if (!decode_custom_settings_request(wire, ostream.bytes_written, &decoded)) {
+        LOG_ERR("request decode regression: decode failed");
+        return -EIO;
+    }
+    if (decoded.which_request_type != cormoran_zmk_custom_settings_Request_write_setting_tag ||
+        decoded.request_type.write_setting.value.which_value_type !=
+            cormoran_zmk_custom_settings_SettingValue_string_value_tag) {
+        LOG_ERR("request decode regression: write_setting arm/value tag lost (%u/%u)",
+                decoded.which_request_type,
+                decoded.request_type.write_setting.value.which_value_type);
+        return -EINVAL;
+    }
+    if (g_write_value_decode_scratch.size != sizeof(payload) - 1 ||
+        memcmp(g_write_value_decode_scratch.buf, payload, sizeof(payload) - 1) != 0) {
+        LOG_ERR("request decode regression: write_setting payload lost (size=%u)",
+                (unsigned)g_write_value_decode_scratch.size);
+        return -EINVAL;
+    }
+
+    /* --- create_setting arm with a BYTES payload --- */
+    static const uint8_t blob_payload[] = {0xA5, 0x5A, 0x11, 0x22};
+    enc_scratch.size = sizeof(blob_payload);
+    memcpy(enc_scratch.buf, blob_payload, enc_scratch.size);
+
+    req = (cormoran_zmk_custom_settings_Request)cormoran_zmk_custom_settings_Request_init_zero;
+    req.which_request_type = cormoran_zmk_custom_settings_Request_create_setting_tag;
+    req.request_type.create_setting.has_setting = true;
+    req.request_type.create_setting.setting.has_key = true;
+    copy_string(req.request_type.create_setting.setting.key,
+                sizeof(req.request_type.create_setting.setting.key), "blob/regress");
+    req.request_type.create_setting.has_value = true;
+    req.request_type.create_setting.value.which_value_type =
+        cormoran_zmk_custom_settings_SettingValue_bytes_value_tag;
+    req.request_type.create_setting.value.value_type.bytes_value.funcs.encode =
+        encode_bounded_scratch_value;
+    req.request_type.create_setting.value.value_type.bytes_value.arg = &enc_scratch;
+
+    ostream = pb_ostream_from_buffer(wire, sizeof(wire));
+    if (!pb_encode(&ostream, cormoran_zmk_custom_settings_Request_fields, &req)) {
+        LOG_ERR("request decode regression: create encode failed: %s", PB_GET_ERROR(&ostream));
+        return -EIO;
+    }
+    if (!decode_custom_settings_request(wire, ostream.bytes_written, &decoded)) {
+        LOG_ERR("request decode regression: create decode failed");
+        return -EIO;
+    }
+    if (decoded.which_request_type != cormoran_zmk_custom_settings_Request_create_setting_tag ||
+        decoded.request_type.create_setting.value.which_value_type !=
+            cormoran_zmk_custom_settings_SettingValue_bytes_value_tag ||
+        g_write_value_decode_scratch.size != sizeof(blob_payload) ||
+        memcmp(g_write_value_decode_scratch.buf, blob_payload, sizeof(blob_payload)) != 0) {
+        LOG_ERR("request decode regression: create_setting payload lost (size=%u)",
+                (unsigned)g_write_value_decode_scratch.size);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_request_decode_regression write=%s create=%u bytes", payload,
+            (unsigned)sizeof(blob_payload));
+    return 0;
+}
+
+SYS_INIT(custom_settings_request_decode_regression_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)

@@ -31,3 +31,18 @@ cormoran.zmk.custom_settings.StatusResponse.message max_size:96
 # value larger than one RPC frame can still be transferred over several
 # chunks once per-setting value capacity grows past CHUNK_MAX_SIZE.
 cormoran.zmk.custom_settings.WriteValueChunkRequest.data max_size:128
+
+# nanopb zeroes a oneof's submessage arm when the arm's tag is first seen
+# during decode ("We memset to zero so that any callbacks are set to NULL",
+# pb_decode.c) - so a SettingValue callback wired BEFORE pb_decode() into
+# Request.write_setting/.create_setting (or a Notification's setting arm) is
+# wiped before it can run, the value field is silently skipped, and
+# which_value_type stays 0. submsg_callback generates a message-level
+# cb_<oneof> hook invoked when the arm tag is known but before the arm is
+# decoded; the handler wires the inner SettingValue callback there instead
+# (see *_arm_wire_precallback in custom_settings_handler.c). Found on real
+# hardware: CreateSetting with a STRING value returned "Invalid request"
+# while the native self-tests only covered decode paths without a oneof in
+# between.
+cormoran.zmk.custom_settings.Request submsg_callback:true
+cormoran.zmk.custom_settings.Notification submsg_callback:true
