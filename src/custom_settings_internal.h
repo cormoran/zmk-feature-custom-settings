@@ -6,15 +6,14 @@
 
 /*
  * Private, shared-within-module contract between src/custom_settings.c
- * (core lifecycle: always compiled with ZMK_CUSTOM_SETTINGS) and the
- * optional feature translation units split out of it: src/custom_settings_pool.c
- * (CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES), src/custom_settings_array.c
- * (CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY), src/custom_settings_keyspace.c
- * (CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE, which selects LARGE_VALUES: a
- * keyspace slot is a pool-backed blob), and src/custom_settings_rpc_convert.c
- * (CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS). src/custom_settings_record.c
- * (CONFIG_ZMK_CUSTOM_SETTINGS_RECORD) does NOT need this header - it only
- * calls the public API.
+ * (core lifecycle, always compiled) and the optional feature translation
+ * units: src/custom_settings_pool.c (CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES),
+ * src/custom_settings_array.c (CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY),
+ * src/custom_settings_keyspace.c (CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE, which
+ * selects LARGE_VALUES: a keyspace slot is a pool-backed blob), and
+ * src/custom_settings_rpc_convert.c (CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS).
+ * src/custom_settings_record.c (CONFIG_ZMK_CUSTOM_SETTINGS_RECORD) does NOT
+ * need this header - it only calls the public API.
  *
  * NOT a public header - lives under src/, not include/. Only files inside
  * this module may include it.
@@ -128,12 +127,10 @@ bool split_array_element_key(const char *name, char *array_key, size_t array_key
  * KEYSPACE entry points (defined in custom_settings_keyspace.c when
  * CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE is enabled). Declared here
  * unconditionally so core call sites can be guarded by
- * zmk_custom_setting_keyspace_of() (which itself folds to a compile-time
- * constant NULL when the feature is off - see the inline definition in
- * include/cormoran/zmk/custom_settings.h) without custom_settings_keyspace.c
- * needing to be compiled. keyspace_blob_key_len_locked is NOT here: it stays
- * defined in custom_settings.c itself (core) - see the doc comment on its
- * declaration further down - because custom_settings_pool.c calls it from a
+ * zmk_custom_setting_keyspace_of() (which folds to a compile-time constant
+ * NULL when the feature is off) without custom_settings_keyspace.c needing to
+ * be compiled. keyspace_blob_key_len_locked is NOT here: it stays defined in
+ * custom_settings.c (core) because custom_settings_pool.c calls it from a
  * branch keyed on a runtime field (setting->_keyspace), which the compiler
  * cannot prove dead, so the symbol must exist even when KEYSPACE is off.
  * ---------------------------------------------------------------------
@@ -196,11 +193,10 @@ bool keyspace_parse_ordinal_name(const struct zmk_custom_setting_keyspace *keysp
 const char *keyspace_public_key_locked(const struct zmk_custom_setting *setting);
 
 /* Bound for a keyspace slot's `[user_key\0][payload]` blob assembly/decode
- * scratch, generous enough for any registered keyspace's own (smaller)
- * max_key_len/max_size - shared between custom_settings_keyspace.c (the
- * scratch buffer itself) and custom_settings.c's custom_settings_handle_set
- * (which stages a loaded record's raw bytes, keyspace or not, in a buffer of
- * this same size before applying it). */
+ * scratch, large enough for any registered keyspace's own max_key_len/
+ * max_size - shared between custom_settings_keyspace.c (the scratch buffer)
+ * and custom_settings.c's custom_settings_handle_set (which stages a loaded
+ * record's raw bytes in a buffer of this same size before applying it). */
 #define ZMK_CUSTOM_SETTINGS_KEYSPACE_BLOB_SCRATCH_SIZE                                             \
     (CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN + CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE)
 

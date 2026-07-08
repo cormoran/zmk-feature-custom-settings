@@ -206,9 +206,9 @@ message WriteValueChunkRequest {
 }
 
 message Request {
-    // 9 used to be ReadValueChunkRequest (simplification P2): GetSetting /
-    // ListSettings now stream a value of any size directly (see
-    // SettingValue.bytes_value / string_value in the .options file).
+    // GetSetting / ListSettings stream a value of any size directly (see
+    // SettingValue.bytes_value / string_value in the .options file), so there
+    // is no read-chunk request.
     reserved 9;
 
     oneof request_type {
@@ -236,10 +236,8 @@ message StatusResponse {
 message GetSettingResponse { Setting setting = 1; }
 
 message Response {
-    // 4 used to be ValueChunkResponse: WriteValueChunk's ack was always a
-    // plain StatusResponse (see handle_private_write_value_chunk) even before
-    // simplification P2, so deleting the read-only ValueChunkResponse message
-    // does not change the write-ack wire shape at all.
+    // WriteValueChunk's ack is a plain StatusResponse (see
+    // handle_private_write_value_chunk); there is no dedicated chunk response.
     reserved 4;
 
     oneof response_type {

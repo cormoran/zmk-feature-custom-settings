@@ -6,15 +6,12 @@
 
 /*
  * Per-setting RPC bytes converter hooks (CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS).
- * Split out of custom_settings.c (simplification/feature-gating P4) - see
- * docs/design/feature-gating-and-modularization.md.
  *
- * zmk_custom_setting_serialize_rpc_value / _deserialize_rpc_value (the
- * public entry points a converter is reached through) stay in core
- * (custom_settings.c) so the API is always available; when this feature is
- * off they fall back to a plain identity copy without referencing anything
- * here. This file only holds the actual per-setting/per-keyspace converter
- * dispatch (convert_rpc_bytes_value).
+ * zmk_custom_setting_serialize_rpc_value / _deserialize_rpc_value (the public
+ * entry points a converter is reached through) stay in core so the API is
+ * always available; when this feature is off they fall back to a plain
+ * identity copy without referencing anything here. This file only holds the
+ * per-setting/per-keyspace converter dispatch (convert_rpc_bytes_value).
  */
 
 #include <errno.h>
