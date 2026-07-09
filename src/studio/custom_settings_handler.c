@@ -1069,6 +1069,18 @@ static inline void notify_suppress_end(void) {
 
 static inline bool notify_suppressed(void) { return notify_suppress_depth > 0; }
 
+/* Public wrappers (declared in custom_settings.h) so a module that mutates
+ * custom settings from inside its own Studio RPC subsystem handler can suppress
+ * the redundant self-notification, the same way this module brackets its own
+ * RPC dispatch below. Defined only when the header exposes them as extern (the
+ * CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=n build gets inline no-ops instead), so
+ * a peripheral-relay build that compiles this file without local Studio RPC
+ * does not collide with those inline definitions. */
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC)
+void zmk_custom_settings_notify_suppress_begin(void) { notify_suppress_begin(); }
+void zmk_custom_settings_notify_suppress_end(void) { notify_suppress_end(); }
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST)
 /* Counts notifications that were actually queued (i.e. not suppressed).
  * Consumed only by the RPC-suppression self-test below; incrementing is
@@ -3728,6 +3740,56 @@ static int custom_settings_rpc_suppresses_notification_test_init(void) {
 }
 
 SYS_INIT(custom_settings_rpc_suppresses_notification_test_init, APPLICATION, 99);
+
+/*
+ * The PUBLIC suppress API (zmk_custom_settings_notify_suppress_begin/end) lets
+ * another module suppress the self-notification of a core write it drives from
+ * its own Studio RPC handler. A direct write inside the bracket must submit no
+ * notification; the same write outside it must submit one. (This is what
+ * zmk-feature-runtime-macro uses so its CreateMacro/etc. RPCs do not fire a
+ * redundant custom-settings notification that would starve the RPC response
+ * and overflow the RPC thread stack.)
+ */
+static int custom_settings_public_suppress_test_init(void) {
+    const char *subsys = "test";
+    const char *key = "int_value";
+    struct zmk_custom_setting_value value = ZMK_CUSTOM_SETTING_VALUE_INT32(33);
+
+    notify_submit_count_for_test = 0;
+    zmk_custom_settings_notify_suppress_begin();
+    int ret =
+        zmk_custom_setting_write_by_key(subsys, key, &value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    zmk_custom_settings_notify_suppress_end();
+    if (ret < 0) {
+        LOG_ERR("public suppress regression: bracketed write failed: %d", ret);
+        return ret;
+    }
+    uint32_t suppressed_count = notify_submit_count_for_test;
+    if (suppressed_count != 0) {
+        LOG_ERR("public suppress regression: bracketed write submitted %u notification(s)",
+                suppressed_count);
+        return -EINVAL;
+    }
+
+    /* After end(), the depth is back to 0, so a plain write notifies again. */
+    notify_submit_count_for_test = 0;
+    value = ZMK_CUSTOM_SETTING_VALUE_INT32(44);
+    ret =
+        zmk_custom_setting_write_by_key(subsys, key, &value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    if (notify_submit_count_for_test == 0) {
+        LOG_ERR("public suppress regression: write after end() submitted no notification");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_public_suppress suppressed=%u after=%u", suppressed_count,
+            notify_submit_count_for_test);
+    return 0;
+}
+
+SYS_INIT(custom_settings_public_suppress_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)

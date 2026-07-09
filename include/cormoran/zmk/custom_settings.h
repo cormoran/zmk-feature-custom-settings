@@ -1238,6 +1238,33 @@ zmk_custom_setting_keyspace_find(const struct zmk_custom_setting_keyspace *keysp
 struct zmk_custom_setting_keyspace *
 zmk_custom_settings_keyspace_find_for_key(const char *custom_subsystem_id, const char *key);
 
+/*
+ * Suppress the Studio "setting changed" notification that a core write
+ * (zmk_custom_setting_write and friends, keyspace create/delete, save,
+ * discard, reset) would otherwise emit, for the duration of a begin/end
+ * bracket. Nestable (reference-counted).
+ *
+ * A module that mutates custom settings from inside its OWN Studio RPC
+ * subsystem handler must bracket that mutation: the module's own RPC response
+ * already confirms the change to the single-connection Studio client, so the
+ * redundant custom-settings notification would compete with that response on
+ * the shared transport and can starve it. This module's own RPC entry point
+ * brackets its dispatch for exactly this reason; the notification listener
+ * runs synchronously in the writing thread, so on a small RPC thread stack the
+ * extra encode depth can also overflow it. Non-RPC mutations (boot
+ * settings-load, background firmware writes) must NOT be bracketed - their
+ * notifications are the only signal Studio gets.
+ *
+ * No-ops when the Studio RPC layer is not built (no notifications exist).
+ */
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC)
+void zmk_custom_settings_notify_suppress_begin(void);
+void zmk_custom_settings_notify_suppress_end(void);
+#else
+static inline void zmk_custom_settings_notify_suppress_begin(void) {}
+static inline void zmk_custom_settings_notify_suppress_end(void) {}
+#endif
+
 /* Returns the owning keyspace if `setting` is a live entry created/bound by
  * a ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE keyspace, or NULL for a normal
  * setting. A slot's payload is typed/constrained per the returned
