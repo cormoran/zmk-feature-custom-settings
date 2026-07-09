@@ -53,6 +53,7 @@ PASS: custom_settings_keyspace_large_value size=100
 PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
 PASS: custom_settings_behavior_value param1=0x70004
 PASS: custom_settings_behavior_value_rejects_invalid
+PASS: custom_settings_rpc_suppresses_notification nonrpc=1 rpc=0
 PASS: custom_settings_notification_reencode_regression int32=63 string=relay-p4
 PASS: custom_settings_request_decode_regression write=callback-ok create=4 bytes
 PASS: custom_settings_large_chunked_rpc size=200

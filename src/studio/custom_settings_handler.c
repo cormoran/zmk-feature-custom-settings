@@ -1033,6 +1033,49 @@ raise_encoded_studio_notification(const cormoran_zmk_custom_settings_Notificatio
 }
 #endif
 
+/*
+ * Studio-notification suppression for RPC-originated mutations.
+ *
+ * A mutating Studio RPC (save/discard/reset/write/create/delete) already
+ * confirms success to the single-connection Studio client through its own RPC
+ * response. The change events these mutations raise synchronously would, left
+ * unguarded, queue a redundant self-notification onto the low-prio workqueue;
+ * on the shared single-connection USB CDC Studio transport that notification
+ * races and starves the still-in-flight RPC response, so the client times out
+ * even though the mutation and its flash write already succeeded.
+ *
+ * We therefore suppress locally-raised notifications for the duration of RPC
+ * request dispatch. A depth COUNTER (not a bool) is required because a single
+ * request nests change events: e.g. save_settings raises one SAVED event per
+ * affected setting, synchronously, inside the same dispatch. Dispatch is
+ * single-threaded - Studio processes one request at a time on its RPC thread
+ * and the change-event listeners fire synchronously on that same thread - so a
+ * plain int needs no atomics.
+ *
+ * Only the RPC entry point (custom_settings_rpc_handle_request) brackets
+ * dispatch, so non-RPC sources keep notifying: boot settings-load, direct
+ * firmware-API mutations, and split-relay writes on a peripheral never pass
+ * through that bracket and their notifications must still reach Studio.
+ */
+static int notify_suppress_depth;
+
+static inline void notify_suppress_begin(void) { notify_suppress_depth++; }
+
+static inline void notify_suppress_end(void) {
+    if (notify_suppress_depth > 0) {
+        notify_suppress_depth--;
+    }
+}
+
+static inline bool notify_suppressed(void) { return notify_suppress_depth > 0; }
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST)
+/* Counts notifications that were actually queued (i.e. not suppressed).
+ * Consumed only by the RPC-suppression self-test below; incrementing is
+ * test-gated so production builds are unaffected. */
+static uint32_t notify_submit_count_for_test;
+#endif
+
 static int raise_setting_notification(const struct zmk_custom_setting *setting,
                                       cormoran_zmk_custom_settings_SettingNotificationKind kind,
                                       bool include_value, bool include_meta, uint32_t source) {
@@ -1812,7 +1855,12 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
         return ret;
     }
 
-    if (created) {
+    /* Skip the synchronous notification when this create came through the RPC
+     * entry point: its RPC response already confirms the create to the
+     * single-connection Studio client, so a concurrent notification would only
+     * starve that response on the shared transport. A non-RPC create keeps
+     * notifying. */
+    if (created && !notify_suppressed()) {
         raise_setting_notification(
             created,
             cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED,
@@ -1885,7 +1933,10 @@ static int handle_private_delete_setting(const struct zmk_custom_settings_settin
      * back to the pool for reuse. */
     const struct zmk_custom_setting *setting =
         zmk_custom_setting_keyspace_find(keyspace, setting_ref_key(ref));
-    if (setting) {
+    /* As with create above: an RPC-originated delete is already confirmed by
+     * its RPC response, so skip the concurrent notification that would starve
+     * it on the shared transport. A non-RPC delete keeps notifying. */
+    if (setting && !notify_suppressed()) {
         raise_setting_notification(
             setting,
             cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_DISCARDED,
@@ -2744,6 +2795,23 @@ static int setting_changed_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
+    /* An RPC-originated mutation already reports success via its RPC response;
+     * queuing a redundant notification here would starve that response on the
+     * single-connection Studio transport (see notify_suppress_depth above).
+     * Non-RPC change events are never suppressed. */
+    if (notify_suppressed()) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST)
+    /* Count every non-suppressed notification at the point it is about to be
+     * submitted - before k_msgq_put, which can transiently fail (e.g. a full
+     * queue at SYS_INIT before the low-prio workqueue has drained it). The
+     * self-test only needs to know suppression let the notification through,
+     * not whether the queue happened to have room. */
+    notify_submit_count_for_test++;
+#endif
+
     struct zmk_custom_settings_notification_request request = {
         .setting = ev->setting,
         .kind = proto_notification_kind(ev->kind),
@@ -2801,7 +2869,15 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
     LOG_INF("Custom settings RPC request: type=%u payload_size=%u", req.which_request_type,
             (uint32_t)raw_request->payload.size);
 
+    /* Suppress the self-notification these mutations raise: the RPC response
+     * built below already tells the single-connection Studio client the
+     * operation succeeded, and a concurrent notification would starve that
+     * response on the shared USB CDC transport. Only local dispatch is
+     * bracketed - the split relay that follows must keep notifying so
+     * peripheral changes still propagate back to the central. */
+    notify_suppress_begin();
     int ret = process_request(&req, resp);
+    notify_suppress_end();
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     if (ret == 0 && should_relay_to_peripherals(&req)) {
@@ -3560,6 +3636,98 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
 }
 
 SYS_INIT(custom_settings_notification_reencode_regression_test_init, APPLICATION, 99);
+
+/*
+ * Regression test for the RPC-response starvation bug (hardware-confirmed):
+ * a mutating Studio RPC timed out waiting for its USB CDC response because the
+ * change event it raised queued a redundant Studio notification that starved
+ * the still-in-flight response on the single-connection transport. The fix
+ * brackets RPC dispatch with notify_suppress_begin/end so an RPC-originated
+ * mutation queues ZERO notifications, while non-RPC mutations keep notifying.
+ *
+ * Step A drives a direct (non-RPC) write and asserts the notification-submit
+ * counter increments. Step B drives the SAME setting through the real RPC
+ * entry point (custom_settings_rpc_handle_request) and asserts the counter
+ * stays 0. Removing the notify_suppressed() guard makes Step B fail.
+ */
+static int custom_settings_rpc_suppresses_notification_test_init(void) {
+    const char *subsys = "test";
+    const char *key = "int_value";
+
+    uint32_t subsystem_index = 0;
+    if (custom_subsystem_index_for_identifier(subsys, &subsystem_index) < 0) {
+        LOG_ERR("rpc suppression regression: subsystem %s not registered", subsys);
+        return -ENOENT;
+    }
+
+    /* Step A: a direct (non-RPC) mutation must still submit a notification. */
+    notify_submit_count_for_test = 0;
+    struct zmk_custom_setting_value a_value = ZMK_CUSTOM_SETTING_VALUE_INT32(11);
+    int ret = zmk_custom_setting_write_by_key(subsys, key, &a_value,
+                                              ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        LOG_ERR("rpc suppression regression: non-RPC write failed: %d", ret);
+        return ret;
+    }
+    uint32_t nonrpc_count = notify_submit_count_for_test;
+    if (nonrpc_count == 0) {
+        LOG_ERR("rpc suppression regression: non-RPC write submitted no notification");
+        return -EINVAL;
+    }
+
+    /* Step B: the SAME write through the real RPC entry must submit none. Build
+     * a wire-encoded write_setting Request exactly as Studio would send it. */
+    cormoran_zmk_custom_settings_Request req = cormoran_zmk_custom_settings_Request_init_zero;
+    req.which_request_type = cormoran_zmk_custom_settings_Request_write_setting_tag;
+    req.request_type.write_setting.has_setting = true;
+    req.request_type.write_setting.setting.has_custom_subsystem_index = true;
+    req.request_type.write_setting.setting.custom_subsystem_index = subsystem_index;
+    req.request_type.write_setting.setting.has_key = true;
+    copy_string(req.request_type.write_setting.setting.key,
+                sizeof(req.request_type.write_setting.setting.key), key);
+    req.request_type.write_setting.has_value = true;
+    req.request_type.write_setting.value.which_value_type =
+        cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
+    req.request_type.write_setting.value.value_type.int32_value = 22;
+    req.request_type.write_setting.mode =
+        cormoran_zmk_custom_settings_SettingWriteMode_SETTING_WRITE_MODE_MEMORY;
+
+    static uint8_t wire[96];
+    pb_ostream_t ostream = pb_ostream_from_buffer(wire, sizeof(wire));
+    if (!pb_encode(&ostream, cormoran_zmk_custom_settings_Request_fields, &req)) {
+        LOG_ERR("rpc suppression regression: encode failed: %s", PB_GET_ERROR(&ostream));
+        return -EIO;
+    }
+
+    zmk_custom_CallRequest call = zmk_custom_CallRequest_init_zero;
+    if (ostream.bytes_written > sizeof(call.payload.bytes)) {
+        LOG_ERR("rpc suppression regression: encoded request too large (%u)",
+                (unsigned)ostream.bytes_written);
+        return -ENOMEM;
+    }
+    memcpy(call.payload.bytes, wire, ostream.bytes_written);
+    call.payload.size = ostream.bytes_written;
+
+    /* Drive the real production entry point so the notify_suppress bracket is
+     * exercised end to end. */
+    notify_submit_count_for_test = 0;
+    pb_callback_t encode_response = {0};
+    if (!custom_settings_rpc_handle_request(&call, &encode_response)) {
+        LOG_ERR("rpc suppression regression: RPC handler returned false");
+        return -EIO;
+    }
+    uint32_t rpc_count = notify_submit_count_for_test;
+    if (rpc_count != 0) {
+        LOG_ERR("rpc suppression regression: RPC write submitted %u notification(s)", rpc_count);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_rpc_suppresses_notification nonrpc=%u rpc=%u", nonrpc_count,
+            rpc_count);
+    return 0;
+}
+
+SYS_INIT(custom_settings_rpc_suppresses_notification_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
