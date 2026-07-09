@@ -1843,6 +1843,44 @@ static int test_keyspace_lifecycle(void) {
     return 0;
 }
 
+/*
+ * Regression for "No keyspace registered for this key" on CreateSetting.
+ *
+ * The Studio CreateSetting/DeleteSetting handlers resolve their target
+ * keyspace with zmk_custom_settings_keyspace_find_for_key(subsystem, key).
+ * A client that addresses an entry by key alone - a SettingRef with no
+ * custom_subsystem_index, which is exactly how the runtime-macro web UI
+ * issues "macro/<name>" create/delete/rename - arrives with a NULL subsystem
+ * id. zmk_custom_setting_find() already treats a NULL/empty subsystem id as
+ * "match any"; find_for_key used to bail on NULL instead, so every such
+ * create failed. This asserts a keyspace still resolves by its key prefix
+ * with a NULL (and empty) subsystem id, even for a not-yet-existing key
+ * (the create path matches by prefix, before any entry exists).
+ */
+static int test_keyspace_find_null_subsystem(void) {
+    struct zmk_custom_setting_keyspace *ks =
+        zmk_custom_settings_keyspace_find_for_key(NULL, "macro/not-created-yet");
+    if (ks != &test_macro_keyspace) {
+        LOG_ERR("find_for_key(NULL, \"macro/...\") = %p, expected the macro keyspace", (void *)ks);
+        return -ENOENT;
+    }
+
+    ks = zmk_custom_settings_keyspace_find_for_key("", "macro/not-created-yet");
+    if (ks != &test_macro_keyspace) {
+        LOG_ERR("find_for_key(\"\", \"macro/...\") = %p, expected the macro keyspace", (void *)ks);
+        return -ENOENT;
+    }
+
+    /* A key whose prefix matches no keyspace still resolves to NULL. */
+    if (zmk_custom_settings_keyspace_find_for_key(NULL, "unknown/x") != NULL) {
+        LOG_ERR("find_for_key(NULL, \"unknown/...\") matched a keyspace unexpectedly");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_keyspace_find_null_subsystem");
+    return 0;
+}
+
 static int test_record_settings(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "record_value");
     if (!setting) {
@@ -2745,6 +2783,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_keyspace_lifecycle();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keyspace_find_null_subsystem();
     if (ret < 0) {
         return ret;
     }

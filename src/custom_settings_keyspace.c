@@ -41,11 +41,20 @@ static bool keyspace_key_matches_prefix(const struct zmk_custom_setting_keyspace
 }
 
 /* Find a keyspace registered for custom_subsystem_id whose key_prefix
- * matches the start of `key`. Caller must hold custom_settings_lock. */
+ * matches the start of `key`. Caller must hold custom_settings_lock.
+ *
+ * A NULL or empty custom_subsystem_id means "match any subsystem", exactly
+ * as zmk_custom_setting_find() treats it: an RPC caller that addresses a
+ * keyspace entry by key alone - a SettingRef with no custom_subsystem_index,
+ * which is how the runtime-macro web UI issues CreateSetting/DeleteSetting -
+ * lands here with a NULL id and must still resolve the keyspace by its key
+ * prefix. Without this the create/delete handlers reported "No keyspace
+ * registered for this key" for every such request. */
 static struct zmk_custom_setting_keyspace *
 keyspace_find_for_key_locked(const char *custom_subsystem_id, const char *key) {
     ZMK_CUSTOM_SETTING_KEYSPACE_FOREACH(keyspace) {
-        if (strncmp(keyspace->custom_subsystem_id, custom_subsystem_id,
+        if (custom_subsystem_id && custom_subsystem_id[0] != '\0' &&
+            strncmp(keyspace->custom_subsystem_id, custom_subsystem_id,
                     CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN) != 0) {
             continue;
         }
@@ -59,7 +68,7 @@ keyspace_find_for_key_locked(const char *custom_subsystem_id, const char *key) {
 
 struct zmk_custom_setting_keyspace *
 zmk_custom_settings_keyspace_find_for_key(const char *custom_subsystem_id, const char *key) {
-    if (!custom_subsystem_id || !key) {
+    if (!key) {
         return NULL;
     }
 
