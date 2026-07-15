@@ -766,6 +766,43 @@ void log_speed(const struct zmk_custom_setting_value *value, void *user_data) {
 zmk_custom_setting_with_value(setting, log_speed, NULL);
 ```
 
+### Events
+
+The module raises two ZMK events you can subscribe to from firmware.
+
+`zmk_custom_settings_initialized` is raised **exactly once per boot**, right
+after the settings subsystem has finished loading persisted values into every
+registered setting. Reading a setting from a plain `SYS_INIT` is racy — it may
+run before `settings_load()` has populated the persisted value, so you would
+see the compile-time default instead. Subscribe to this event instead when you
+need to apply a stored setting to hardware at startup:
+
+```c
+#include <zmk/event_manager.h>
+#include <cormoran/zmk/custom_settings.h>
+
+static int on_settings_ready(const zmk_event_t *eh) {
+    if (as_zmk_custom_settings_initialized(eh) != NULL) {
+        int32_t speed;
+        zmk_custom_setting_get_int32(
+            zmk_custom_setting_find("my_module", "speed"), &speed);
+        /* ...apply `speed` to hardware; the value is now the persisted one. */
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(my_module, on_settings_ready);
+ZMK_SUBSCRIPTION(my_module, zmk_custom_settings_initialized);
+```
+
+The later, targeted reloads that `zmk_custom_setting_discard` performs do not
+re-raise it, and in a build without `CONFIG_SETTINGS` (nothing ever calls
+`settings_load()`) it never fires.
+
+`zmk_custom_setting_changed` is raised whenever a single setting is updated,
+saved, discarded, or reset (see `enum zmk_custom_setting_changed_kind`); its
+`setting`/`kind`/`source` fields identify what changed.
+
 ### Memory Notes
 
 A setting's registration descriptor (identity, type, permissions,

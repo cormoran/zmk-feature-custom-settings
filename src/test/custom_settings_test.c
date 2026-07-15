@@ -16,6 +16,7 @@
 #include <dt-bindings/zmk/hid_usage.h>
 #include <dt-bindings/zmk/hid_usage_pages.h>
 #include <zmk/behavior.h>
+#include <zmk/event_manager.h>
 #include <cormoran/zmk/custom_settings.h>
 #include <zmk/keymap.h>
 #if IS_ENABLED(CONFIG_ZMK_STUDIO_RPC)
@@ -159,6 +160,21 @@ static bool test_custom_settings_handle_request(const zmk_custom_CallRequest *re
 
 ZMK_RPC_CUSTOM_SUBSYSTEM(test, &test_custom_settings_meta, test_custom_settings_handle_request);
 #endif
+
+/* Count zmk_custom_settings_initialized firings to prove it is raised exactly
+ * once (at the boot settings_load), and never again despite the many
+ * settings_load_subtree reloads the discard-based tests below perform. */
+static uint32_t initialized_event_count;
+
+static int test_initialized_event_listener(const zmk_event_t *eh) {
+    if (as_zmk_custom_settings_initialized(eh) != NULL) {
+        initialized_event_count++;
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(custom_settings_test_initialized, test_initialized_event_listener);
+ZMK_SUBSCRIPTION(custom_settings_test_initialized, zmk_custom_settings_initialized);
 
 int test_bytes_rpc_reverse(const struct zmk_custom_setting *setting, const uint8_t *src,
                            size_t src_size, uint8_t *dest, size_t *dest_size,
@@ -2726,6 +2742,20 @@ static int test_keyspace_pool_overcommit(void) {
     return 0;
 }
 
+/* Runs after every settings_load / discard-driven settings_load_subtree above:
+ * zmk_custom_settings_initialized must have fired exactly once, at the very
+ * first (boot) load, and not again on any of the later targeted reloads. */
+static int test_initialized_event(void) {
+    if (initialized_event_count != 1) {
+        LOG_ERR("Expected zmk_custom_settings_initialized to fire exactly once, got %u",
+                initialized_event_count);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_initialized_event count=%u", initialized_event_count);
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2823,6 +2853,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_keyspace_pool_overcommit();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_initialized_event();
     if (ret < 0) {
         return ret;
     }

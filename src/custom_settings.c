@@ -27,6 +27,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 ZMK_EVENT_IMPL(zmk_custom_setting_changed);
+ZMK_EVENT_IMPL(zmk_custom_settings_initialized);
 
 K_MUTEX_DEFINE(custom_settings_lock);
 
@@ -2052,8 +2053,31 @@ static int custom_settings_handle_set(const char *name, size_t len, settings_rea
     return ret;
 }
 
+/* Raise the one-shot zmk_custom_settings_initialized event the first time the
+ * "custom_settings" subtree finishes a settings_load pass. settings_commit for
+ * this subtree runs at the end of every settings_load()/settings_load_subtree()
+ * covering it: the boot load (where every persisted value has just been applied
+ * by custom_settings_handle_set), and each later reload that
+ * zmk_custom_setting_discard triggers to re-read one setting from flash. The
+ * guard makes sure consumers get a single "settings are ready" signal at boot
+ * and that the post-boot discard reloads - which run while holding
+ * custom_settings_lock - never re-raise it (both avoiding a spurious event and
+ * keeping the raise off the locked discard path). The first commit is always
+ * the boot load: discard can only be reached from a Studio RPC, long after the
+ * boot settings_load has run. */
+static bool custom_settings_initialized;
+
+static int custom_settings_handle_commit(void) {
+    if (custom_settings_initialized) {
+        return 0;
+    }
+    custom_settings_initialized = true;
+    raise_zmk_custom_settings_initialized((struct zmk_custom_settings_initialized){0});
+    return 0;
+}
+
 SETTINGS_STATIC_HANDLER_DEFINE(custom_settings, SETTINGS_SUBTREE, NULL, custom_settings_handle_set,
-                               NULL, NULL);
+                               custom_settings_handle_commit, NULL);
 
 /* Reset one setting's mutable state to its just-registered, nothing-loaded-
  * yet state: defaults copied in, no persistent/dirty/temporary flags set.
