@@ -376,6 +376,30 @@ struct zmk_custom_setting_changed {
 
 ZMK_EVENT_DECLARE(zmk_custom_setting_changed);
 
+/*
+ * Raised exactly once per boot, after the settings subsystem has finished
+ * loading persisted values into every registered setting - i.e. once every
+ * setting holds its effective value (persisted value, or default when nothing
+ * was persisted) and is safe to read. Subscribe to this if a consumer needs to
+ * apply loaded setting values to hardware at startup: reading a setting from a
+ * plain SYS_INIT is racy because it may run before settings_load() has
+ * populated the persisted value, whereas this event fires strictly after that
+ * load completes.
+ *
+ * Fires from the settings-subtree commit that concludes the boot settings_load
+ * pass; the later, targeted settings_load_subtree() reloads that
+ * zmk_custom_setting_discard performs do NOT re-raise it. The event carries no
+ * payload today. Note that in a build without CONFIG_SETTINGS (so nothing ever
+ * calls settings_load()) this event never fires.
+ */
+struct zmk_custom_settings_initialized {
+    /* Reserved for future use; present because a ZMK event requires a data
+     * struct. */
+    uint8_t reserved;
+};
+
+ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
+
 #define ZMK_CUSTOM_SETTING_VALUE_INT32(_value)                                                     \
     ((struct zmk_custom_setting_value){.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,                \
                                        .int32_value = (_value)})
