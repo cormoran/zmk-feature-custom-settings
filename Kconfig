@@ -119,7 +119,7 @@ config ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE
 
 config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE
     int "List item notifications sent per low-priority work cycle"
-    default 4
+    default 1
     range 1 32
     help
       Number of list-item notifications raised back-to-back before the
@@ -131,7 +131,7 @@ config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_BATCH_SIZE
 
 config ZMK_CUSTOM_SETTINGS_LIST_NOTIFICATION_DELAY_MS
     int "Delay between custom settings list notification batches (ms)"
-    default 10
+    default 1
     range 1 1000
     help
       Delay between batches of list-item notifications. See
