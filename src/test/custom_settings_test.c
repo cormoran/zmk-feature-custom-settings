@@ -817,6 +817,78 @@ static int test_scalar_lifecycle(void) {
     return 0;
 }
 
+/* Persisting a value equal to the default must delete the stored record (so the
+ * setting falls back to the possibly-updated default on reboot) rather than
+ * keep a redundant copy. */
+static int test_save_default_deletes_record(void) {
+    const char *const record_name = "custom_settings/test/int_value";
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "int_value");
+    if (!setting) {
+        LOG_ERR("Test custom setting not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(setting);
+    if (ret < 0) {
+        return ret;
+    }
+    if (test_settings_has_record(record_name)) {
+        LOG_ERR("Reset custom setting should have no persisted record");
+        return -EINVAL;
+    }
+
+    /* A non-default value persists a real record. */
+    ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(30),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!test_settings_has_record(record_name)) {
+        LOG_ERR("Non-default persisted value should have a stored record");
+        return -EINVAL;
+    }
+
+    /* Persisting the default value (10) deletes that record instead of storing
+     * a redundant copy. */
+    ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(10),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        return ret;
+    }
+    if (test_settings_has_record(record_name)) {
+        LOG_ERR("Persisting the default value should have deleted the record");
+        return -EINVAL;
+    }
+    if (zmk_custom_setting_has_unsaved_value(setting)) {
+        LOG_ERR("Setting saved back to default unexpectedly has unsaved value");
+        return -EINVAL;
+    }
+
+    /* A reload with no record leaves the setting reading the default. */
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_int_value(setting, 10);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* Persisting the default again with no existing record is a clean no-op. */
+    ret = zmk_custom_setting_write(setting, &ZMK_CUSTOM_SETTING_VALUE_INT32(10),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        return ret;
+    }
+    if (test_settings_has_record(record_name)) {
+        LOG_ERR("Persisting the default with no record should not create one");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_save_default_deletes_record");
+    return 0;
+}
+
 static int test_array_lifecycle(void) {
     const struct zmk_custom_setting *array_setting =
         zmk_custom_setting_find_array_element("test", "array_value", 1);
@@ -2773,6 +2845,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_scalar_lifecycle();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_save_default_deletes_record();
     if (ret < 0) {
         return ret;
     }

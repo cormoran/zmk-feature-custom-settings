@@ -881,6 +881,42 @@ int value_to_storage(const struct zmk_custom_setting_value *value, const void **
     }
 }
 
+/* True when a non-array setting's current in-memory value is byte-for-byte the
+ * value it would fall back to with no persisted record (its runtime override or
+ * compile-time default). Caller holds custom_settings_lock. Keyspace slots have
+ * no compile-time default (their blob always carries a user key), so callers
+ * must exclude them before asking. */
+static bool value_matches_default_locked(const struct zmk_custom_setting *setting) {
+    const struct zmk_custom_setting_value *def = setting_default_value(setting);
+    if (!def) {
+        return false;
+    }
+
+    if (setting_uses_blob_store(setting)) {
+        const void *def_data;
+        size_t def_len;
+        if (def->type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+            def_data = def->string_value;
+            def_len = bounded_strlen(def->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+        } else {
+            def_data = def->bytes_value;
+            def_len = def->size;
+        }
+
+        if (setting->state->blob.size != def_len) {
+            return false;
+        }
+        if (def_len == 0) {
+            return true;
+        }
+        return setting->state->blob.data != NULL &&
+               memcmp(setting->state->blob.data, def_data, def_len) == 0;
+    }
+
+    const struct zmk_custom_setting_value *memory = memory_value_locked(setting);
+    return memory != NULL && value_equals(memory, def);
+}
+
 int save_setting_locked(const struct zmk_custom_setting *setting) {
     /* An array descriptor or any index view of it saves the whole array
      * (all active elements plus the "_size" marker) - see save_array_locked.
@@ -897,6 +933,25 @@ int save_setting_locked(const struct zmk_custom_setting *setting) {
     int ret = setting_storage_name(setting, name, sizeof(name));
     if (ret < 0) {
         return ret;
+    }
+
+    /* Persisting a value equal to the setting's default would just store a
+     * redundant copy that also masks any later change to that default. Delete
+     * the record instead so the setting transparently falls back to the
+     * (possibly updated) default on the next boot. Keyspace slots are excluded:
+     * they carry a user key in their blob and have no compile-time default, so
+     * "equals default" is meaningless for them (and deleting would drop the
+     * whole entry). */
+    if (!zmk_custom_setting_keyspace_of(setting) && value_matches_default_locked(setting)) {
+        if (setting_has_persistent_value(setting)) {
+            ret = settings_delete(name);
+            if (ret < 0) {
+                return ret;
+            }
+        }
+        set_setting_has_persistent_value(setting, false);
+        set_setting_dirty(setting, false);
+        return 0;
     }
 
     const void *data;
