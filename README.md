@@ -836,6 +836,13 @@ persisted value is not cached separately:
   stays a cheap flag check (it does not read flash) and reports "written
   since the last save/discard/reset", which also means writing back the
   already-saved value still reports unsaved until the next save/discard.
+- Persisting (`ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST` or
+  `zmk_custom_setting_save`) a value equal to the setting's default **deletes**
+  the stored record instead of writing a redundant copy. This keeps flash
+  clean and, more usefully, lets a setting that was saved at its old default
+  transparently follow a later change to that default: with no record present
+  the setting falls back to the current default on the next boot. Keyspace
+  entries are exempt (they carry a user key and have no compile-time default).
 
 ## Web UI
 
