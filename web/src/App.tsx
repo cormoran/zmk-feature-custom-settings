@@ -11,6 +11,10 @@ import {
   Request,
   Response,
   Setting,
+  SettingConfidentiality,
+  SettingConstraint,
+  SettingMeta,
+  SettingPermission,
   SettingRef,
   SettingScope,
   SettingScalarValue,
@@ -25,9 +29,11 @@ import {
   parseSettingsExportJson,
 } from "./settingsJson";
 import {
+  constraintKind,
   getActiveConstraint,
   isOptionsPossiblyTruncated,
   optionEntries,
+  scalarValueToEditorString,
   scalarValueToNumber,
   validateConstraintValue,
 } from "./constraints";
@@ -43,6 +49,11 @@ type SettingGroup = {
   key: string;
   setting: Setting;
   settings: Setting[];
+};
+
+type SubsystemGroup = {
+  customSubsystemIndex: number;
+  groups: SettingGroup[];
 };
 
 enum EditorValueType {
@@ -131,7 +142,7 @@ export function RPCTestSection() {
   const [arrayIndex, setArrayIndex] = useState(0);
   const [arraySize, setArraySize] = useState(1);
   const [editorSource, setEditorSource] = useState(SOURCE_LOCAL);
-  const [requireMeta, setRequireMeta] = useState(false);
+  const [requireMeta, setRequireMeta] = useState(true);
   const [requireDefault, setRequireDefault] = useState(false);
   const [writeMode, setWriteMode] = useState<SettingWriteMode>(
     SettingWriteMode.SETTING_WRITE_MODE_MEMORY
@@ -741,7 +752,11 @@ export function RPCTestSection() {
       setResponse(null);
 
       try {
-        const settings = await collectListSettings({ source: SOURCE_ALL });
+        const settings = await collectListSettings(
+          { source: SOURCE_ALL },
+          requireMeta,
+          requireDefault
+        );
         if (cancelled) {
           return;
         }
@@ -797,7 +812,7 @@ export function RPCTestSection() {
   const selectedSourceOptions = setting
     ? sourceOptionsForSetting(setting, listedSettings)
     : [];
-  const settingGroups = groupSettings(listedSettings);
+  const subsystemGroups = groupBySubsystem(groupSettings(listedSettings));
   const activeConstraint = getActiveConstraint(setting?.meta);
   const constraintError = validateConstraintValue(activeConstraint, value);
   const renderValueEditor = () => {
@@ -1236,65 +1251,105 @@ export function RPCTestSection() {
           <h3>Device Settings</h3>
           <span>{listedSettings.length} loaded</span>
         </div>
-        {listedSettings.length > 0 ? (
-          <div className="settings-table-wrap">
-            <table className="settings-table">
-              <thead>
-                <tr>
-                  <th>Setting</th>
-                  <th>Source</th>
-                  <th>Value</th>
-                  <th>Unsaved</th>
-                </tr>
-              </thead>
-              <tbody>
-                {settingGroups.map((group) => {
-                  const isSelected =
-                    setting !== null &&
-                    sameSettingIdentity(setting, group.setting);
-                  return (
-                    <Fragment key={group.key}>
-                      {group.settings.map((groupSetting, index) => (
-                        <tr
-                          className={isSelected ? "selected-setting-row" : ""}
-                          key={`${groupSetting.source}:${index}`}
-                        >
-                          {index === 0 && (
-                            <td rowSpan={group.settings.length}>
-                              <button
-                                className="link-button"
-                                type="button"
-                                onClick={() =>
-                                  selectSettingForEdit(group.setting)
-                                }
-                              >
-                                {settingDisplayName(
-                                  group.setting,
-                                  subsystemIdentifierForIndex
-                                )}
-                              </button>
-                            </td>
+        {subsystemGroups.length > 0 ? (
+          subsystemGroups.map((subsystemGroup) => (
+            <div
+              className="settings-subsystem"
+              key={subsystemGroup.customSubsystemIndex}
+            >
+              <h4 className="settings-subsystem-title">
+                {subsystemIdentifierForIndex(
+                  subsystemGroup.customSubsystemIndex
+                ) ?? subsystemGroup.customSubsystemIndex}
+              </h4>
+              <div className="settings-table-wrap">
+                <table className="settings-table">
+                  <thead>
+                    <tr>
+                      <th>Setting</th>
+                      <th>Confidentiality</th>
+                      <th>Read</th>
+                      <th>Write</th>
+                      <th>Constraints</th>
+                      <th>Source</th>
+                      <th>Value</th>
+                      <th>Unsaved</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {subsystemGroup.groups.map((group) => {
+                      const isSelected =
+                        setting !== null &&
+                        sameSettingIdentity(setting, group.setting);
+                      const meta = group.setting.meta;
+                      return (
+                        <Fragment key={group.key}>
+                          {group.settings.map((groupSetting, index) => (
+                            <tr
+                              className={
+                                isSelected ? "selected-setting-row" : ""
+                              }
+                              key={`${groupSetting.source}:${index}`}
+                            >
+                              {index === 0 && (
+                                <>
+                                  <td rowSpan={group.settings.length}>
+                                    <button
+                                      className="link-button"
+                                      type="button"
+                                      onClick={() =>
+                                        selectSettingForEdit(group.setting)
+                                      }
+                                    >
+                                      {settingKeyLabel(group.setting)}
+                                    </button>
+                                  </td>
+                                  <td rowSpan={group.settings.length}>
+                                    {meta
+                                      ? formatConfidentiality(
+                                          meta.confidentiality
+                                        )
+                                      : "—"}
+                                  </td>
+                                  <td rowSpan={group.settings.length}>
+                                    {meta
+                                      ? formatPermission(meta.readPermission)
+                                      : "—"}
+                                  </td>
+                                  <td rowSpan={group.settings.length}>
+                                    {meta
+                                      ? formatPermission(meta.writePermission)
+                                      : "—"}
+                                  </td>
+                                  <td rowSpan={group.settings.length}>
+                                    {formatConstraints(meta)}
+                                  </td>
+                                </>
+                              )}
+                              <td>{formatSource(groupSetting.source)}</td>
+                              <td>
+                                {groupSetting.value
+                                  ? formatValue(groupSetting.value)
+                                  : "(hidden)"}
+                              </td>
+                              <td>
+                                {groupSetting.hasUnsavedValue ? "yes" : "no"}
+                              </td>
+                            </tr>
+                          ))}
+                          {isSelected && (
+                            <tr className="settings-editor-row">
+                              <td colSpan={8}>{updateValuePanel}</td>
+                            </tr>
                           )}
-                          <td>{formatSource(groupSetting.source)}</td>
-                          <td>
-                            {groupSetting.value
-                              ? formatValue(groupSetting.value)
-                              : "(hidden)"}
-                          </td>
-                          <td>{groupSetting.hasUnsavedValue ? "yes" : "no"}</td>
-                        </tr>
-                      ))}
-                      {isSelected && (
-                        <tr className="settings-editor-row">
-                          <td colSpan={4}>{updateValuePanel}</td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))
         ) : (
           <p className="empty-message">
             Settings load automatically when the device connects. Use List to
@@ -1498,6 +1553,31 @@ function groupSettings(settings: Setting[]): SettingGroup[] {
   });
 }
 
+/**
+ * Buckets already-grouped settings by their custom subsystem so each subsystem
+ * renders its own narrower table. Insertion order is preserved.
+ */
+function groupBySubsystem(groups: SettingGroup[]): SubsystemGroup[] {
+  const bySubsystem = new Map<number, SettingGroup[]>();
+
+  for (const group of groups) {
+    const index = group.setting.customSubsystemIndex;
+    const existing = bySubsystem.get(index);
+    if (existing) {
+      existing.push(group);
+    } else {
+      bySubsystem.set(index, [group]);
+    }
+  }
+
+  return Array.from(bySubsystem.entries()).map(
+    ([customSubsystemIndex, subsystemGroups]) => ({
+      customSubsystemIndex,
+      groups: subsystemGroups,
+    })
+  );
+}
+
 function sortSettingsBySource(settings: Setting[]): Setting[] {
   return [...settings].sort(
     (a, b) => sourceSortValue(a.source) - sourceSortValue(b.source)
@@ -1533,6 +1613,69 @@ function sameSettingIdentity(a: Setting, b: Setting): boolean {
     (a.value?.arrayValue?.index ?? undefined) ===
       (b.value?.arrayValue?.index ?? undefined)
   );
+}
+
+/**
+ * The setting's key plus an array suffix, without the subsystem prefix. Used in
+ * the per-subsystem tables where the subsystem already appears as the heading.
+ */
+function settingKeyLabel(setting: Setting): string {
+  const arraySuffix =
+    setting.value?.arrayValue !== undefined
+      ? `[${setting.value.arrayValue.index}]`
+      : "";
+  return `${setting.key}${arraySuffix}`;
+}
+
+function formatConfidentiality(value: SettingConfidentiality): string {
+  switch (value) {
+    case SettingConfidentiality.SETTING_CONFIDENTIALITY_DEVICE_PRIVATE:
+      return "device-private";
+    case SettingConfidentiality.SETTING_CONFIDENTIALITY_RPC_PERSONAL:
+      return "personal";
+    case SettingConfidentiality.SETTING_CONFIDENTIALITY_RPC_PUBLIC:
+      return "public";
+    default:
+      return "?";
+  }
+}
+
+function formatPermission(value: SettingPermission): string {
+  return value === SettingPermission.SETTING_PERMISSION_SECURE
+    ? "secure"
+    : "unsecure";
+}
+
+function formatConstraints(meta: SettingMeta | undefined): string {
+  if (!meta || meta.constraints.length === 0) {
+    return "—";
+  }
+  const parts = meta.constraints.map(formatConstraint).filter(Boolean);
+  return parts.length > 0 ? parts.join(", ") : "—";
+}
+
+function formatConstraint(constraint: SettingConstraint): string {
+  switch (constraintKind(constraint)) {
+    case "range": {
+      const min = constraint.range?.min
+        ? scalarValueToEditorString(constraint.range.min)
+        : "?";
+      const max = constraint.range?.max
+        ? scalarValueToEditorString(constraint.range.max)
+        : "?";
+      return `range ${min}–${max}`;
+    }
+    case "options":
+      return `options(${constraint.options?.values.length ?? 0})`;
+    case "hidUsage":
+      return `hid usage p${constraint.hidUsage?.usagePage ?? 0}`;
+    case "layerId":
+      return "layer";
+    case "behaviorId":
+      return "behavior";
+    default:
+      return "";
+  }
 }
 
 function settingDisplayName(
