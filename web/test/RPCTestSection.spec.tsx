@@ -17,7 +17,9 @@ import {
   Request,
   Response,
   Setting,
+  SettingConfidentiality,
   SettingNotificationKind,
+  SettingPermission,
 } from "../src/proto/cormoran/zmk/custom_settings/custom_settings";
 
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
@@ -95,7 +97,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/int_value" },
+        { name: "int_value" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -153,7 +155,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButtons = await screen.findAllByRole(
         "button",
-        { name: "test/int_value" },
+        { name: "int_value" },
         { timeout: 2000 }
       );
       expect(settingButtons).toHaveLength(1);
@@ -179,6 +181,52 @@ describe("RPCTestSection Component", () => {
       expect(within(table).getByText("42")).toBeInTheDocument();
       expect(within(table).getByText("77")).toBeInTheDocument();
       expect(within(table).getByText("yes")).toBeInTheDocument();
+    });
+
+    it("should render metadata columns and split tables per subsystem", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER, "test"],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <RPCTestSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => expect(mockZMKApp.onNotification).toHaveBeenCalled());
+      emitListItem(mockZMKApp, {
+        ...baseSetting,
+        customSubsystemIndex: 1,
+        key: "brightness",
+        meta: {
+          confidentiality:
+            SettingConfidentiality.SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+          readPermission: SettingPermission.SETTING_PERMISSION_UNSECURE,
+          writePermission: SettingPermission.SETTING_PERMISSION_SECURE,
+          constraints: [
+            { range: { min: { int32Value: 0 }, max: { int32Value: 100 } } },
+          ],
+        },
+      });
+
+      // Setting key is shown without the subsystem prefix; the subsystem name
+      // is the table heading instead.
+      await screen.findByRole("button", { name: "brightness" });
+      expect(
+        screen.getByRole("heading", { level: 4, name: "test" })
+      ).toBeInTheDocument();
+
+      const table = screen.getByRole("table");
+      for (const name of ["Confidentiality", "Read", "Write", "Constraints"]) {
+        expect(
+          within(table).getByRole("columnheader", { name })
+        ).toBeInTheDocument();
+      }
+      expect(within(table).getByText("public")).toBeInTheDocument();
+      expect(within(table).getByText("unsecure")).toBeInTheDocument();
+      expect(within(table).getByText("secure")).toBeInTheDocument();
+      expect(within(table).getByText("range 0–100")).toBeInTheDocument();
     });
 
     it("should show array commands for clicked array setting", async () => {
@@ -207,7 +255,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/array_value[0]" },
+        { name: "array_value[0]" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -241,7 +289,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/int_value" },
+        { name: "int_value" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -277,7 +325,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/int_value" },
+        { name: "int_value" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -370,7 +418,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/macro/my-macro-1" },
+        { name: "macro/my-macro-1" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -418,7 +466,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/mode" },
+        { name: "mode" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -476,7 +524,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/mode" },
+        { name: "mode" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);
@@ -516,7 +564,7 @@ describe("RPCTestSection Component", () => {
 
       const settingButton = await screen.findByRole(
         "button",
-        { name: "test/level" },
+        { name: "level" },
         { timeout: 2000 }
       );
       await userEvent.click(settingButton);

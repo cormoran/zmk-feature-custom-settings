@@ -127,6 +127,18 @@
   color: #555;
 }
 
+.settings-subsystem {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.settings-subsystem-title {
+  margin: 0.5rem 0 0;
+  font-size: 0.95rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #333;
+}
+
 .settings-table-wrap {
   overflow-x: auto;
   border: 1px solid #ddd;
