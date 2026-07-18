@@ -23,6 +23,7 @@ message RelaySettingScope {
 message RelayListSettingsRequest {
     RelaySettingScope scope = 1;
     bool require_meta = 2;
+    bool require_default = 3;
 }
 
 message RelayWriteSettingRequest {

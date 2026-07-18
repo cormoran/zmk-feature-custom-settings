@@ -367,6 +367,21 @@ that subsystem's index from ZMK Studio and sends the index in setting requests.
 The custom Studio subsystem identifier for this module is
 `cormoran_custom_settings`.
 
+#### Requesting Default Values
+
+`GetSettingRequest` and `ListSettingsRequest` each accept a `require_default`
+flag (alongside the existing `require_meta`). When set, the returned `Setting`
+includes a `default_value` field carrying the setting's default — its runtime
+override if one was installed, otherwise its compile-time default. To keep the
+common case cheap, `default_value` is populated **only when the current value
+differs from the default**, so a client can drive a "reset to default"
+affordance without a second round trip and without paying for a redundant copy
+when nothing has changed. It is never present for array or keyspace settings
+(which have no compile-time default). Over the split relay, a `BYTES`/`STRING`
+default is subject to the same envelope-size limit as the value itself and may
+be omitted if the notification would not otherwise fit. The web UI exposes this
+as an "Include Default" toggle next to "Include Metadata".
+
 ### Large Values (Per-Setting max_size)
 
 By default every setting value is capped at

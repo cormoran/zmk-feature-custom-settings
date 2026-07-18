@@ -64,4 +64,5 @@ PASS: custom_settings_large_chunked_rpc size=200
 PASS: custom_settings_chunked_rpc rpc=030201->090807 internal=070809
 PASS: custom_settings_list_keyspace_user_key key=macro/list-test value=42
 PASS: custom_settings_list_array_expands_to_elements count=3
+PASS: custom_settings_default_value int=10 string=hi
 PASS: custom_settings_rpc_bytes_handler rpc=030201 internal=070809
