@@ -1018,6 +1018,43 @@ int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
     return 0;
 }
 
+int zmk_custom_setting_read_default(const struct zmk_custom_setting *setting,
+                                    struct zmk_custom_setting_value *value) {
+    if (!setting || !value) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&custom_settings_lock, K_FOREVER);
+    const struct zmk_custom_setting_value *def = setting_default_value(setting);
+    if (!def) {
+        k_mutex_unlock(&custom_settings_lock);
+        return -ENOENT;
+    }
+    copy_value(value, def);
+    k_mutex_unlock(&custom_settings_lock);
+
+    return 0;
+}
+
+bool zmk_custom_setting_matches_default(const struct zmk_custom_setting *setting) {
+    if (!setting) {
+        return false;
+    }
+
+    /* value_matches_default_locked has no meaning for keyspace slots (no
+     * compile-time default) or arrays (compared per whole array elsewhere), so
+     * exclude them before asking - see its own contract comment. */
+    if (zmk_custom_setting_keyspace_of(setting) || zmk_custom_setting_is_array(setting)) {
+        return false;
+    }
+
+    k_mutex_lock(&custom_settings_lock, K_FOREVER);
+    bool matches = value_matches_default_locked(setting);
+    k_mutex_unlock(&custom_settings_lock);
+
+    return matches;
+}
+
 int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *key,
                                    struct zmk_custom_setting_value *value) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find(custom_subsystem_id, key);

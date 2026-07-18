@@ -132,6 +132,7 @@ export function RPCTestSection() {
   const [arraySize, setArraySize] = useState(1);
   const [editorSource, setEditorSource] = useState(SOURCE_LOCAL);
   const [requireMeta, setRequireMeta] = useState(false);
+  const [requireDefault, setRequireDefault] = useState(false);
   const [writeMode, setWriteMode] = useState<SettingWriteMode>(
     SettingWriteMode.SETTING_WRITE_MODE_MEMORY
   );
@@ -253,13 +254,15 @@ export function RPCTestSection() {
     requestScope: SettingScope = {
       source: SOURCE_ALL,
     },
-    includeMeta = false
+    includeMeta = false,
+    includeDefault = false
   ): Promise<Setting[]> => {
     if (!zmkApp || !subsystem) return [];
 
     console.debug("[custom-settings] list start", {
       scope: scopeSummary(requestScope),
       requireMeta: includeMeta,
+      requireDefault: includeDefault,
     });
     const collected: Setting[] = [];
     const waitForQuiet = scopeTargetsAll(requestScope);
@@ -350,6 +353,7 @@ export function RPCTestSection() {
             listSettings: {
               scope: requestScope,
               requireMeta: includeMeta,
+              requireDefault: includeDefault,
             },
           })
         ),
@@ -463,7 +467,9 @@ export function RPCTestSection() {
 
     try {
       const resp = await callCustomRequest(
-        Request.create({ getSetting: { setting: settingRef, requireMeta } })
+        Request.create({
+          getSetting: { setting: settingRef, requireMeta, requireDefault },
+        })
       );
       if (resp.error) {
         setResponse(`Error: ${resp.error.message}`);
@@ -502,7 +508,11 @@ export function RPCTestSection() {
         );
       }
 
-      const settings = await collectListSettings(listScope, requireMeta);
+      const settings = await collectListSettings(
+        listScope,
+        requireMeta,
+        requireDefault
+      );
       setListedSettings(settings);
       setResponse(`Listed ${settings.length} settings`);
     } catch (error) {
@@ -1116,6 +1126,14 @@ export function RPCTestSection() {
             checked={requireMeta}
             onChange={(e) => setRequireMeta(e.target.checked)}
           />
+
+          <label htmlFor="require-default-input">Include Default</label>
+          <input
+            id="require-default-input"
+            type="checkbox"
+            checked={requireDefault}
+            onChange={(e) => setRequireDefault(e.target.checked)}
+          />
         </div>
 
         <div className="toolbar">
@@ -1333,6 +1351,12 @@ export function RPCTestSection() {
             <dt>Unsaved</dt>
             <dd>{setting.hasUnsavedValue ? "yes" : "no"}</dd>
           </div>
+          {setting.defaultValue && (
+            <div>
+              <dt>Default</dt>
+              <dd>{formatValue(setting.defaultValue)}</dd>
+            </div>
+          )}
         </dl>
       )}
 
@@ -1347,7 +1371,10 @@ export function RPCTestSection() {
 
 function formatSetting(setting: Setting): string {
   const value = setting.value ? formatValue(setting.value) : "(hidden)";
-  return `${setting.customSubsystemIndex}/${setting.key} = ${value}`;
+  const suffix = setting.defaultValue
+    ? ` (default ${formatValue(setting.defaultValue)})`
+    : "";
+  return `${setting.customSubsystemIndex}/${setting.key} = ${value}${suffix}`;
 }
 
 function formatValue(value: SettingValue): string {
@@ -1539,6 +1566,7 @@ function requestSummary(request: Request): Record<string, unknown> {
       kind: "listSettings",
       scope: scopeSummary(request.listSettings.scope),
       requireMeta: request.listSettings.requireMeta,
+      requireDefault: request.listSettings.requireDefault,
     };
   }
   if (request.getSetting) {
@@ -1546,6 +1574,7 @@ function requestSummary(request: Request): Record<string, unknown> {
       kind: "getSetting",
       setting: refSummary(request.getSetting.setting),
       requireMeta: request.getSetting.requireMeta,
+      requireDefault: request.getSetting.requireDefault,
     };
   }
   if (request.writeSetting) {
@@ -1656,6 +1685,8 @@ function settingSummary(setting: Setting | undefined): Record<string, unknown> {
     hasMeta: setting.meta !== undefined,
     hasValue: setting.value !== undefined,
     valueKind: valueKind(setting.value),
+    hasDefaultValue: setting.defaultValue !== undefined,
+    defaultValueKind: valueKind(setting.defaultValue),
   };
 }
 

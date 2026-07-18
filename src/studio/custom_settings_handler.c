@@ -372,6 +372,16 @@ static bool request_arm_wire_precallback(pb_istream_t *stream, const pb_field_t 
     return true;
 }
 
+/* A relayed Setting.default_value BYTES/STRING payload needs its own decode
+ * scratch, distinct from the value scratch, since a single Setting can carry
+ * both a BYTES/STRING value and a BYTES/STRING default at once. A default always
+ * fits the fixed carrier, so this is sized to VALUE_MAX_SIZE. */
+static uint8_t relay_notification_default_decode_buf[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+static struct bounded_decode_scratch relay_notification_default_decode_scratch = {
+    .buf = relay_notification_default_decode_buf,
+    .capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,
+};
+
 /* Same for Notification.notification_type's setting arm (a relayed
  * peripheral notification decoded on the central, see
  * relayed_notification_to_public). */
@@ -382,6 +392,12 @@ static bool notification_arm_wire_precallback(pb_istream_t *stream, const pb_fie
     if (field->tag == cormoran_zmk_custom_settings_Notification_setting_tag) {
         cormoran_zmk_custom_settings_SettingNotification *notification = field->pData;
         wire_setting_value_decode(&notification->setting.value, scratch);
+        /* The optional default_value carries its own BYTES/STRING payload and
+         * needs a separate scratch (both can be present at once). The value
+         * scratch arrives via *arg; the default scratch is a file static
+         * referenced directly. */
+        wire_setting_value_decode(&notification->setting.default_value,
+                                  &relay_notification_default_decode_scratch);
     }
     return true;
 }
@@ -476,6 +492,37 @@ static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *
         return false;
     }
     return ctx.ok;
+}
+
+/* Streams a BYTES/STRING setting's DEFAULT value (not its current value) into a
+ * SettingValue bytes_value/string_value callback field. A default always fits
+ * the fixed carrier (it is a registration-time value, never pool-backed), so no
+ * large-store streaming path is needed here - unlike encode_setting_scalar_value
+ * for the current value. */
+static bool encode_setting_default_value(pb_ostream_t *stream, const pb_field_t *field,
+                                         void *const *arg) {
+    const struct zmk_custom_setting *setting = *arg;
+    if (!setting) {
+        return true;
+    }
+
+    struct zmk_custom_setting_value value;
+    struct zmk_custom_setting_value rpc_value;
+    int ret = zmk_custom_setting_read_default(setting, &value);
+    if (ret < 0) {
+        return false;
+    }
+    ret = zmk_custom_setting_serialize_rpc_value(setting, &value, &rpc_value);
+    if (ret < 0) {
+        return false;
+    }
+    const uint8_t *data = rpc_value.type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES
+                              ? rpc_value.bytes_value
+                              : (const uint8_t *)rpc_value.string_value;
+    if (!pb_encode_tag_for_field(stream, field)) {
+        return false;
+    }
+    return pb_encode_string(stream, data, rpc_value.size);
 }
 
 static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScalarValue *src,
@@ -800,16 +847,46 @@ static int setting_value_to_proto(const struct zmk_custom_setting *setting,
     return value_to_proto(setting, &value, dest);
 }
 
+/* Fills Setting.default_value with the setting's default. Mirrors
+ * setting_value_to_proto: BYTES/STRING defer to a pb_encode-time callback (the
+ * oneof arm depends only on the fixed presented type), scalars are read and
+ * inlined now. Callers must have already excluded arrays and keyspace slots
+ * (they have no compile-time default). */
+static int setting_default_to_proto(const struct zmk_custom_setting *setting,
+                                    cormoran_zmk_custom_settings_SettingValue *dest) {
+    *dest = (cormoran_zmk_custom_settings_SettingValue)
+        cormoran_zmk_custom_settings_SettingValue_init_zero;
+
+    enum zmk_custom_setting_value_type presented_type = presented_value_type(setting);
+    if (presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
+        presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+        dest->which_value_type = presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES
+                                     ? cormoran_zmk_custom_settings_SettingValue_bytes_value_tag
+                                     : cormoran_zmk_custom_settings_SettingValue_string_value_tag;
+        dest->value_type.bytes_value.funcs.encode = encode_setting_default_value;
+        dest->value_type.bytes_value.arg = (void *)setting;
+        return 0;
+    }
+
+    struct zmk_custom_setting_value value;
+    int ret = zmk_custom_setting_read_default(setting, &value);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return value_to_proto(setting, &value, dest);
+}
+
 static int setting_to_proto(const struct zmk_custom_setting *setting,
                             cormoran_zmk_custom_settings_Setting *dest, bool include_value,
-                            bool include_meta, uint32_t source) {
+                            bool include_meta, bool include_default, uint32_t source) {
     *dest = (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
 
     int ret;
     LOG_DBG("Custom settings proto start: subsystem=%s key=%s include_value=%d include_meta=%d "
-            "source=%u",
+            "include_default=%d source=%u",
             setting->custom_subsystem_id, zmk_custom_setting_public_key(setting), include_value,
-            include_meta, source);
+            include_meta, include_default, source);
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
     uint32_t custom_subsystem_index = 0;
     ret = custom_subsystem_index_for_identifier(setting->custom_subsystem_id,
@@ -863,6 +940,29 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
         LOG_DBG("Custom settings proto value ready: subsystem=%s key=%s value_type=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
                 (uint32_t)dest->value.which_value_type);
+    }
+
+    /* Expose the default only when the client asked for it, the value itself is
+     * exposable (same confidentiality/lock gate), and the current value differs
+     * from the default. Arrays and keyspace slots have no compile-time default.
+     * The read_default probe simply confirms a default exists (returns -ENOENT
+     * otherwise); the actual bytes are read/streamed in setting_default_to_proto
+     * / encode_setting_default_value. */
+    struct zmk_custom_setting_value default_probe;
+    if (include_default && include_value &&
+        setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE &&
+        !zmk_custom_setting_is_array(setting) && !zmk_custom_setting_keyspace_of(setting) &&
+        zmk_custom_setting_read_default(setting, &default_probe) == 0 &&
+        !zmk_custom_setting_matches_default(setting)) {
+        dest->has_default_value = true;
+        ret = setting_default_to_proto(setting, &dest->default_value);
+        if (ret < 0) {
+            dest->has_default_value = false;
+            return ret;
+        }
+        LOG_DBG("Custom settings proto default ready: subsystem=%s key=%s value_type=%u",
+                setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
+                (uint32_t)dest->default_value.which_value_type);
     }
 
     LOG_DBG("Custom settings proto complete: subsystem=%s key=%s", setting->custom_subsystem_id,
@@ -996,6 +1096,13 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
         retarget_value_to_encode_scratch(&notification->notification_type.setting.setting.value,
                                          &relay_notification_value_decode_scratch);
     }
+    /* Same retarget for the optional default_value, whose BYTES/STRING arm was
+     * decoded into its own scratch above. */
+    if (notification->notification_type.setting.setting.has_default_value) {
+        retarget_value_to_encode_scratch(
+            &notification->notification_type.setting.setting.default_value,
+            &relay_notification_default_decode_scratch);
+    }
 
     if (relay->has_custom_subsystem_id) {
         uint32_t custom_subsystem_index = 0;
@@ -1090,7 +1197,8 @@ static uint32_t notify_submit_count_for_test;
 
 static int raise_setting_notification(const struct zmk_custom_setting *setting,
                                       cormoran_zmk_custom_settings_SettingNotificationKind kind,
-                                      bool include_value, bool include_meta, uint32_t source) {
+                                      bool include_value, bool include_meta, bool include_default,
+                                      uint32_t source) {
     k_mutex_lock(&notification_buffer_lock, K_FOREVER);
 
     cormoran_zmk_custom_settings_Notification *notification = &notification_buffer;
@@ -1100,7 +1208,7 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     notification->notification_type.setting.kind = kind;
     notification->notification_type.setting.has_setting = true;
     int ret = setting_to_proto(setting, &notification->notification_type.setting.setting,
-                               include_value, include_meta, source);
+                               include_value, include_meta, include_default, source);
     if (ret < 0) {
         k_mutex_unlock(&notification_buffer_lock);
         return ret;
@@ -1124,14 +1232,16 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     pb_ostream_t stream =
         pb_ostream_from_buffer(relay_notification->payload, sizeof(relay_notification->payload));
     bool encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
-    if (!encoded && relay->notification.notification_type.setting.setting.has_value) {
+    if (!encoded && (relay->notification.notification_type.setting.setting.has_value ||
+                     relay->notification.notification_type.setting.setting.has_default_value)) {
         /* Large values are not relayed: unlike the direct GetSetting/list
          * path, which streams a value of any size, the relay envelope is a
          * fixed CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN buffer. Retry once with
-         * the value omitted so the rest of the notification (has_unsaved_value,
-         * kind, etc.) still reaches the central instead of losing the whole
-         * notification. */
+         * the value (and the optional default value) omitted so the rest of the
+         * notification (has_unsaved_value, kind, etc.) still reaches the central
+         * instead of losing the whole notification. */
         relay->notification.notification_type.setting.setting.has_value = false;
+        relay->notification.notification_type.setting.setting.has_default_value = false;
         stream = pb_ostream_from_buffer(relay_notification->payload,
                                         sizeof(relay_notification->payload));
         encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
@@ -1270,6 +1380,7 @@ static struct zmk_custom_settings_setting_scope list_settings_scope;
 static size_t list_settings_next_index;
 static bool list_settings_active;
 static bool list_settings_include_meta;
+static bool list_settings_include_default;
 
 static int schedule_list_settings_work(k_timeout_t delay) {
     return k_work_schedule_for_queue(zmk_workqueue_lowprio_work_q(), &list_settings_work, delay);
@@ -1280,6 +1391,7 @@ struct list_send_context {
     size_t next_index;
     size_t sent;
     bool include_meta;
+    bool include_default;
 };
 
 static bool list_send_visitor(const struct zmk_custom_setting *item, void *user_data) {
@@ -1302,7 +1414,8 @@ static bool list_send_visitor(const struct zmk_custom_setting *item, void *user_
     int ret = raise_setting_notification(
         item,
         cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_LIST_ITEM,
-        can_include_value(item), ctx->include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+        can_include_value(item), ctx->include_meta, ctx->include_default,
+        ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         LOG_WRN("Failed to raise custom settings list notification: %d", ret);
     }
@@ -1328,11 +1441,13 @@ static void list_settings_work_handler(struct k_work *work) {
     struct zmk_custom_settings_setting_scope scope = list_settings_scope;
     size_t next_index = list_settings_next_index;
     bool include_meta = list_settings_include_meta;
+    bool include_default = list_settings_include_default;
     k_mutex_unlock(&list_settings_lock);
 
     struct list_send_context ctx = {
         .next_index = next_index,
         .include_meta = include_meta,
+        .include_default = include_default,
     };
     if (!for_each_list_item(&scope, list_send_visitor, &ctx)) {
         /* Stopped early because a batch was sent and the next work cycle
@@ -1347,7 +1462,7 @@ static void list_settings_work_handler(struct k_work *work) {
 }
 
 static void schedule_list_settings(const struct zmk_custom_settings_setting_scope *scope,
-                                   bool include_meta) {
+                                   bool include_meta, bool include_default) {
     k_work_cancel_delayable(&list_settings_work);
 
     k_mutex_lock(&list_settings_lock, K_FOREVER);
@@ -1355,14 +1470,16 @@ static void schedule_list_settings(const struct zmk_custom_settings_setting_scop
     list_settings_next_index = 0;
     list_settings_active = true;
     list_settings_include_meta = include_meta;
+    list_settings_include_default = include_default;
     k_mutex_unlock(&list_settings_lock);
 
-    LOG_INF(
-        "Custom settings list scheduled: subsystem=%s key=%s prefix=%s source=%u include_meta=%d",
-        setting_scope_custom_subsystem_id(scope) ? setting_scope_custom_subsystem_id(scope) : "",
-        setting_scope_key(scope) ? setting_scope_key(scope) : "",
-        setting_scope_key_prefix(scope) ? setting_scope_key_prefix(scope) : "",
-        setting_scope_source(scope), include_meta);
+    LOG_INF("Custom settings list scheduled: subsystem=%s key=%s prefix=%s source=%u "
+            "include_meta=%d include_default=%d",
+            setting_scope_custom_subsystem_id(scope) ? setting_scope_custom_subsystem_id(scope)
+                                                     : "",
+            setting_scope_key(scope) ? setting_scope_key(scope) : "",
+            setting_scope_key_prefix(scope) ? setting_scope_key_prefix(scope) : "",
+            setting_scope_source(scope), include_meta, include_default);
     schedule_list_settings_work(LIST_SETTINGS_NOTIFICATION_DELAY);
 }
 
@@ -1425,7 +1542,7 @@ static int setting_scope_to_private(const cormoran_zmk_custom_settings_SettingSc
 #endif
 
 static int handle_private_list_settings(const struct zmk_custom_settings_setting_scope *scope,
-                                        bool require_meta,
+                                        bool require_meta, bool require_default,
                                         cormoran_zmk_custom_settings_Response *resp) {
     uint32_t count = 0;
 
@@ -1437,17 +1554,17 @@ static int handle_private_list_settings(const struct zmk_custom_settings_setting
     for_each_list_item(scope, list_count_visitor, &count);
 
     if (count > 0) {
-        schedule_list_settings(scope, require_meta);
+        schedule_list_settings(scope, require_meta, require_default);
     }
 
     LOG_INF("Custom settings list request accepted: count=%u subsystem=%s key=%s prefix=%s "
-            "source=%u require_meta=%d",
+            "source=%u require_meta=%d require_default=%d",
             count,
             setting_scope_custom_subsystem_id(scope) ? setting_scope_custom_subsystem_id(scope)
                                                      : "",
             setting_scope_key(scope) ? setting_scope_key(scope) : "",
             setting_scope_key_prefix(scope) ? setting_scope_key_prefix(scope) : "",
-            setting_scope_source(scope), require_meta);
+            setting_scope_source(scope), require_meta, require_default);
     set_status(resp, count, "List started");
     return 0;
 }
@@ -1461,7 +1578,7 @@ static int handle_list_settings(const cormoran_zmk_custom_settings_ListSettingsR
         return ret;
     }
 
-    return handle_private_list_settings(&scope, req->require_meta, resp);
+    return handle_private_list_settings(&scope, req->require_meta, req->require_default, resp);
 #else
     return -ENOTSUP;
 #endif
@@ -1469,7 +1586,7 @@ static int handle_list_settings(const cormoran_zmk_custom_settings_ListSettingsR
 
 static int handle_private_get_setting(const struct zmk_custom_settings_setting_ref *ref,
                                       cormoran_zmk_custom_settings_Response *resp,
-                                      bool include_meta) {
+                                      bool include_meta, bool include_default) {
     if (!ref->has_key) {
         return -EINVAL;
     }
@@ -1493,7 +1610,7 @@ static int handle_private_get_setting(const struct zmk_custom_settings_setting_r
         cormoran_zmk_custom_settings_GetSettingResponse_init_zero;
     resp->response_type.get_setting.has_setting = true;
     int ret = setting_to_proto(setting, &resp->response_type.get_setting.setting, true,
-                               include_meta, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+                               include_meta, include_default, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         resp->which_response_type = 0;
         return ret;
@@ -1511,7 +1628,7 @@ static int handle_get_setting(const cormoran_zmk_custom_settings_GetSettingReque
         return ret;
     }
 
-    return handle_private_get_setting(&private_ref, resp, req->require_meta);
+    return handle_private_get_setting(&private_ref, resp, req->require_meta, req->require_default);
 #else
     return -ENOTSUP;
 #endif
@@ -1876,7 +1993,7 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
         raise_setting_notification(
             created,
             cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED,
-            can_include_value(created), false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+            can_include_value(created), false, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     }
 
     set_status(resp, 1, "Setting created");
@@ -1952,7 +2069,7 @@ static int handle_private_delete_setting(const struct zmk_custom_settings_settin
         raise_setting_notification(
             setting,
             cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_DISCARDED,
-            false, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+            false, false, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     }
 
     int ret = zmk_custom_setting_keyspace_delete(keyspace, setting_ref_key(ref));
@@ -2399,6 +2516,8 @@ static int request_to_relay_request(const cormoran_zmk_custom_settings_Request *
         }
         relay.request_type.list_settings.require_meta =
             src->request_type.list_settings.require_meta;
+        relay.request_type.list_settings.require_default =
+            src->request_type.list_settings.require_default;
         break;
     case cormoran_zmk_custom_settings_Request_write_setting_tag:
         relay.which_request_type = cormoran_zmk_custom_settings_RelayRequest_write_setting_tag;
@@ -2682,7 +2801,8 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         struct zmk_custom_settings_setting_scope scope;
         relay_scope_to_private(&decoded_req->request_type.list_settings.scope, &scope);
         ret = handle_private_list_settings(
-            &scope, decoded_req->request_type.list_settings.require_meta, resp);
+            &scope, decoded_req->request_type.list_settings.require_meta,
+            decoded_req->request_type.list_settings.require_default, resp);
         break;
     }
     case cormoran_zmk_custom_settings_RelayRequest_write_setting_tag: {
@@ -2792,9 +2912,9 @@ static void notification_work_handler(struct k_work *work) {
 
     struct zmk_custom_settings_notification_request request;
     while (k_msgq_get(&notification_msgq, &request, K_NO_WAIT) == 0) {
-        int ret =
-            raise_setting_notification(request.setting, request.kind,
-                                       can_include_value(request.setting), false, request.source);
+        int ret = raise_setting_notification(request.setting, request.kind,
+                                             can_include_value(request.setting), false, false,
+                                             request.source);
         if (ret < 0) {
             LOG_WRN("Failed to raise custom settings notification: %d", ret);
         }
@@ -2977,7 +3097,8 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
     static cormoran_zmk_custom_settings_Setting proto_setting;
     proto_setting =
         (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
-    ret = setting_to_proto(setting, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    ret = setting_to_proto(setting, &proto_setting, true, false, false,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         return ret;
     }
@@ -3050,6 +3171,148 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
 }
 
 SYS_INIT(custom_settings_rpc_bytes_converter_test_init, APPLICATION, 99);
+
+/* Setting.default_value is exposed only when the caller asks for it
+ * (include_default) AND the current value differs from the default. Covers both
+ * the inline scalar path (int) and the BYTES/STRING streaming-callback path
+ * (string). */
+static int custom_settings_default_value_test_init(void) {
+    const struct zmk_custom_setting *int_setting = zmk_custom_setting_find("test", "int_value");
+    const struct zmk_custom_setting *string_setting =
+        zmk_custom_setting_find("test", "string_value");
+    if (!int_setting || !string_setting) {
+        LOG_ERR("default value test settings not registered");
+        return -ENOENT;
+    }
+
+    static cormoran_zmk_custom_settings_Setting proto_setting;
+    int ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* At default, no default_value even when requested. */
+    proto_setting =
+        (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
+    ret = setting_to_proto(int_setting, &proto_setting, true, false, true,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        return ret;
+    }
+    if (proto_setting.has_default_value) {
+        LOG_ERR("default value present when value equals default");
+        return -EINVAL;
+    }
+
+    /* After changing it, the default_value carries the compile-time default. */
+    struct zmk_custom_setting_value changed_int = ZMK_CUSTOM_SETTING_VALUE_INT32(55);
+    ret = zmk_custom_setting_write(int_setting, &changed_int, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    proto_setting =
+        (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
+    ret = setting_to_proto(int_setting, &proto_setting, true, false, true,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!proto_setting.has_default_value ||
+        proto_setting.default_value.which_value_type !=
+            cormoran_zmk_custom_settings_SettingValue_int32_value_tag ||
+        proto_setting.default_value.value_type.int32_value != 10) {
+        LOG_ERR("scalar default value not exposed correctly: has=%d which=%u val=%d",
+                proto_setting.has_default_value,
+                (unsigned)proto_setting.default_value.which_value_type,
+                proto_setting.default_value.value_type.int32_value);
+        return -EINVAL;
+    }
+
+    /* Not requested: absent even though the value now differs. */
+    proto_setting =
+        (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
+    ret = setting_to_proto(int_setting, &proto_setting, true, false, false,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        return ret;
+    }
+    if (proto_setting.has_default_value) {
+        LOG_ERR("default value present when not requested");
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_reset(int_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    /* A STRING default streams through encode_setting_default_value: change the
+     * value, encode a Setting with require_default, decode, and confirm the
+     * default bytes are the compile-time default "hi". */
+    ret = zmk_custom_setting_reset(string_setting);
+    if (ret < 0) {
+        return ret;
+    }
+    struct zmk_custom_setting_value changed_string = ZMK_CUSTOM_SETTING_VALUE_STRING("changed");
+    ret = zmk_custom_setting_write(string_setting, &changed_string,
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    proto_setting =
+        (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
+    ret = setting_to_proto(string_setting, &proto_setting, true, false, true,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    if (ret < 0) {
+        return ret;
+    }
+    if (!proto_setting.has_default_value ||
+        proto_setting.default_value.which_value_type !=
+            cormoran_zmk_custom_settings_SettingValue_string_value_tag) {
+        LOG_ERR("string default value arm not selected");
+        return -EINVAL;
+    }
+
+    static uint8_t encode_buf[128];
+    int encoded = test_encode_setting(&proto_setting, encode_buf, sizeof(encode_buf));
+    if (encoded < 0) {
+        return -EIO;
+    }
+    /* A bare Setting's value/default_value are plain submessage fields, so their
+     * BYTES/STRING decode callbacks can be wired in advance (see the caution on
+     * wire_setting_value_decode - the oneof-arm hazard only applies when a
+     * SettingValue is reached across a parent oneof arm). Each needs its own
+     * scratch since both are STRING here. */
+    cormoran_zmk_custom_settings_Setting decoded = cormoran_zmk_custom_settings_Setting_init_zero;
+    uint8_t value_buf[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    uint8_t default_buf[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct bounded_decode_scratch value_scratch = {
+        .buf = value_buf, .capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE};
+    struct bounded_decode_scratch default_scratch = {
+        .buf = default_buf, .capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE};
+    wire_setting_value_decode(&decoded.value, &value_scratch);
+    wire_setting_value_decode(&decoded.default_value, &default_scratch);
+    pb_istream_t stream = pb_istream_from_buffer(encode_buf, encoded);
+    if (!pb_decode(&stream, cormoran_zmk_custom_settings_Setting_fields, &decoded)) {
+        LOG_ERR("default value test decode failed: %s", PB_GET_ERROR(&stream));
+        return -EIO;
+    }
+    if (!decoded.has_default_value || default_scratch.size != 2 || default_buf[0] != 'h' ||
+        default_buf[1] != 'i') {
+        LOG_ERR("string default value payload mismatch: has=%d size=%u", decoded.has_default_value,
+                (unsigned)default_scratch.size);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(string_setting);
+    if (ret < 0) {
+        return ret;
+    }
+
+    LOG_INF("PASS: custom_settings_default_value int=10 string=hi");
+    return 0;
+}
+
+SYS_INIT(custom_settings_default_value_test_init, APPLICATION, 99);
 
 /* ZMK_CUSTOM_SETTING_FOREACH yields exactly one registered zmk_custom_setting
  * per array (see for_each_list_item's comment); this regression-tests that
@@ -3161,7 +3424,8 @@ static int custom_settings_list_keyspace_test_init(void) {
      * not the ordinal storage name / raw blob. */
     cormoran_zmk_custom_settings_Setting proto_setting =
         cormoran_zmk_custom_settings_Setting_init_zero;
-    ret = setting_to_proto(created, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    ret = setting_to_proto(created, &proto_setting, true, false, false,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         LOG_ERR("List keyspace test: setting_to_proto failed: %d", ret);
         return ret;
@@ -3283,7 +3547,8 @@ static int custom_settings_chunked_rpc_test_init(void) {
     static cormoran_zmk_custom_settings_Setting proto_setting;
     proto_setting =
         (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
-    ret = setting_to_proto(setting, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    ret = setting_to_proto(setting, &proto_setting, true, false, false,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         return ret;
     }
@@ -3381,7 +3646,8 @@ static int custom_settings_large_chunked_rpc_test_init(void) {
     static cormoran_zmk_custom_settings_Setting proto_setting;
     proto_setting =
         (cormoran_zmk_custom_settings_Setting)cormoran_zmk_custom_settings_Setting_init_zero;
-    ret = setting_to_proto(setting, &proto_setting, true, false, ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
+    ret = setting_to_proto(setting, &proto_setting, true, false, false,
+                           ZMK_CUSTOM_SETTING_SOURCE_LOCAL);
     if (ret < 0) {
         return ret;
     }

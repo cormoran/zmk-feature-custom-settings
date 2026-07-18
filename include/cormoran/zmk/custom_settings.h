@@ -822,6 +822,18 @@ bool zmk_custom_setting_matches(const struct zmk_custom_setting *setting,
 /* Read the effective value. A temporary override takes precedence over memory value. */
 int zmk_custom_setting_read(const struct zmk_custom_setting *setting,
                             struct zmk_custom_setting_value *value);
+/* Read the value the setting currently falls back to when it has no persisted
+ * record: the runtime override installed by zmk_custom_setting_set_default() if
+ * any, otherwise the compile-time default. A default is always small enough to
+ * fit the fixed carrier. Returns -ENOENT when the setting has no default (e.g. a
+ * keyspace slot, whose blob always carries a user key). */
+int zmk_custom_setting_read_default(const struct zmk_custom_setting *setting,
+                                    struct zmk_custom_setting_value *value);
+/* True when a non-array, non-keyspace setting's current in-memory value equals
+ * the value it would fall back to with no persisted record (see
+ * zmk_custom_setting_read_default). False when they differ or the setting has no
+ * default. */
+bool zmk_custom_setting_matches_default(const struct zmk_custom_setting *setting);
 int zmk_custom_setting_read_by_key(const char *custom_subsystem_id, const char *key,
                                    struct zmk_custom_setting_value *value);
 /* Read one array setting element by its public base key and element index. */
