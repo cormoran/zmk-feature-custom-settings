@@ -17,6 +17,8 @@ web UI.
   the target behavior's own ZMK parameter metadata.
 - Write values in memory, persist them to flash, discard memory changes, or
   reset persisted values back to defaults.
+- Take part in ZMK's official factory reset: a ZMK Studio "reset settings"
+  wipes every custom setting (and split peripherals' custom settings) too.
 - Mark values as device-private, RPC-personal, or RPC-public.
 - Require Studio unlock independently for reads and writes.
 - Notify Studio clients when values change.
@@ -381,6 +383,22 @@ when nothing has changed. It is never present for array or keyspace settings
 default is subject to the same envelope-size limit as the value itself and may
 be omitted if the notification would not otherwise fit. The web UI exposes this
 as an "Include Default" toggle next to "Include Metadata".
+
+#### Factory Reset
+
+This module hooks into ZMK's official factory reset. When a ZMK Studio client
+sends the core `reset_settings` request (Studio's "Reset Settings" / restore
+defaults action), ZMK invokes every registered subsystem reset handler,
+including this module's — so a factory reset deletes **all** custom settings
+across every namespace (including runtime-created keyspace entries), reverting
+each to its compile-time default, exactly like the built-in keymap reset. On a
+split keyboard the central additionally relays the reset to every peripheral so
+their custom settings are wiped too. No configuration is required; the behavior
+is always available whenever the Studio RPC is enabled.
+
+This is separate from the module's own scoped `ResetSettingsRequest`, which lets
+a client reset a chosen subsystem/key subset; the official reset always covers
+everything.
 
 ### Large Values (Per-Setting max_size)
 

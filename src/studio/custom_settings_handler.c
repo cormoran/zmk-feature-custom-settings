@@ -3047,6 +3047,52 @@ static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw
 
     return true;
 }
+
+/*
+ * Participate in ZMK's official factory reset. ZMK Studio's core
+ * `reset_settings` RPC iterates every subsystem registered via
+ * ZMK_RPC_SUBSYSTEM_SETTINGS_RESET and calls its callback, so registering here
+ * makes a Studio "reset settings" wipe all custom settings too - not just the
+ * keymap and other built-in subsystems.
+ */
+static int custom_settings_reset(void) {
+    /* Reset every local custom setting (all subsystems, all keys, including
+     * keyspace entries): delete the persisted records and revert to defaults.
+     *
+     * ZMK's core reset_settings handler invokes this on the Studio RPC thread,
+     * bypassing our own dispatch's notify-suppress bracket, so suppress here
+     * too: a self-notification per setting would starve the RPC response on
+     * the shared transport and overflow the RPC thread stack (see
+     * zmk_custom_settings_notify_suppress_begin). */
+    notify_suppress_begin();
+    int ret = zmk_custom_settings_reset_scope(NULL, NULL, NULL, NULL);
+    notify_suppress_end();
+    if (ret < 0) {
+        LOG_ERR("Failed to reset custom settings: %d", ret);
+        return ret;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+    /* Also wipe every split peripheral's custom settings by relaying a full
+     * reset (source = ALL maps to a local reset on each peripheral). A relay
+     * failure must not fail the whole factory reset - the local reset already
+     * succeeded, and a peripheral may simply be disconnected. */
+    cormoran_zmk_custom_settings_Request relay_req = cormoran_zmk_custom_settings_Request_init_zero;
+    relay_req.which_request_type = cormoran_zmk_custom_settings_Request_reset_settings_tag;
+    relay_req.request_type.reset_settings.has_scope = true;
+    relay_req.request_type.reset_settings.scope.has_source = true;
+    relay_req.request_type.reset_settings.scope.source = ZMK_CUSTOM_SETTING_SOURCE_ALL;
+    int relay_ret = relay_request_to_peripherals(&relay_req);
+    if (relay_ret < 0) {
+        LOG_WRN("Failed to relay custom settings reset to peripherals: %d", relay_ret);
+    }
+#endif
+
+    return 0;
+}
+
+ZMK_RPC_SUBSYSTEM_SETTINGS_RESET(custom_settings, custom_settings_reset);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
@@ -4056,6 +4102,69 @@ static int custom_settings_public_suppress_test_init(void) {
 }
 
 SYS_INIT(custom_settings_public_suppress_test_init, APPLICATION, 99);
+
+/*
+ * ZMK's official factory reset (Studio core `reset_settings` RPC) must wipe
+ * custom settings via our registered ZMK_RPC_SUBSYSTEM_SETTINGS_RESET callback.
+ * Persist a non-default value, drive the SAME iterator ZMK's core handler uses
+ * (ZMK_RPC_SUBSYSTEM_SETTINGS_RESET_FOREACH), and assert our callback ran and
+ * reverted the setting to its default with no unsaved state left.
+ */
+static int custom_settings_reset_all_test_init(void) {
+    const char *subsys = "test";
+    const char *key = "int_value";
+    const int32_t default_value = 10;
+
+    const struct zmk_custom_setting *setting = zmk_custom_setting_find(subsys, key);
+    if (!setting) {
+        LOG_ERR("reset_all regression: test/int_value not found");
+        return -ENOENT;
+    }
+
+    struct zmk_custom_setting_value value = ZMK_CUSTOM_SETTING_VALUE_INT32(66);
+    int ret =
+        zmk_custom_setting_write_by_key(subsys, key, &value, ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        LOG_ERR("reset_all regression: persist failed: %d", ret);
+        return ret;
+    }
+
+    /* Invoke the official reset exactly as ZMK's core subsystem does. */
+    int callbacks = 0;
+    ZMK_RPC_SUBSYSTEM_SETTINGS_RESET_FOREACH(sub) {
+        callbacks++;
+        ret = sub->callback();
+        if (ret < 0) {
+            LOG_ERR("reset_all regression: reset callback failed: %d", ret);
+            return ret;
+        }
+    }
+    if (callbacks == 0) {
+        LOG_ERR("reset_all regression: no settings-reset callback registered");
+        return -EINVAL;
+    }
+
+    int32_t got = 0;
+    ret = zmk_custom_setting_get_int32(setting, &got);
+    if (ret < 0) {
+        LOG_ERR("reset_all regression: read-back failed: %d", ret);
+        return ret;
+    }
+    if (got != default_value) {
+        LOG_ERR("reset_all regression: value=%d, expected default %d after reset", got,
+                default_value);
+        return -EINVAL;
+    }
+    if (zmk_custom_setting_has_unsaved_value(setting)) {
+        LOG_ERR("reset_all regression: unsaved state remained after reset");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_reset_all callbacks=%d value=%d", callbacks, got);
+    return 0;
+}
+
+SYS_INIT(custom_settings_reset_all_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
