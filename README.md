@@ -389,12 +389,16 @@ as an "Include Default" toggle next to "Include Metadata".
 This module hooks into ZMK's official factory reset. When a ZMK Studio client
 sends the core `reset_settings` request (Studio's "Reset Settings" / restore
 defaults action), ZMK invokes every registered subsystem reset handler,
-including this module's — so a factory reset deletes **all** custom settings
-across every namespace (including runtime-created keyspace entries), reverting
-each to its compile-time default, exactly like the built-in keymap reset. On a
-split keyboard the central additionally relays the reset to every peripheral so
-their custom settings are wiped too. No configuration is required; the behavior
-is always available whenever the Studio RPC is enabled.
+including this module's — so a factory reset clears **all** custom settings
+across every namespace, exactly like the built-in keymap reset. A fixed setting
+reverts to its compile-time default; a runtime-created keyspace entry (which has
+no compile-time default) is removed entirely, freeing its slot and its pool
+region — so a pool-backed namespace such as
+[zmk-feature-runtime-macro](https://github.com/cormoran/zmk-feature-runtime-macro)'s
+is fully wiped, not left occupying memory until the next reboot. On a split
+keyboard the central additionally relays the reset to every peripheral so their
+custom settings are wiped too. No configuration is required; the behavior is
+always available whenever the Studio RPC is enabled.
 
 This is separate from the module's own scoped `ResetSettingsRequest`, which lets
 a client reset a chosen subsystem/key subset; the official reset always covers

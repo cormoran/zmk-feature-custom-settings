@@ -170,6 +170,11 @@ int keyspace_write_raw_payload(const struct zmk_custom_setting *setting, const v
  * custom_settings_lock. */
 void keyspace_release_slot_locked(struct zmk_custom_setting_keyspace *keyspace, uint32_t index);
 
+/* Release the slot that `setting` is the descriptor of (recovering the slot
+ * index from the descriptor pointer). Caller holds custom_settings_lock. */
+void keyspace_release_slot_for_setting_locked(struct zmk_custom_setting_keyspace *keyspace,
+                                              const struct zmk_custom_setting *setting);
+
 /* Bind slot `index` of `keyspace` to its stable ordinal storage identity and
  * wire it into the keyspace's shared pool, with an EMPTY blob - the caller
  * populates it immediately after (settings-load value-apply, or a fresh

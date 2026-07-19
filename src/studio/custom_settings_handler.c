@@ -4165,6 +4165,58 @@ static int custom_settings_reset_all_test_init(void) {
 }
 
 SYS_INIT(custom_settings_reset_all_test_init, APPLICATION, 99);
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
+/*
+ * A runtime-created keyspace entry (the storage a pool-backed namespace like
+ * zmk-feature-runtime-macro's is built on) has no compile-time default, so
+ * ZMK's official factory reset must make it CEASE TO EXIST, not just wipe its
+ * flash record while leaving the slot in_use and its pool region occupied.
+ * Create + persist an entry under the "test"/"macro/" keyspace, drive the SAME
+ * reset iterator ZMK's core handler uses, and assert the entry is fully gone
+ * (its slot released, so a lookup by key returns NULL) rather than lingering.
+ */
+static int custom_settings_reset_keyspace_test_init(void) {
+    struct zmk_custom_setting_keyspace *keyspace =
+        zmk_custom_settings_keyspace_find_for_key("test", "macro/reset");
+    if (!keyspace) {
+        LOG_ERR("reset_keyspace regression: no keyspace registered for test/macro/");
+        return -ENOENT;
+    }
+
+    const struct zmk_custom_setting *created = NULL;
+    struct zmk_custom_setting_value value = ZMK_CUSTOM_SETTING_VALUE_INT32(7);
+    int ret = zmk_custom_setting_keyspace_create(keyspace, "macro/reset", &value,
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
+    if (ret < 0 || !created) {
+        LOG_ERR("reset_keyspace regression: create failed: %d", ret);
+        return ret < 0 ? ret : -EINVAL;
+    }
+    if (!zmk_custom_setting_keyspace_find(keyspace, "macro/reset")) {
+        LOG_ERR("reset_keyspace regression: entry not found after create");
+        return -EINVAL;
+    }
+
+    /* Invoke the official reset exactly as ZMK's core subsystem does. */
+    ZMK_RPC_SUBSYSTEM_SETTINGS_RESET_FOREACH(sub) {
+        ret = sub->callback();
+        if (ret < 0) {
+            LOG_ERR("reset_keyspace regression: reset callback failed: %d", ret);
+            return ret;
+        }
+    }
+
+    if (zmk_custom_setting_keyspace_find(keyspace, "macro/reset")) {
+        LOG_ERR("reset_keyspace regression: entry survived factory reset");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_reset_keyspace_deletes_entry key=macro/reset");
+    return 0;
+}
+
+SYS_INIT(custom_settings_reset_keyspace_test_init, APPLICATION, 99);
+#endif
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)

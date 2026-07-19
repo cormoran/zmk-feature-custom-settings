@@ -56,6 +56,7 @@ PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
 PASS: custom_settings_initialized_event count=1
 PASS: custom_settings_behavior_value param1=0x70004
 PASS: custom_settings_behavior_value_rejects_invalid
+PASS: custom_settings_reset_keyspace_deletes_entry key=macro/reset
 PASS: custom_settings_reset_all callbacks=2 value=10
 PASS: custom_settings_public_suppress suppressed=0 after=1
 PASS: custom_settings_rpc_suppresses_notification nonrpc=1 rpc=0

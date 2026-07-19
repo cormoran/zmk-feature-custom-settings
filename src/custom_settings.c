@@ -1397,6 +1397,29 @@ int zmk_custom_setting_reset(const struct zmk_custom_setting *const_setting) {
         ret = 0;
     }
 
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
+    struct zmk_custom_setting_keyspace *keyspace =
+        (struct zmk_custom_setting_keyspace *)zmk_custom_setting_keyspace_of(setting);
+    if (ret == 0 && keyspace) {
+        /* A keyspace entry is created at runtime and carries its user key
+         * inside its own blob, so it has no compile-time default to revert to:
+         * resetting it means the entry ceases to exist. Release the slot and
+         * free its pool region (exactly what zmk_custom_setting_keyspace_delete
+         * does) rather than deleting only the flash record. Without this, a
+         * reset that reaches keyspace slots - notably ZMK's official factory
+         * reset, which walks every live slot - would erase the record but leave
+         * the slot in_use and its pool bytes occupied until reboot, so a
+         * pool-backed namespace like zmk-feature-runtime-macro's would survive
+         * the reset in RAM. Deletion is silent to the change event the same way
+         * keyspace_delete is: there is no "deleted" notification kind, and a
+         * RESET notification would wrongly imply the entry still exists with a
+         * default value. */
+        keyspace_release_slot_for_setting_locked(keyspace, setting);
+        k_mutex_unlock(&custom_settings_lock);
+        return 0;
+    }
+#endif
+
     if (ret == 0) {
         apply_scalar_default_locked(setting);
         state_flag_set(setting, ZMK_CUSTOM_SETTING_STATE_HAS_PERSISTENT, false);
