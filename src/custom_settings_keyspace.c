@@ -180,6 +180,18 @@ void keyspace_release_slot_locked(struct zmk_custom_setting_keyspace *keyspace, 
     slot->in_use = false;
 }
 
+/* Release the live slot that `setting` is the descriptor of. `setting` must be
+ * a keyspace slot's own embedded descriptor (&keyspace->slots[i].setting); the
+ * owning index is recovered by pointer arithmetic on the fixed slot array.
+ * Used by reset, which unlike delete only has the descriptor in hand, not the
+ * user key. Caller holds custom_settings_lock. */
+void keyspace_release_slot_for_setting_locked(struct zmk_custom_setting_keyspace *keyspace,
+                                              const struct zmk_custom_setting *setting) {
+    const struct zmk_custom_setting_keyspace_slot *slot =
+        CONTAINER_OF(setting, struct zmk_custom_setting_keyspace_slot, setting);
+    keyspace_release_slot_locked(keyspace, (uint32_t)(slot - keyspace->slots));
+}
+
 /* Validate a PAYLOAD (not a slot's opaque blob) against keyspace->value_type/
  * constraints/max_size - shared by zmk_custom_setting_keyspace_create and
  * zmk_custom_setting_write's keyspace branch. */
