@@ -889,6 +889,14 @@ RPC-Creatable Keyspaces above), and any selected setting - including a
 keyspace entry - can be removed with the "Delete" button, which sends
 `DeleteSetting`.
 
+Listed settings are grouped into one table per subsystem (the subsystem
+identifier is the table heading), so the **Setting** column shows only the key
+without its subsystem prefix. Each table also shows the setting's static
+metadata - **Confidentiality**, **Read** and **Write** permission, and a summary
+of its **Constraints** - alongside the per-source **Value** and **Unsaved**
+columns. These metadata columns are populated when settings are loaded with
+**Include Metadata** checked (on by default); they show `—` otherwise.
+
 ### Constraint-aware editing
 
 When a setting is listed or read with **Include Metadata** checked, the firmware
