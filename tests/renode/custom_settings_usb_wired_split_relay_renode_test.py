@@ -38,7 +38,7 @@ Run via:
   west zmk-renode-test --mode wired-split \
       --elf build/usb-wired-central/zephyr/zmk.elf \
       --peripheral-elf build/usb-wired-peripheral/zephyr/zmk.elf \
-      tests/renode --skip-smoke
+      tests/renode
 
 Named `*_renode_test.py` (not `test_*.py`) so it stays out of `python3 -m
 unittest` auto-discovery -- it needs real firmware ELFs. SKIPs if not built.

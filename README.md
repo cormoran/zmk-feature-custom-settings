@@ -980,12 +980,14 @@ notifications round-trip back through the relay.
 west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired-central
 west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired-peripheral
 
-# Boot both halves + drive the relay round-trip (run only this module's test with --skip-smoke).
+# Boot both halves, run the generic usb+wired smoke, then the relay round-trip.
 west zmk-renode-test --mode wired-split \
   --elf build/usb-wired-central/zephyr/zmk.elf \
   --peripheral-elf build/usb-wired-peripheral/zephyr/zmk.elf \
-  tests/renode --skip-smoke
+  tests/renode
 ```
 
 CI runs this automatically in the `Renode custom-settings wired-split relay test`
-job.
+job, via `zmk-west-commands`' [`zmk-renode-test` composite
+action](https://github.com/cormoran/zmk-west-commands/tree/main/.github/actions/zmk-renode-test)
+(which installs Renode + the protobuf/protoc deps for you).
