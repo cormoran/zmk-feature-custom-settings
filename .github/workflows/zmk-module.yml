@@ -41,6 +41,38 @@ jobs:
           path: |
             build/*/zephyr/zmk.uf2
 
+  renode-relay-test:
+    runs-on: ubuntu-latest
+    # Two real images booted on one Renode session + the Renode install.
+    timeout-minutes: 20
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Renode custom-settings wired-split relay test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/west-init
+      - name: Build usb+wired split halves
+        # The Studio central + the relay-enabled peripheral; see
+        # tests/zmk-config/build-usb-split.yaml.
+        run: >-
+          west zmk-build tests/zmk-config
+          --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired-central &&
+          west zmk-build tests/zmk-config
+          --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired-peripheral
+      - name: Run split-relay round-trip test
+        # zmk-west-commands' composite action: caches/installs Renode + the
+        # python protobuf/protoc deps, then runs the generic usb+wired smoke
+        # (GetDeviceInfo over USB + a peripheral keypress relayed to the central)
+        # followed by this module's own tests/renode/*_test.py -- the host reads
+        # AND writes the split PERIPHERAL's settings over the wired split relay.
+        uses: cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main
+        with:
+          mode: wired-split
+          elf-path: build/usb-wired-central/zephyr/zmk.elf
+          peripheral-elf: build/usb-wired-peripheral/zephyr/zmk.elf
+          tests: tests/renode
+
   keepalive:
     if: github.event_name == 'schedule'
     permissions: write-all
