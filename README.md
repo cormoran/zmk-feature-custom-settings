@@ -959,3 +959,33 @@ cd web && npm test
 # Run lint/test hooks before commit
 pre-commit run --all-files
 ```
+
+### Hardware-free split-relay test (Renode)
+
+`tests/renode/custom_settings_usb_wired_split_relay_renode_test.py` exercises the
+whole Studio RPC surface — including reading and **writing a split peripheral's
+settings across the wired split relay** — with no physical hardware, using the
+[Renode](https://renode.io/) emulator via `west zmk-renode-test` (provided by
+`zmk-west-commands`).
+
+It boots two real firmware images on one Renode session: a wired-split **central**
+that answers ZMK Studio over the emulated USB CDC, and a relay-enabled
+**peripheral**, cross-connected by a Renode UART hub. A Studio host then drives
+the central over USB — local get/write/list — and relays a write and a scoped
+list to the peripheral, asserting the peripheral's value-updated and list-item
+notifications round-trip back through the relay.
+
+```bash
+# Build both split halves (a WIRED split whose central still speaks Studio over USB).
+west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired-central
+west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired-peripheral
+
+# Boot both halves + drive the relay round-trip (run only this module's test with --skip-smoke).
+west zmk-renode-test --mode wired-split \
+  --elf build/usb-wired-central/zephyr/zmk.elf \
+  --peripheral-elf build/usb-wired-peripheral/zephyr/zmk.elf \
+  tests/renode --skip-smoke
+```
+
+CI runs this automatically in the `Renode custom-settings wired-split relay test`
+job.
