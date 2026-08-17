@@ -768,6 +768,34 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
     }
 }
 
+static bool encode_setting_constraints(pb_ostream_t *stream, const pb_field_t *field,
+                                       void *const *arg) {
+    const struct zmk_custom_setting *setting = (const struct zmk_custom_setting *)*arg;
+    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
+    const struct zmk_custom_setting_constraint *constraints =
+        keyspace ? keyspace->constraints : setting->constraints;
+    size_t constraints_count = keyspace ? keyspace->constraints_count : setting->constraints_count;
+
+    for (size_t i = 0; i < constraints_count; i++) {
+        if (constraints[i].type == ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
+            continue;
+        }
+
+        cormoran_zmk_custom_settings_SettingConstraint encoded =
+            cormoran_zmk_custom_settings_SettingConstraint_init_zero;
+        if (constraint_to_proto(&constraints[i], &encoded) < 0) {
+            continue;
+        }
+        if (!pb_encode_tag_for_field(stream, field) ||
+            !pb_encode_submessage(stream, cormoran_zmk_custom_settings_SettingConstraint_fields,
+                                  &encoded)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
                                  cormoran_zmk_custom_settings_SettingMeta *dest) {
     *dest = (cormoran_zmk_custom_settings_SettingMeta)
@@ -777,27 +805,11 @@ static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
     dest->read_permission = proto_permission(setting->read_permission);
     dest->write_permission = proto_permission(setting->write_permission);
 
-    /* A keyspace slot's own constraints are always empty (they describe its
-     * opaque blob, which has none of its own) - present the owning
-     * keyspace's PAYLOAD constraints instead, matching what
-     * zmk_custom_setting_write validates a write against. */
-    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
-    const struct zmk_custom_setting_constraint *constraints =
-        keyspace ? keyspace->constraints : setting->constraints;
-    size_t constraints_count = keyspace ? keyspace->constraints_count : setting->constraints_count;
-
-    for (size_t i = 0;
-         i < constraints_count && dest->constraints_count < ARRAY_SIZE(dest->constraints); i++) {
-        if (constraints[i].type == ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
-            continue;
-        }
-
-        int ret = constraint_to_proto(&constraints[i], &dest->constraints[dest->constraints_count]);
-        if (ret < 0) {
-            continue;
-        }
-        dest->constraints_count++;
-    }
+    /* A keyspace slot presents its owner's payload constraints. The callback
+     * resolves that relationship at encode time and emits the repeated field
+     * without materialising its recursive worst-case nanopb array. */
+    dest->constraints.funcs.encode = encode_setting_constraints;
+    dest->constraints.arg = (void *)setting;
 
     return 0;
 }
@@ -917,7 +929,7 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
         }
         LOG_DBG("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
-                (uint32_t)dest->meta.constraints_count);
+                (uint32_t)(include_meta ? setting->constraints_count : 0));
     }
 
     if (include_value &&

@@ -84,8 +84,15 @@ struct zmk_custom_setting *array_view_acquire(const struct zmk_custom_setting *a
  * has_persistent[]), the array counterpart of the scalar
  * ZMK_CUSTOM_SETTING_STATE_DIRTY/HAS_PERSISTENT flags. Caller holds
  * custom_settings_lock. */
-bool *array_dirty_slot(const struct zmk_custom_setting *setting);
-bool *array_has_persistent_slot(const struct zmk_custom_setting *setting);
+bool array_dirty_get(const struct zmk_custom_setting *setting);
+void array_dirty_set(const struct zmk_custom_setting *setting, bool value);
+bool array_has_persistent_get(const struct zmk_custom_setting *setting);
+void array_has_persistent_set(const struct zmk_custom_setting *setting, bool value);
+const struct zmk_custom_setting_value *array_memory_value_locked(
+    const struct zmk_custom_setting *setting);
+int array_store_value_locked(const struct zmk_custom_setting *setting,
+                             const struct zmk_custom_setting_value *value);
+void array_initialize_storage_locked(const struct zmk_custom_setting *setting);
 
 /* Set an array's active (in-memory) / persisted length, clearing any
  * temporary override past the new size. Caller holds custom_settings_lock. */
