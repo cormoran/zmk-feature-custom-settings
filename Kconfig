@@ -1,3 +1,23 @@
+config ZMK_CUSTOM_SETTINGS_STUDIO_HELPERS
+    bool
+    default y if ZMK_STUDIO
+    depends on ZMK_STUDIO
+    help
+      Builds small shared helpers used by custom Studio RPC modules. This is
+      independent of the custom-settings registry and does not pull in its
+      RPC, array, keyspace, or persistence implementation.
+
+config ZMK_CUSTOM_SETTINGS_STUDIO_RESPONSE_BUFFER_SIZE
+    int "Shared custom Studio response buffer size"
+    default 312 if 64BIT
+    default 264
+    range 1 2048
+    depends on ZMK_CUSTOM_SETTINGS_STUDIO_HELPERS
+    help
+      Size of the single response buffer shared by migrated custom Studio
+      subsystems. Studio dispatches one custom request at a time; a generation
+      check rejects encoding if a later request reused the buffer first.
+
 config ZMK_CUSTOM_SETTINGS
     bool "Enable custom settings"
     select SETTINGS

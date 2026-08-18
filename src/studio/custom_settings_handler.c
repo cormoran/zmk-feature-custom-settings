@@ -17,6 +17,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <cormoran/zmk/custom_settings.h>
+#include <cormoran/zmk/custom_settings_studio.h>
 #include <cormoran/zmk/custom_settings/custom_settings.pb.h>
 #include <cormoran/zmk/custom_settings/custom_settings_relay.pb.h>
 #include <zmk/workqueue.h>
@@ -52,8 +53,7 @@ static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
 ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran_custom_settings, &custom_settings_meta,
                          custom_settings_rpc_handle_request);
 
-ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(cormoran_custom_settings,
-                                         cormoran_zmk_custom_settings_Response);
+ZMK_CUSTOM_STUDIO_RESPONSE_BUFFER(cormoran_zmk_custom_settings_Response);
 #endif
 
 static bool studio_is_unlocked(void) {
@@ -997,42 +997,14 @@ static const char *custom_subsystem_identifier_for_index(uint32_t index) {
 }
 
 static int custom_subsystem_index_for_identifier(const char *identifier, uint32_t *index) {
-    if (!identifier) {
-        return -ENOENT;
+    uint8_t compact_index;
+    int ret = zmk_custom_studio_subsystem_index(identifier, &compact_index);
+    if (ret == 0) {
+        *index = compact_index;
     }
-
-    size_t subsystem_count;
-    STRUCT_SECTION_COUNT(zmk_rpc_custom_subsystem, &subsystem_count);
-
-    for (size_t i = 0; i < subsystem_count; i++) {
-        struct zmk_rpc_custom_subsystem *custom_subsys;
-        STRUCT_SECTION_GET(zmk_rpc_custom_subsystem, i, &custom_subsys);
-        if (strcmp(custom_subsys->identifier, identifier) == 0) {
-            *index = i;
-            return 0;
-        }
-    }
-
-    return -ENOENT;
+    return ret;
 }
 
-static int custom_subsystem_index(void) {
-    uint32_t index;
-    int ret = custom_subsystem_index_for_identifier(SUBSYSTEM_IDENTIFIER_STRING, &index);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return (int)index;
-}
-
-static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *field,
-                                        void *const *arg) {
-    const cormoran_zmk_custom_settings_Notification *notification =
-        (const cormoran_zmk_custom_settings_Notification *)*arg;
-    return zmk_rpc_custom_subsystem_encode_response_payload(
-        stream, field, cormoran_zmk_custom_settings_Notification_fields, notification);
-}
 #endif
 
 static K_MUTEX_DEFINE(notification_buffer_lock);
@@ -1041,6 +1013,14 @@ static cormoran_zmk_custom_settings_Notification notification_buffer;
     !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static struct zmk_custom_settings_relay_notification notification_relay_event_buffer;
 static cormoran_zmk_custom_settings_RelayNotification notification_relay_buffer;
+
+static bool encode_relay_notification_payload(pb_ostream_t *stream, const pb_field_t *field,
+                                              void *const *arg) {
+    const cormoran_zmk_custom_settings_Notification *notification = *arg;
+    return pb_encode_tag_for_field(stream, field) &&
+           pb_encode_submessage(stream, cormoran_zmk_custom_settings_Notification_fields,
+                                notification);
+}
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
@@ -1058,6 +1038,19 @@ static struct bounded_decode_scratch relay_notification_value_decode_scratch = {
     .capacity = ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE,
 };
 
+static bool decode_relay_notification_payload(pb_istream_t *stream, const pb_field_t *field,
+                                              void **arg) {
+    ARG_UNUSED(field);
+    cormoran_zmk_custom_settings_Notification *notification = *arg;
+    *notification = (cormoran_zmk_custom_settings_Notification)
+        cormoran_zmk_custom_settings_Notification_init_zero;
+    relay_notification_value_decode_scratch.size = 0;
+    relay_notification_default_decode_scratch.size = 0;
+    notification->cb_notification_type.funcs.decode = notification_arm_wire_precallback;
+    notification->cb_notification_type.arg = &relay_notification_value_decode_scratch;
+    return pb_decode(stream, cormoran_zmk_custom_settings_Notification_fields, notification);
+}
+
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
                                           cormoran_zmk_custom_settings_Notification *notification) {
     k_mutex_lock(&relay_notification_decode_lock, K_FOREVER);
@@ -1065,12 +1058,10 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     cormoran_zmk_custom_settings_RelayNotification *relay = &relay_notification_decode_buffer;
     *relay = (cormoran_zmk_custom_settings_RelayNotification)
         cormoran_zmk_custom_settings_RelayNotification_init_zero;
-    /* Wired via Notification's message-level oneof precallback, not in
-     * advance - see request_arm_wire_precallback's comment (nanopb zeroes
-     * the selected notification_type arm during decode). */
-    relay_notification_value_decode_scratch.size = 0;
-    relay->notification.cb_notification_type.funcs.decode = notification_arm_wire_precallback;
-    relay->notification.cb_notification_type.arg = &relay_notification_value_decode_scratch;
+    *notification = (cormoran_zmk_custom_settings_Notification)
+        cormoran_zmk_custom_settings_Notification_init_zero;
+    relay->notification.funcs.decode = decode_relay_notification_payload;
+    relay->notification.arg = notification;
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
     if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
@@ -1078,10 +1069,8 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
         return -EIO;
     }
 
-    *notification = relay->notification;
-    /* CRITICAL: the struct copy above brought along cb_notification_type,
-     * whose funcs union still holds the DECODE-role precallback wired before
-     * pb_decode(). nanopb's encoder invokes cb_<oneof>.funcs.encode for
+    /* The decoded notification still has the DECODE-role oneof precallback.
+     * nanopb's encoder invokes cb_<oneof>.funcs.encode for
      * PB_LTYPE_SUBMSG_W_CB arms too (pb_encode.c, "Message callback is
      * stored right before pSize"), so re-encoding this notification with the
      * stale callback in place makes the precallback run in encode context
@@ -1135,20 +1124,9 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
 
 static int
 raise_encoded_studio_notification(const cormoran_zmk_custom_settings_Notification *notification) {
-    int index = custom_subsystem_index();
-    if (index < 0) {
-        return index;
-    }
-
-    pb_callback_t payload = {
-        .funcs.encode = encode_notification_payload,
-        .arg = (void *)notification,
-    };
-
-    return raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
-        .subsystem_index = (uint8_t)index,
-        .encode_payload = payload,
-    });
+    return zmk_custom_studio_notify_message(
+        SUBSYSTEM_IDENTIFIER_STRING, cormoran_zmk_custom_settings_Notification_fields,
+        notification);
 }
 #endif
 
@@ -1239,21 +1217,21 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     relay->has_custom_subsystem_id = true;
     copy_string(relay->custom_subsystem_id, sizeof(relay->custom_subsystem_id),
                 setting->custom_subsystem_id);
-    relay->has_notification = true;
-    relay->notification = *notification;
+    relay->notification.funcs.encode = encode_relay_notification_payload;
+    relay->notification.arg = notification;
     pb_ostream_t stream =
         pb_ostream_from_buffer(relay_notification->payload, sizeof(relay_notification->payload));
     bool encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
-    if (!encoded && (relay->notification.notification_type.setting.setting.has_value ||
-                     relay->notification.notification_type.setting.setting.has_default_value)) {
+    if (!encoded && (notification->notification_type.setting.setting.has_value ||
+                     notification->notification_type.setting.setting.has_default_value)) {
         /* Large values are not relayed: unlike the direct GetSetting/list
          * path, which streams a value of any size, the relay envelope is a
          * fixed CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN buffer. Retry once with
          * the value (and the optional default value) omitted so the rest of the
          * notification (has_unsaved_value, kind, etc.) still reaches the central
          * instead of losing the whole notification. */
-        relay->notification.notification_type.setting.setting.has_value = false;
-        relay->notification.notification_type.setting.setting.has_default_value = false;
+        notification->notification_type.setting.setting.has_value = false;
+        notification->notification_type.setting.setting.has_default_value = false;
         stream = pb_ostream_from_buffer(relay_notification->payload,
                                         sizeof(relay_notification->payload));
         encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
@@ -1267,21 +1245,9 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     ret = raise_zmk_custom_settings_relay_notification(*relay_notification);
 #else
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-    int index = custom_subsystem_index();
-    if (index < 0) {
-        k_mutex_unlock(&notification_buffer_lock);
-        return index;
-    }
-
-    pb_callback_t payload = {
-        .funcs.encode = encode_notification_payload,
-        .arg = notification,
-    };
-
-    ret = raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
-        .subsystem_index = (uint8_t)index,
-        .encode_payload = payload,
-    });
+    ret = zmk_custom_studio_notify_message(
+        SUBSYSTEM_IDENTIFIER_STRING, cormoran_zmk_custom_settings_Notification_fields,
+        notification);
 #else
     ret = 0;
 #endif
@@ -2715,6 +2681,7 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
 }
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static void relay_ref_to_private(const cormoran_zmk_custom_settings_RelaySettingRef *src,
                                  struct zmk_custom_settings_setting_ref *dest) {
     *dest = (struct zmk_custom_settings_setting_ref){0};
@@ -2905,6 +2872,7 @@ static void relay_request_work_handler(struct k_work *work) {
         }
     }
 }
+#endif /* !CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 #endif
 
 struct zmk_custom_settings_notification_request {
@@ -3001,8 +2969,8 @@ static bool decode_custom_settings_request(const uint8_t *buf, size_t size,
 
 static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
                                                pb_callback_t *encode_response) {
-    cormoran_zmk_custom_settings_Response *resp = ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER_ALLOCATE(
-        cormoran_custom_settings, encode_response);
+    cormoran_zmk_custom_settings_Response *resp = ZMK_CUSTOM_STUDIO_RESPONSE_BUFFER_ALLOCATE(
+        cormoran_zmk_custom_settings_Response, encode_response);
 
     cormoran_zmk_custom_settings_Request req;
     if (!decode_custom_settings_request(raw_request->payload.bytes, raw_request->payload.size,
@@ -4232,6 +4200,7 @@ SYS_INIT(custom_settings_reset_keyspace_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static int relay_request_listener(const zmk_event_t *eh) {
     const struct zmk_custom_settings_relay_request *ev = as_zmk_custom_settings_relay_request(eh);
     if (!ev) {
@@ -4254,6 +4223,7 @@ static int relay_request_listener(const zmk_event_t *eh) {
 
     return ZMK_EV_EVENT_BUBBLE;
 }
+#endif /* !CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static void relay_notification_work_handler(struct k_work *work);
@@ -4310,8 +4280,10 @@ static int relay_notification_listener(const zmk_event_t *eh) {
 }
 #endif
 
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 ZMK_LISTENER(custom_settings_relay_request, relay_request_listener);
 ZMK_SUBSCRIPTION(custom_settings_relay_request, zmk_custom_settings_relay_request);
+#endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 ZMK_LISTENER(custom_settings_relay_notification, relay_notification_listener);
 ZMK_SUBSCRIPTION(custom_settings_relay_notification, zmk_custom_settings_relay_notification);

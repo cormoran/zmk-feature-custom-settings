@@ -1,3 +1,4 @@
+PASS: custom_settings_studio_helpers
 cormoran_custom_settings, Security: Unsecured
 test, Security: Unsecured
 PASS: custom_settings_validate_hid_usage
