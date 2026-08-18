@@ -537,6 +537,43 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
         _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
         _read_permission, _write_permission, NULL, NULL, __VA_ARGS__)
 
+/* Fixed-store BYTES/STRING setting with a capacity below the global carrier
+ * maximum. Its API and persisted representation match ZMK_CUSTOM_SETTING_DEFINE;
+ * only the private backing buffer is right-sized. */
+#define ZMK_CUSTOM_SETTING_DEFINE_FIXED_SIZE(                                                      \
+    _name, _max_size, _custom_subsystem_id, _key, _value_type, _default_value,                    \
+    _confidentiality, _read_permission, _write_permission, _constraint)                           \
+    BUILD_ASSERT((_max_size) <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,                        \
+                 "fixed setting exceeds the normal value carrier");                              \
+    BUILD_ASSERT(ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type),                                    \
+                 "fixed-size setting only supports BYTES/STRING");                               \
+    BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
+                     CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
+                 "Custom subsystem id is too long");                                             \
+    BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
+                 "Custom setting key is too long");                                              \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {_constraint};      \
+    static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
+    static uint8_t _name##_store[(_max_size) + 1];                                                 \
+    static struct zmk_custom_setting_state _name##_state = {                                      \
+        .temp_slot = -1, .blob.data = _name##_store,                                              \
+    };                                                                                             \
+    const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                  \
+        .custom_subsystem_id = _custom_subsystem_id,                                              \
+        .key = _key,                                                                               \
+        .array_key = NULL,                                                                         \
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                             \
+        .value_type = _value_type,                                                                 \
+        .confidentiality = _confidentiality,                                                       \
+        .read_permission = _read_permission,                                                       \
+        .write_permission = _write_permission,                                                     \
+        .constraints = _name##_constraints,                                                       \
+        .constraints_count = ARRAY_SIZE(_name##_constraints),                                     \
+        .default_value = &_name##_default,                                                        \
+        .blob = {.max_size = (_max_size), .pool = NULL},                                          \
+        .state = &_name##_state,                                                                  \
+    }
+
 /*
  * Innermost plain registration macro (every ZMK_CUSTOM_SETTING_DEFINE* variant
  * that does not take an explicit max_size funnels through here). Emits a
