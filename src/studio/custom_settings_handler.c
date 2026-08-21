@@ -1024,7 +1024,29 @@ static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *
 #endif
 
 static K_MUTEX_DEFINE(notification_buffer_lock);
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+/*
+ * The central never needs the decoded relay envelope and the public Studio
+ * notification at the same time: it decodes the former, resolves its custom
+ * subsystem identifier, then moves the embedded notification over the same
+ * storage before encoding it to Studio. Keep the two maximum-size nanopb
+ * messages in one workspace rather than permanently reserving both (~7 KiB
+ * saved with the default generated message limits).
+ *
+ * notification_buffer_lock serializes every user of this union. In
+ * particular, relayed_notification_to_public() must resolve every relay-only
+ * field before the memmove below overwrites the RelayNotification view.
+ */
+union zmk_custom_settings_notification_workspace {
+    cormoran_zmk_custom_settings_Notification notification;
+    cormoran_zmk_custom_settings_RelayNotification relay;
+};
+static union zmk_custom_settings_notification_workspace notification_workspace;
+#define notification_buffer notification_workspace.notification
+#else
 static cormoran_zmk_custom_settings_Notification notification_buffer;
+#endif
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static struct zmk_custom_settings_relay_notification notification_relay_event_buffer;
@@ -1033,8 +1055,6 @@ static cormoran_zmk_custom_settings_RelayNotification notification_relay_buffer;
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
     IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-static K_MUTEX_DEFINE(relay_notification_decode_lock);
-static cormoran_zmk_custom_settings_RelayNotification relay_notification_decode_buffer;
 /* Sized to the relay envelope, not CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE:
  * a peripheral may include a value up to whatever fits
  * ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE (see the retry-without-value
@@ -1048,9 +1068,11 @@ static struct bounded_decode_scratch relay_notification_value_decode_scratch = {
 
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
                                           cormoran_zmk_custom_settings_Notification *notification) {
-    k_mutex_lock(&relay_notification_decode_lock, K_FOREVER);
-
-    cormoran_zmk_custom_settings_RelayNotification *relay = &relay_notification_decode_buffer;
+    /* The caller holds notification_buffer_lock for the complete lifetime of
+     * the decoded callbacks and the subsequent Studio encode. That lock also
+     * makes notification_workspace safe to switch from its relay to its
+     * notification view below. */
+    cormoran_zmk_custom_settings_RelayNotification *relay = &notification_workspace.relay;
     *relay = (cormoran_zmk_custom_settings_RelayNotification)
         cormoran_zmk_custom_settings_RelayNotification_init_zero;
     /* Wired via Notification's message-level oneof precallback, not in
@@ -1062,11 +1084,28 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
     if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
-        k_mutex_unlock(&relay_notification_decode_lock);
         return -EIO;
     }
 
-    *notification = relay->notification;
+    /* custom_subsystem_id belongs to the relay envelope, whose storage is
+     * about to be reused for the public notification. Resolve it first so a
+     * relayed notification is never republished with a stale/default
+     * subsystem index. */
+    uint32_t custom_subsystem_index = 0;
+    bool has_custom_subsystem_index = false;
+    if (relay->has_custom_subsystem_id) {
+        int ret = custom_subsystem_index_for_identifier(relay->custom_subsystem_id,
+                                                        &custom_subsystem_index);
+        if (ret < 0) {
+            return ret;
+        }
+        has_custom_subsystem_index = true;
+    }
+
+    /* `notification` and relay->notification overlap in the union workspace;
+     * memmove is required (rather than struct assignment/memcpy) because the
+     * RelayNotification prefix means their addresses are not the same. */
+    memmove(notification, &relay->notification, sizeof(*notification));
     /* CRITICAL: the struct copy above brought along cb_notification_type,
      * whose funcs union still holds the DECODE-role precallback wired before
      * pb_decode(). nanopb's encoder invokes cb_<oneof>.funcs.encode for
@@ -1082,7 +1121,6 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     if (notification->which_notification_type !=
             cormoran_zmk_custom_settings_Notification_setting_tag ||
         !notification->notification_type.setting.has_setting) {
-        k_mutex_unlock(&relay_notification_decode_lock);
         return 0;
     }
 
@@ -1104,20 +1142,12 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
             &relay_notification_default_decode_scratch);
     }
 
-    if (relay->has_custom_subsystem_id) {
-        uint32_t custom_subsystem_index = 0;
-        int ret = custom_subsystem_index_for_identifier(relay->custom_subsystem_id,
-                                                        &custom_subsystem_index);
-        if (ret < 0) {
-            k_mutex_unlock(&relay_notification_decode_lock);
-            return ret;
-        }
+    if (has_custom_subsystem_index) {
         notification->notification_type.setting.setting.custom_subsystem_index =
             custom_subsystem_index;
     }
     notification->notification_type.setting.setting.source = ev->source;
 
-    k_mutex_unlock(&relay_notification_decode_lock);
     return 0;
 }
 
@@ -3848,8 +3878,10 @@ SYS_INIT(custom_settings_request_decode_regression_test_init, APPLICATION, 99);
  * encode context and overwrites the value union with the decode callback's
  * pointers. On hardware every relayed INT32 read back as 362819 (the Thumb
  * address of decode_into_bounded_scratch) and every BYTES/STRING value
- * vanished. This mirrors the decode -> sanitize -> re-encode sequence and
- * asserts both an INT32 and a STRING value survive the round trip.
+ * vanished. This mirrors the central's RelayNotification decode -> overlapping
+ * workspace move -> sanitize -> re-encode sequence and asserts both an INT32
+ * and a STRING value survive the round trip with the relayed source and
+ * subsystem index intact.
  */
 static int custom_settings_notification_reencode_regression_test_init(void) {
     static uint8_t value_buf[64];
@@ -3859,8 +3891,20 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
     static struct bounded_decode_scratch payload_scratch = {.buf = payload_buf,
                                                             .capacity = sizeof(payload_buf) - 1};
     static const char str_payload[] = "relay-p4";
-    uint8_t wire[160];
+    static union {
+        cormoran_zmk_custom_settings_Notification notification;
+        cormoran_zmk_custom_settings_RelayNotification relay;
+    } workspace;
+    uint8_t wire[256];
     uint8_t wire2[160];
+    uint32_t expected_subsystem_index = 0;
+    const uint32_t expected_source = 1;
+
+    if (custom_subsystem_index_for_identifier(SUBSYSTEM_IDENTIFIER_STRING,
+                                              &expected_subsystem_index) < 0) {
+        LOG_ERR("notification reencode regression: custom subsystem is not registered");
+        return -ENOENT;
+    }
 
     for (int use_string = 0; use_string <= 1; use_string++) {
         /* 1. Encode a source notification (as a peripheral would). */
@@ -3887,35 +3931,57 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
                 cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
             src.notification_type.setting.setting.value.value_type.int32_value = 63;
         }
+
+        cormoran_zmk_custom_settings_RelayNotification relay_src =
+            cormoran_zmk_custom_settings_RelayNotification_init_zero;
+        relay_src.has_custom_subsystem_id = true;
+        copy_string(relay_src.custom_subsystem_id, sizeof(relay_src.custom_subsystem_id),
+                    SUBSYSTEM_IDENTIFIER_STRING);
+        relay_src.has_notification = true;
+        relay_src.notification = src;
         pb_ostream_t out = pb_ostream_from_buffer(wire, sizeof(wire));
-        if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &src)) {
+        if (!pb_encode(&out, cormoran_zmk_custom_settings_RelayNotification_fields, &relay_src)) {
             LOG_ERR("notification reencode regression: encode failed: %s", PB_GET_ERROR(&out));
             return -EIO;
         }
 
-        /* 2. Decode it the way relayed_notification_to_public does. */
-        cormoran_zmk_custom_settings_Notification decoded =
-            cormoran_zmk_custom_settings_Notification_init_zero;
+        /* 2. Decode it into the RelayNotification view of an overlapping
+         * workspace, just as relayed_notification_to_public does. */
+        workspace.relay = (cormoran_zmk_custom_settings_RelayNotification)
+            cormoran_zmk_custom_settings_RelayNotification_init_zero;
         value_scratch.size = 0;
-        decoded.cb_notification_type.funcs.decode = notification_arm_wire_precallback;
-        decoded.cb_notification_type.arg = &value_scratch;
+        workspace.relay.notification.cb_notification_type.funcs.decode =
+            notification_arm_wire_precallback;
+        workspace.relay.notification.cb_notification_type.arg = &value_scratch;
         pb_istream_t in = pb_istream_from_buffer(wire, out.bytes_written);
-        if (!pb_decode(&in, cormoran_zmk_custom_settings_Notification_fields, &decoded)) {
+        if (!pb_decode(&in, cormoran_zmk_custom_settings_RelayNotification_fields,
+                       &workspace.relay)) {
             LOG_ERR("notification reencode regression: decode failed: %s", PB_GET_ERROR(&in));
             return -EIO;
         }
+        if (!workspace.relay.has_custom_subsystem_id ||
+            strcmp(workspace.relay.custom_subsystem_id, SUBSYSTEM_IDENTIFIER_STRING) != 0) {
+            LOG_ERR("notification reencode regression: relay subsystem id lost");
+            return -EINVAL;
+        }
 
-        /* 3. Sanitize + retarget exactly like the republish path, then
-         * re-encode. Without the cb clear this second encode corrupts the
-         * value (the hardware bug). */
-        cormoran_zmk_custom_settings_Notification republish = decoded;
-        republish.cb_notification_type = (pb_callback_t){0};
-        if (republish.notification_type.setting.setting.has_value) {
-            retarget_value_to_encode_scratch(&republish.notification_type.setting.setting.value,
+        /* 3. Resolve relay-only fields before the overlapping move, then
+         * sanitize + retarget exactly like the central republish path.
+         * memmove is intentional: RelayNotification's prefix makes the source
+         * and destination overlap at different addresses. */
+        memmove(&workspace.notification, &workspace.relay.notification,
+                sizeof(workspace.notification));
+        cormoran_zmk_custom_settings_Notification *republish = &workspace.notification;
+        republish->cb_notification_type = (pb_callback_t){0};
+        if (republish->notification_type.setting.setting.has_value) {
+            retarget_value_to_encode_scratch(&republish->notification_type.setting.setting.value,
                                              &value_scratch);
         }
+        republish->notification_type.setting.setting.custom_subsystem_index =
+            expected_subsystem_index;
+        republish->notification_type.setting.setting.source = expected_source;
         out = pb_ostream_from_buffer(wire2, sizeof(wire2));
-        if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &republish)) {
+        if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, republish)) {
             LOG_ERR("notification reencode regression: re-encode failed: %s", PB_GET_ERROR(&out));
             return -EIO;
         }
@@ -3936,6 +4002,14 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
         }
         const cormoran_zmk_custom_settings_SettingValue *v =
             &final_msg.notification_type.setting.setting.value;
+        const cormoran_zmk_custom_settings_Setting *final_setting =
+            &final_msg.notification_type.setting.setting;
+        if (final_setting->custom_subsystem_index != expected_subsystem_index ||
+            final_setting->source != expected_source) {
+            LOG_ERR("notification reencode regression: source/subsystem lost (%u/%u)",
+                    final_setting->source, final_setting->custom_subsystem_index);
+            return -EINVAL;
+        }
         if (use_string) {
             if (v->which_value_type != cormoran_zmk_custom_settings_SettingValue_string_value_tag ||
                 final_scratch.size != sizeof(str_payload) - 1 ||
