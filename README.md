@@ -620,6 +620,11 @@ ZMK_CUSTOM_SETTING_ARRAY_DEFINE(my_layers, "my_module", "layers",
 follow the same naming pattern as the scalar `ZMK_CUSTOM_SETTING_DEFINE*`
 macros for zero-or-more constraints and/or custom bytes RPC converters.
 
+Array storage is compact by value type: `INT32`, `BOOL`, and `BEHAVIOR`
+arrays keep only their payloads in RAM, rather than one full value carrier per
+element. This is transparent to the API, Studio RPC, and persisted
+`key/index` records, so no migration is needed.
+
 > **Migrating from `ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE`**: older versions
 > of this module registered arrays one element at a time
 > (`ZMK_CUSTOM_SETTING_ARRAY_ELEMENT_DEFINE(name, subsys, key, index,

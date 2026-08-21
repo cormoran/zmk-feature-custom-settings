@@ -249,6 +249,70 @@ ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_view_pool_array, "test", "view_pool",
                                 ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
                                 ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
 
+/* Array backing slots retain only each value type's payload. These layout
+ * assertions cover the RAM-sensitive scalar cases directly: a behavior
+ * array matching runtime-sensor-rotate's 4 sensors x 14 layers now needs
+ * 56 * 12 = 672 B instead of 56 full 76-B carriers (4,256 B). */
+BUILD_ASSERT(sizeof(test_array_setting_values) == 3 * sizeof(int32_t),
+             "INT32 array entries must not allocate full value carriers");
+BUILD_ASSERT(sizeof(test_view_pool_array_values) == 20 * sizeof(int32_t),
+             "INT32 array entries must remain compact at scale");
+
+static const struct zmk_custom_setting_value test_compact_bool_defaults[] = {
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL, .bool_value = false},
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL, .bool_value = true},
+};
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_compact_bool_array, "test", "compact_bool",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL, 3, 2,
+                                test_compact_bool_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+BUILD_ASSERT(sizeof(test_compact_bool_array_values) == 3 * sizeof(bool),
+             "BOOL array entries must not allocate full value carriers");
+
+static const struct zmk_custom_setting_value test_compact_bytes_defaults[] = {
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 2, .bytes_value = {1, 2}},
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 1, .bytes_value = {3}},
+};
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_compact_bytes_array, "test", "compact_bytes",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, 3, 2,
+                                test_compact_bytes_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+static const struct zmk_custom_setting_value test_compact_string_defaults[] = {
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING, .size = 3, .string_value = "one"},
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING, .size = 3, .string_value = "two"},
+};
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_compact_string_array, "test", "compact_string",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING, 3, 2,
+                                test_compact_string_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+static const struct zmk_custom_setting_value test_compact_behavior_defaults[56] = {
+    [0 ... 55] = {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,
+                  .behavior_value = {.behavior_id = 0, .param1 = 0, .param2 = 0}},
+};
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE(test_compact_behavior_array, "test", "compact_behavior",
+                                ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR, 56, 56,
+                                test_compact_behavior_defaults,
+                                ZMK_CUSTOM_SETTING_CONFIDENTIALITY_RPC_PUBLIC,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+BUILD_ASSERT(sizeof(test_compact_behavior_array_values) ==
+                 56 * sizeof(struct zmk_custom_setting_behavior_value),
+             "56 behavior bindings must use 672 B of backing storage");
+#endif
+
 /* Scalar filler used by the temp-slot leak/unregister tests to occupy
  * temporary-override pool slots without perturbing the settings exercised by
  * other tests. Unconstrained so any int32 value is accepted. */
@@ -1192,6 +1256,107 @@ static int test_array_insert_remove(void) {
         return ret;
     }
 
+    return 0;
+}
+
+/* The compact representation is private to the array implementation. Exercise
+ * every public value type through read/write, persistence, discard and a
+ * memmove-based insert/remove so the wire/storage-facing carrier never leaks
+ * into the backing layout. */
+static int test_compact_array_value_types(void) {
+    const struct zmk_custom_setting *bool_array =
+        zmk_custom_setting_find_array("test", "compact_bool");
+    const struct zmk_custom_setting *bytes_array =
+        zmk_custom_setting_find_array("test", "compact_bytes");
+    const struct zmk_custom_setting *string_array =
+        zmk_custom_setting_find_array("test", "compact_string");
+    if (!bool_array || !bytes_array || !string_array) {
+        LOG_ERR("Compact array test settings not registered");
+        return -ENOENT;
+    }
+
+    int ret = zmk_custom_setting_reset(bool_array);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_array_insert_at(bool_array, 1, &ZMK_CUSTOM_SETTING_VALUE_BOOL(false),
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    struct zmk_custom_setting_value value;
+    ret = zmk_custom_setting_read_array_by_key("test", "compact_bool", 2, &value);
+    if (ret < 0 || value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL || !value.bool_value) {
+        LOG_ERR("Compact BOOL array did not retain shifted value");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(bytes_array);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write_array_by_key("test", "compact_bytes", 1,
+                                                &ZMK_CUSTOM_SETTING_VALUE_BYTES(9, 8, 7),
+                                                ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write_array_by_key("test", "compact_bytes", 1,
+                                                &ZMK_CUSTOM_SETTING_VALUE_BYTES(0),
+                                                ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_discard(bytes_array);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_read_array_by_key("test", "compact_bytes", 1, &value);
+    if (ret < 0 || value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES || value.size != 3 ||
+        memcmp(value.bytes_value, (uint8_t[]){9, 8, 7}, 3) != 0) {
+        LOG_ERR("Compact BYTES array persist/discard round-trip failed");
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_reset(string_array);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_write_array_by_key("test", "compact_string", 1,
+                                                &ZMK_CUSTOM_SETTING_VALUE_STRING("new"),
+                                                ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_array_remove_at(string_array, 0, NULL,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = zmk_custom_setting_read_array_by_key("test", "compact_string", 0, &value);
+    if (ret < 0 || value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ||
+        strcmp(value.string_value, "new") != 0) {
+        LOG_ERR("Compact STRING array did not retain moved value");
+        return -EINVAL;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+    const struct zmk_custom_setting *behavior_array =
+        zmk_custom_setting_find_array_element("test", "compact_behavior", 55);
+    if (!behavior_array) {
+        LOG_ERR("Compact behavior array not registered");
+        return -ENOENT;
+    }
+    ret = zmk_custom_setting_read(behavior_array, &value);
+    if (ret < 0 || value.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR ||
+        value.behavior_value.behavior_id != 0 || value.behavior_value.param1 != 0 ||
+        value.behavior_value.param2 != 0) {
+        LOG_ERR("Compact BEHAVIOR array did not materialize a carrier value");
+        return -EINVAL;
+    }
+#endif
+
+    LOG_INF("PASS: custom_settings_compact_array_value_types");
     return 0;
 }
 
@@ -2860,6 +3025,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_array_insert_remove();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_compact_array_value_types();
     if (ret < 0) {
         return ret;
     }

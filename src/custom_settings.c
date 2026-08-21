@@ -435,8 +435,8 @@ static void set_setting_has_persistent_value(const struct zmk_custom_setting *se
  * Materialize the current MEMORY value (never a temporary override) as a
  * fixed carrier, or NULL when a blob payload does not fit the carrier
  * (callers must then use zmk_custom_setting_read_into / the raw blob path
- * instead). Array elements are stored as carriers already and are returned
- * in place; a scalar or a carrier-sized blob value is materialized into the
+ * instead). Array elements use compact value-type-specific storage, while a
+ * scalar or a carrier-sized blob value is materialized into the
  * shared effective_scratch_value (custom_settings_lock held, like every scratch in
  * this file).
  */
@@ -444,7 +444,9 @@ static const struct zmk_custom_setting_value *
 memory_value_locked(const struct zmk_custom_setting *setting) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        return &setting->array_state->values[setting->array_index];
+        array_value_read_at(setting->array_state, setting->value_type, setting->array_index,
+                            &effective_scratch_value);
+        return &effective_scratch_value;
     }
 
     const struct zmk_custom_setting_state *state = setting->state;
@@ -1106,13 +1108,14 @@ int zmk_custom_setting_deserialize_rpc_value(const struct zmk_custom_setting *se
 }
 
 /* Store `value` as `setting`'s in-memory value, routing to the right
- * backing storage: array element carrier, blob store, or the inline scalar
+ * backing storage: compact array element, blob store, or the inline scalar
  * state union. Caller must hold custom_settings_lock. */
 static int store_memory_value_locked(const struct zmk_custom_setting *setting,
                                      const struct zmk_custom_setting_value *value) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        copy_value(&setting->array_state->values[setting->array_index], value);
+        array_value_write_at(setting->array_state, setting->value_type, setting->array_index,
+                             value);
         return 0;
     }
 
@@ -2212,7 +2215,8 @@ void init_setting_state_locked(const struct zmk_custom_setting *setting) {
          * instead of walking "sibling" registrations. */
         struct zmk_custom_setting_array_state *array_state = setting->array_state;
         for (uint32_t index = 0; index < array_state->max_size; index++) {
-            copy_value(&array_state->values[index], &array_state->defaults[index]);
+            array_value_write_at(array_state, setting->value_type, index,
+                                 &array_state->defaults[index]);
             array_state->has_persistent[index] = false;
             array_state->dirty[index] = false;
         }

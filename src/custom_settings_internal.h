@@ -276,6 +276,18 @@ size_t bounded_strlen(const char *str, size_t max_len);
  * source side). */
 void copy_value(struct zmk_custom_setting_value *dest, const struct zmk_custom_setting_value *src);
 
+/* Array values use compact, value-type-specific backing slots. These helpers
+ * are the sole bridge to the public fixed-size value carrier. Caller holds
+ * custom_settings_lock. */
+void array_value_read_at(const struct zmk_custom_setting_array_state *array_state,
+                         enum zmk_custom_setting_value_type type, uint32_t index,
+                         struct zmk_custom_setting_value *out_value);
+void array_value_write_at(struct zmk_custom_setting_array_state *array_state,
+                          enum zmk_custom_setting_value_type type, uint32_t index,
+                          const struct zmk_custom_setting_value *value);
+void array_values_move(struct zmk_custom_setting_array_state *array_state, uint32_t destination,
+                       uint32_t source, uint32_t count);
+
 /* Split `value` into a (data pointer, length) pair suitable for
  * settings_save_one/memcpy, encoding a BEHAVIOR value into a shared scratch
  * buffer first if needed. Caller holds custom_settings_lock (the BEHAVIOR

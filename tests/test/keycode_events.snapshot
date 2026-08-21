@@ -23,6 +23,7 @@ PASS: custom_settings_insert_at_end array={1,99,77}
 PASS: custom_settings_insert_at_out_of_range
 PASS: custom_settings_remove_at_middle array={1,77} removed=99
 PASS: custom_settings_remove_at_out_of_range
+PASS: custom_settings_compact_array_value_types
 PASS: custom_settings_array_storage_backward_compat size=2 values={11,22}
 PASS: custom_settings_view_api int=42 bytes=05060708
 PASS: custom_settings_temporary_rollback scalar=10
