@@ -2702,7 +2702,8 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
     }
 }
 
-#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static void relay_ref_to_private(const cormoran_zmk_custom_settings_RelaySettingRef *src,
                                  struct zmk_custom_settings_setting_ref *dest) {
     *dest = (struct zmk_custom_settings_setting_ref){0};
@@ -4219,7 +4220,9 @@ SYS_INIT(custom_settings_reset_keyspace_test_init, APPLICATION, 99);
 #endif
 #endif
 
-#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+/* A relay request is delivered and executed only by a peripheral. */
 static int relay_request_listener(const zmk_event_t *eh) {
     const struct zmk_custom_settings_relay_request *ev = as_zmk_custom_settings_relay_request(eh);
     if (!ev) {
@@ -4243,7 +4246,13 @@ static int relay_request_listener(const zmk_event_t *eh) {
     return ZMK_EV_EVENT_BUBBLE;
 }
 
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+ZMK_LISTENER(custom_settings_relay_request, relay_request_listener);
+ZMK_SUBSCRIPTION(custom_settings_relay_request, zmk_custom_settings_relay_request);
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
+    IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
+/* Central images retain the peripheral-to-central notification receive path. */
 static void relay_notification_work_handler(struct k_work *work);
 
 K_MSGQ_DEFINE(relay_notification_msgq, sizeof(struct zmk_custom_settings_relay_notification),
@@ -4296,14 +4305,8 @@ static int relay_notification_listener(const zmk_event_t *eh) {
 
     return ZMK_EV_EVENT_BUBBLE;
 }
-#endif
-
-ZMK_LISTENER(custom_settings_relay_request, relay_request_listener);
-ZMK_SUBSCRIPTION(custom_settings_relay_request, zmk_custom_settings_relay_request);
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 ZMK_LISTENER(custom_settings_relay_notification, relay_notification_listener);
 ZMK_SUBSCRIPTION(custom_settings_relay_notification, zmk_custom_settings_relay_notification);
-#endif
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_TEST) &&                                                 \
