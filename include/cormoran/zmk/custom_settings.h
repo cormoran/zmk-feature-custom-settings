@@ -166,8 +166,14 @@ struct zmk_custom_setting_constraint {
 };
 
 /*
- * Mutable, per-array state for one array setting: a single contiguous backing
- * buffer plus per-slot bookkeeping, sized once by max_count. Allocated
+ * Mutable, per-array state for one array setting: a single contiguous,
+ * value-type-specific backing buffer plus per-slot bookkeeping, sized once
+ * by max_count. Scalar elements deliberately do not retain the public
+ * zmk_custom_setting_value carrier's type/size/bytes union: INT32, BOOL and
+ * BEHAVIOR use 4, 1 and 12 bytes per element respectively. The public API
+ * materializes the carrier at its boundary, so this representation is an
+ * internal RAM optimization and does not affect RPC or settings storage.
+ * Allocated
  * statically by ZMK_CUSTOM_SETTING_ARRAY_DEFINE (one instance per array) and
  * referenced by `array_state` from both the array's single registered
  * descriptor and any short-lived "index view" struct zmk_custom_setting
@@ -176,7 +182,9 @@ struct zmk_custom_setting_constraint {
  * custom_settings_lock.
  */
 struct zmk_custom_setting_array_state {
-    struct zmk_custom_setting_value *values;
+    uint8_t *values;
+    /* Size of one private value slot in `values`. */
+    size_t value_storage_size;
     /* True if `values[i]`/`dirty[i]`/`has_persistent[i]` has ever been
      * written to (memory or persisted) since the last reset - lets save/
      * discard/reset operate in O(active count) without walking a registry. */
@@ -728,11 +736,12 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
     BUILD_ASSERT((_default_size) <= (_max_count),                                                  \
                  "Custom setting array default size must not exceed max count");                   \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
-    static struct zmk_custom_setting_value _name##_values[_max_count];                             \
+    static ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE(_value_type) _name##_values[_max_count];          \
     static bool _name##_dirty[_max_count];                                                         \
     static bool _name##_has_persistent[_max_count];                                                \
     static struct zmk_custom_setting_array_state _name##_array_state = {                           \
-        .values = _name##_values,                                                                  \
+        .values = (uint8_t *)_name##_values,                                                       \
+        .value_storage_size = sizeof(_name##_values[0]),                                           \
         .dirty = _name##_dirty,                                                                    \
         .has_persistent = _name##_has_persistent,                                                  \
         .max_size = (_max_count),                                                                  \
@@ -759,6 +768,23 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
         .rpc_deserializer = _rpc_deserializer,                                                     \
         .state = &_name##_state,                                                                   \
     }
+
+/* The arrays above only need to retain their payload: the public
+ * zmk_custom_setting_value carrier is reconstructed on read. BYTES/STRING
+ * retain the carrier because their payload is the carrier-sized portion;
+ * the scalar entries below are the source of the substantial RAM saving. */
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE(_value_type)                                         \
+    ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_INNER(_value_type)
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_INNER(_value_type)                                   \
+    ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_##_value_type
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES                  \
+    struct zmk_custom_setting_value
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 int32_t
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL bool
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING                 \
+    struct zmk_custom_setting_value
+#define ZMK_CUSTOM_SETTING_ARRAY_STORAGE_TYPE_ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR               \
+    struct zmk_custom_setting_behavior_value
 
 /* Declares a `static const struct zmk_custom_setting_value[]` of INT32
  * defaults suitable for ZMK_CUSTOM_SETTING_ARRAY_DEFINE's _defaults

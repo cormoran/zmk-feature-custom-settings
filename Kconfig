@@ -22,9 +22,10 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
     help
       Size of the struct zmk_custom_setting_value API exchange carrier
-      (stack-allocated by zmk_custom_setting_read/write callers and used by
-      the array feature's element storage) and the single-frame RPC value
-      bound: the largest value an incoming single-frame write can carry.
+      (stack-allocated by zmk_custom_setting_read/write callers) and the
+      single-frame RPC value bound: the largest value an incoming single-frame
+      write can carry. Array element storage is compact and sized by its
+      declared value type rather than this carrier.
       Since simplification P4 this does NOT size any per-setting storage -
       a BYTES/STRING setting's value lives in an exact-size buffer or pool
       region, and scalars store inline in a small per-setting state block.

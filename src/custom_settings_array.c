@@ -63,6 +63,62 @@ struct zmk_custom_setting_array_view_slot {
 static struct zmk_custom_setting_array_view_slot
     array_view_pool[CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE];
 
+void array_value_read_at(const struct zmk_custom_setting_array_state *array_state,
+                         enum zmk_custom_setting_value_type type, uint32_t index,
+                         struct zmk_custom_setting_value *out_value) {
+    const uint8_t *slot = array_state->values + index * array_state->value_storage_size;
+
+    *out_value = (struct zmk_custom_setting_value){.type = type};
+    switch (type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        copy_value(out_value, (const struct zmk_custom_setting_value *)slot);
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        memcpy(&out_value->int32_value, slot, sizeof(out_value->int32_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        memcpy(&out_value->bool_value, slot, sizeof(out_value->bool_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        memcpy(&out_value->behavior_value, slot, sizeof(out_value->behavior_value));
+        break;
+    default:
+        break;
+    }
+}
+
+void array_value_write_at(struct zmk_custom_setting_array_state *array_state,
+                          enum zmk_custom_setting_value_type type, uint32_t index,
+                          const struct zmk_custom_setting_value *value) {
+    uint8_t *slot = array_state->values + index * array_state->value_storage_size;
+
+    switch (type) {
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
+        copy_value((struct zmk_custom_setting_value *)slot, value);
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
+        memcpy(slot, &value->int32_value, sizeof(value->int32_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
+        memcpy(slot, &value->bool_value, sizeof(value->bool_value));
+        break;
+    case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
+        memcpy(slot, &value->behavior_value, sizeof(value->behavior_value));
+        break;
+    default:
+        break;
+    }
+}
+
+void array_values_move(struct zmk_custom_setting_array_state *array_state, uint32_t destination,
+                       uint32_t source, uint32_t count) {
+    memmove(array_state->values + destination * array_state->value_storage_size,
+            array_state->values + source * array_state->value_storage_size,
+            count * array_state->value_storage_size);
+}
+
 /* Non-static: zmk_custom_setting_discard/zmk_custom_setting_reset's array
  * branches (custom_settings.c) call this directly for whole-array discard/
  * reset. Declared in custom_settings_internal.h. */
@@ -294,9 +350,11 @@ int save_array_locked(const struct zmk_custom_setting *array_descriptor) {
             return ret;
         }
 
+        struct zmk_custom_setting_value value;
+        array_value_read_at(array_state, array_descriptor->value_type, index, &value);
         const void *data;
         size_t len;
-        ret = value_to_storage(&array_state->values[index], &data, &len);
+        ret = value_to_storage(&value, &data, &len);
         if (ret < 0) {
             return ret;
         }
@@ -494,8 +552,7 @@ int zmk_custom_setting_array_insert_at(const struct zmk_custom_setting *const_se
      * treat elements that fall out of the valid range on resize. */
     uint32_t move_count = array_size - index;
     if (move_count > 0) {
-        memmove(&array_state->values[index + 1], &array_state->values[index],
-                move_count * sizeof(array_state->values[0]));
+        array_values_move(array_state, index + 1, index, move_count);
         memmove(&array_state->dirty[index + 1], &array_state->dirty[index],
                 move_count * sizeof(array_state->dirty[0]));
         memmove(&array_state->has_persistent[index + 1], &array_state->has_persistent[index],
@@ -503,7 +560,7 @@ int zmk_custom_setting_array_insert_at(const struct zmk_custom_setting *const_se
         clear_temporary_past_size_locked(array_state, index);
     }
 
-    copy_value(&array_state->values[index], value);
+    array_value_write_at(array_state, setting->value_type, index, value);
     array_state->dirty[index] = true;
     array_state->has_persistent[index] = false;
     array_state->size = array_size + 1;
@@ -564,8 +621,7 @@ int zmk_custom_setting_array_remove_at(const struct zmk_custom_setting *const_se
      * contiguous buffer instead of requiring N individual element writes. */
     uint32_t move_count = array_size - index - 1;
     if (move_count > 0) {
-        memmove(&array_state->values[index], &array_state->values[index + 1],
-                move_count * sizeof(array_state->values[0]));
+        array_values_move(array_state, index, index + 1, move_count);
         memmove(&array_state->dirty[index], &array_state->dirty[index + 1],
                 move_count * sizeof(array_state->dirty[0]));
         memmove(&array_state->has_persistent[index], &array_state->has_persistent[index + 1],
@@ -626,10 +682,11 @@ int discard_array_element_locked(struct zmk_custom_setting *view) {
             ret = settings_load_subtree(name);
         }
         if (ret < 0) {
-            copy_value(&array_state->values[index], &array_state->defaults[index]);
+            array_value_write_at(array_state, view->value_type, index,
+                                 &array_state->defaults[index]);
         }
     } else {
-        copy_value(&array_state->values[index], &array_state->defaults[index]);
+        array_value_write_at(array_state, view->value_type, index, &array_state->defaults[index]);
     }
     array_state->dirty[index] = false;
     clear_temporary_locked(view);
@@ -659,7 +716,7 @@ int reset_array_element_locked(struct zmk_custom_setting *view) {
         return ret;
     }
 
-    copy_value(&array_state->values[index], &array_state->defaults[index]);
+    array_value_write_at(array_state, view->value_type, index, &array_state->defaults[index]);
     array_state->has_persistent[index] = false;
     array_state->dirty[index] = false;
     clear_temporary_locked(view);
