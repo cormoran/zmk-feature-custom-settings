@@ -6,6 +6,7 @@ cormoran.zmk.custom_settings.RelaySettingScope.custom_subsystem_id max_size:32
 cormoran.zmk.custom_settings.RelaySettingScope.key max_size:48
 cormoran.zmk.custom_settings.RelaySettingScope.key_prefix max_size:48
 cormoran.zmk.custom_settings.RelayNotification.custom_subsystem_id max_size:32
+cormoran.zmk.custom_settings.RelayNotification.notification type:FT_CALLBACK
 cormoran.zmk.custom_settings.RelayNotification descriptorsize:DS_4
 
 # Same oneof-submessage-arm callback-wipe issue as Request in

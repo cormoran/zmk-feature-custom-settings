@@ -396,7 +396,7 @@ void clear_temporary_locked(const struct zmk_custom_setting *setting) {
 static bool setting_is_dirty(const struct zmk_custom_setting *setting) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        return *array_dirty_slot(setting);
+        return array_dirty_get(setting);
     }
 
     return state_flag(setting, ZMK_CUSTOM_SETTING_STATE_DIRTY);
@@ -405,7 +405,7 @@ static bool setting_is_dirty(const struct zmk_custom_setting *setting) {
 void set_setting_dirty(const struct zmk_custom_setting *setting, bool dirty) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        *array_dirty_slot(setting) = dirty;
+        array_dirty_set(setting, dirty);
         return;
     }
 
@@ -415,7 +415,7 @@ void set_setting_dirty(const struct zmk_custom_setting *setting, bool dirty) {
 static bool setting_has_persistent_value(const struct zmk_custom_setting *setting) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        return *array_has_persistent_slot(setting);
+        return array_has_persistent_get(setting);
     }
 
     return state_flag(setting, ZMK_CUSTOM_SETTING_STATE_HAS_PERSISTENT);
@@ -424,7 +424,7 @@ static bool setting_has_persistent_value(const struct zmk_custom_setting *settin
 static void set_setting_has_persistent_value(const struct zmk_custom_setting *setting, bool value) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        *array_has_persistent_slot(setting) = value;
+        array_has_persistent_set(setting, value);
         return;
     }
 
@@ -444,7 +444,7 @@ static const struct zmk_custom_setting_value *
 memory_value_locked(const struct zmk_custom_setting *setting) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        return &setting->array_state->values[setting->array_index];
+        return array_memory_value_locked(setting);
     }
 
     const struct zmk_custom_setting_state *state = setting->state;
@@ -1112,8 +1112,7 @@ static int store_memory_value_locked(const struct zmk_custom_setting *setting,
                                      const struct zmk_custom_setting_value *value) {
     if (zmk_custom_setting_is_array(setting) &&
         setting->array_index != ZMK_CUSTOM_SETTING_ARRAY_NONE) {
-        copy_value(&setting->array_state->values[setting->array_index], value);
-        return 0;
+        return array_store_value_locked(setting, value);
     }
 
     return store_scalar_value_locked(setting, value);
@@ -1683,8 +1682,10 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
     k_mutex_lock(&custom_settings_lock, K_FOREVER);
     if (setting_uses_blob_store(setting) && !setting_temporary_active(setting)) {
         size_t size = setting->state->blob.size;
+        size_t copy_size = size +
+                           (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ? 1 : 0);
         int ret = 0;
-        if (size > capacity) {
+        if (copy_size > capacity) {
             ret = -EMSGSIZE;
         } else {
             /* A pooled setting with no region yet (blob.data == NULL) has
@@ -1692,6 +1693,9 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
              * to memcpy. */
             if (size > 0) {
                 memcpy(buf, setting->state->blob.data, size);
+            }
+            if (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING) {
+                ((char *)buf)[size] = '\0';
             }
             if (out_size) {
                 *out_size = size;
@@ -2211,11 +2215,7 @@ void init_setting_state_locked(const struct zmk_custom_setting *setting) {
          * initialize every element slot from its own per-index default
          * instead of walking "sibling" registrations. */
         struct zmk_custom_setting_array_state *array_state = setting->array_state;
-        for (uint32_t index = 0; index < array_state->max_size; index++) {
-            copy_value(&array_state->values[index], &array_state->defaults[index]);
-            array_state->has_persistent[index] = false;
-            array_state->dirty[index] = false;
-        }
+        array_initialize_storage_locked(setting);
         array_state->persistent_size = array_state->default_size;
         array_state->size = array_state->default_size;
     } else {
