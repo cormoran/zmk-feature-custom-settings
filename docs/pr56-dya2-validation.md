@@ -1,7 +1,9 @@
 # PR #56: latest DYA2 validation
 
 Status: software regressions reproduced and fixed; all pre-commit checks and
-standard tests passed. Hardware validation in progress (2026-09-20 UTC).
+standard tests passed. Single-board USB RPC and metadata tested on 2026-09-20
+UTC; scalar persistence after reboot remains unverified. Original flash and
+UICR verified byte-for-byte after restoration; hardware locks released.
 
 ## Revisions and scope
 
@@ -187,7 +189,8 @@ The generated DTS names `board_cdc_acm_uart` and
 `snippet_studio_rpc_usb_uart`, but the board console node is disabled;
 Studio's chosen node is the latter. Thus two node names do not imply two
 active CDC ports. Initial requests timed out. Transport/running-state checks
-are in progress; no runtime pass is claimed yet.
+initially produced no valid runtime result. The completed tests below use
+the diagnosed test-rig boot layout, not the stock production offset.
 
 Luna completed discovery/backup/baseline flashing. Terra took over the USB
 RPC diagnosis after the interrupted session, with an explicit lock handoff.
@@ -226,10 +229,42 @@ PR #56:   a47d9f19e58085eb87a544c6c648bc4dad0cc00966f48d4ca4b3da296d9ab12b
 fixed:    eb039270d47a2b2b219f83def292fdea9e0abc870310ad8b3b7397ab4ff899c9
 ```
 
-The flash-at-zero baseline answers `core.get_device_info` (`DYA2`),
+All three flash-at-zero images answer `core.get_device_info` (`DYA2`),
 `core.get_lock_state` (unlocked), and `custom.list_custom_subsystems` (14
-subsystems) over USB. These checks establish that the test image's Studio
-transport works; settings comparison and final restoration are still pending.
+subsystems) over USB. Baseline accepts ListSettings with an affected count
+of 39 and answers five subsequent device-info requests. The original PR also
+accepts ListSettings (39) and answers a later device-info request; a transient
+timeout in the original collector does not establish a firmware freeze.
+
+With the queued adapter below, the corrected image returns exactly 39
+decoded Setting notifications for a ListSettings affected count of 39. All
+39 contain metadata; 10 contain constraints (10 constraints total). Another
+device-info request succeeds afterward. The collector requests defaults,
+but none are present; the schema intentionally omits a default when the
+current value equals it. These are local settings notifications, not remote
+split relay verification.
+
+The fixed image reads `cormoran__runtime_macro/tap_ms = 30` and accepts a
+persisted write of 31 (`Setting written`, affected count 1). After normal
+reset, USB access returns a pipe error and then a timeout; neither readback
+of 31 nor the attempted RPC write restoring 30 completes. **Persistence
+across reboot is not established by this test.** This transport failure
+does not by itself establish loss of the stored setting. The agent proceeds
+to restore the full pre-test flash backup, including settings, rather than
+leaving the test value in place. The restored full flash matches the original
+backup; UICR was not rewritten and also matches. Normal reset and execution
+resume were issued afterward, and both hardware locks were released.
+
+Restoration verification (SHA256 of pre-test and post-restore readbacks):
+
+```text
+flash (1048576 bytes): 0319cac5b3ab0654bce5ee748777e9d7efa5b87a8547d145f263e174574fc760
+UICR  (4096 bytes):    1bd202269c70fa0f2e6374544d34ab842f77b795d3d259c0ae282c7395aa44b6
+```
+
+Raw RPC/J-Link logs and private backups remain in the local workspace under
+`.work/pr56-hardware/`; only summarized results and image hashes are published.
+The unresolved reboot/readback check is why this review PR remains a draft.
 
 ### Notification collection caveat
 
