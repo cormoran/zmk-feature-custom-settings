@@ -127,6 +127,12 @@ Therefore the RAM result does not justify reducing those stacks.
 - Clang-format, Ruff, whitespace, conflict, and file-size hooks pass.
 - No Web code or protobuf schema was changed; Web hooks correctly skip.
 
+GitHub CI for code commit `9ace6052fd7c979f0e0173baf8b4e190c93ab78b` also
+passed: [firmware Build and Renode wired-split relay](https://github.com/cormoran/zmk-feature-custom-settings/actions/runs/35522278357),
+and [Web tests/build](https://github.com/cormoran/zmk-feature-custom-settings/actions/runs/35522278331).
+The Renode result is simulated two-device integration, not physical split
+validation on the attached single XIAO.
+
 The new tests first failed against the PR implementation, then passed with
 the fixes. Stricter scalar validation also requires the temporary keyspace
 payload descriptor to carry its `max_size`; the existing large-keyspace
@@ -153,6 +159,17 @@ XIAO module configurations and the native core/Studio/peripheral suites.
 The `_reset` firmware targets are deliberately excluded from hardware tests.
 The unlocked image is an explicit test configuration, not the release image.
 
+HEX SHA256 identities (fixed sources were committed as `9ace605` after
+building; later report-only commits do not alter these artifacts):
+
+```text
+baseline right: a31ebf03271c0bf6130754b9eb8bc677ea0e423991d711e8f66fc178c7c92950
+PR #56 right:   dfab74f7fd1654213d167780cbacdfd665a86fd60b718669851d66b12f06fd49
+fixed right:    a9056cf19db33bf12e20ae85899143ae87203b9c236068aaa5ff44fa9efd1767
+fixed unlocked: 8dcd671c85582c4f7a18c72ae496b6bbf8f88965f57db023ad5f8609ae109893
+fixed left:     e2126d8689ea24f0c1599d2a7fef76763315ae29cbd2b1a0aeeb50eb71d507bc
+```
+
 ## Hardware progress
 
 Initial discovery identified a J-Link OB-nRF5340-NordicSemi probe, serial
@@ -166,7 +183,11 @@ attached to nRF52840, board serial `0C5B206D3B120A9F`. The hardware agent
 backed up 1 MiB flash and 4 KiB UICR locally, then flashed and verified the
 baseline. Backups are private local artifacts, not committed to this repo.
 
-The generated DTS has two CDC ACM devices: `board_cdc_acm_uart` and
-`snippet_studio_rpc_usb_uart`; Studio's chosen node is the latter. Requests
-to the first CDC interface timed out. Correct-interface RPC checks are in
-progress; no runtime pass is claimed yet.
+The generated DTS names `board_cdc_acm_uart` and
+`snippet_studio_rpc_usb_uart`, but the board console node is disabled;
+Studio's chosen node is the latter. Thus two node names do not imply two
+active CDC ports. Initial requests timed out. Transport/running-state checks
+are in progress; no runtime pass is claimed yet.
+
+Luna completed discovery/backup/baseline flashing. Terra took over the USB
+RPC diagnosis after the interrupted session, with an explicit lock handoff.
