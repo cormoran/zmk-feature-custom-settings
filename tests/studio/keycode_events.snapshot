@@ -54,6 +54,7 @@ PASS: custom_settings_pool_string_member value=hello
 PASS: custom_settings_keyspace_large_value size=100
 PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
 PASS: custom_settings_initialized_event count=1
+PASS: custom_settings_persisted_behavior_load_before_local_ids
 PASS: custom_settings_behavior_value param1=0x70004
 PASS: custom_settings_behavior_value_rejects_invalid
 PASS: custom_settings_reset_keyspace_deletes_entry key=macro/reset

@@ -584,9 +584,14 @@ const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setti
  * mirroring how validate_behavior_id_constraint below resolves a behavior
  * local id, but additionally checking param1/param2 through
  * zmk_behavior_validate_binding instead of accepting any uint32_t. */
-static int validate_behavior_value(const struct zmk_custom_setting_behavior_value *behavior) {
+static int validate_behavior_value(const struct zmk_custom_setting_behavior_value *behavior,
+                                   bool resolve_behavior) {
     if (behavior->behavior_id >= UINT16_MAX) {
         return -ERANGE;
+    }
+
+    if (!resolve_behavior) {
+        return 0;
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
@@ -608,7 +613,8 @@ static int validate_behavior_value(const struct zmk_custom_setting_behavior_valu
 }
 
 static int value_type_validate(const struct zmk_custom_setting *setting,
-                               const struct zmk_custom_setting_value *value) {
+                               const struct zmk_custom_setting_value *value,
+                               bool resolve_behaviors) {
     if (setting->value_type != value->type) {
         return -EINVAL;
     }
@@ -622,7 +628,7 @@ static int value_type_validate(const struct zmk_custom_setting *setting,
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
-        return validate_behavior_value(&value->behavior_value);
+        return validate_behavior_value(&value->behavior_value, resolve_behaviors);
     default:
         return -EINVAL;
     }
@@ -702,7 +708,8 @@ static int validate_layer_id_constraint(const struct zmk_custom_setting_value *v
     return layer_id >= 0 && layer_id < ZMK_KEYMAP_LAYERS_LEN ? 0 : -ERANGE;
 }
 
-static int validate_behavior_id_constraint(const struct zmk_custom_setting_value *value) {
+static int validate_behavior_id_constraint(const struct zmk_custom_setting_value *value,
+                                           bool resolve_behavior) {
     int32_t behavior_id;
     int ret = validate_int32_value(value, &behavior_id);
     if (ret < 0) {
@@ -710,6 +717,10 @@ static int validate_behavior_id_constraint(const struct zmk_custom_setting_value
     }
     if (behavior_id < 0 || behavior_id >= UINT16_MAX) {
         return -ERANGE;
+    }
+
+    if (!resolve_behavior) {
+        return 0;
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
@@ -721,13 +732,13 @@ static int validate_behavior_id_constraint(const struct zmk_custom_setting_value
 #endif
 }
 
-int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
-                                const struct zmk_custom_setting_value *value) {
+static int validate_value(const struct zmk_custom_setting *setting,
+                          const struct zmk_custom_setting_value *value, bool resolve_behaviors) {
     if (!setting || !value) {
         return -EINVAL;
     }
 
-    int ret = value_type_validate(setting, value);
+    int ret = value_type_validate(setting, value, resolve_behaviors);
     if (ret < 0) {
         return ret;
     }
@@ -751,7 +762,7 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
             }
             break;
         case ZMK_CUSTOM_SETTING_CONSTRAINT_BEHAVIOR_ID:
-            ret = validate_behavior_id_constraint(value);
+            ret = validate_behavior_id_constraint(value, resolve_behaviors);
             if (ret < 0) {
                 return ret;
             }
@@ -781,6 +792,11 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
     }
 
     return 0;
+}
+
+int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
+                                const struct zmk_custom_setting_value *value) {
+    return validate_value(setting, value, true);
 }
 
 int zmk_custom_setting_set_default(const struct zmk_custom_setting *setting,
@@ -1975,7 +1991,12 @@ static int value_from_storage(const struct zmk_custom_setting *setting, const vo
         return -EINVAL;
     }
 
-    int ret = zmk_custom_setting_validate(setting, &value);
+    /* With the settings-table local-ID strategy, behavior IDs are assigned by
+     * the behavior subtree's commit handler after set callbacks have run. A
+     * persisted custom setting may therefore load before its behavior ID can
+     * be resolved. It was validated when written, so only range/type-check it
+     * here; readers still handle behaviors removed by a firmware update. */
+    int ret = validate_value(setting, &value, false);
     if (ret < 0) {
         return ret;
     }
