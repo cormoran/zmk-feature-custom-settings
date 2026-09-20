@@ -153,8 +153,7 @@ bool array_has_persistent_get(const struct zmk_custom_setting *setting) {
     if (!array_is_compact(setting->array_state)) {
         return setting->array_state->has_persistent[setting->array_index];
     }
-    return bit_get(compact_state(setting->array_state)->has_persistent_bits,
-                   setting->array_index);
+    return bit_get(compact_state(setting->array_state)->has_persistent_bits, setting->array_index);
 }
 
 void array_has_persistent_set(const struct zmk_custom_setting *setting, bool value) {
@@ -166,6 +165,26 @@ void array_has_persistent_set(const struct zmk_custom_setting *setting, bool val
 }
 
 static struct zmk_custom_setting_value compact_value_scratch;
+
+int array_validate_storage(const struct zmk_custom_setting *setting,
+                           const struct zmk_custom_setting_value *value) {
+    if (!array_is_compact(setting->array_state)) {
+        return 0;
+    }
+
+    /* Validate before insert/push changes slots or the active length. Also
+     * enforce the same bound for temporary values. Behavior serialization
+     * uses a shared scratch buffer, so even validation must hold the lock. */
+    const void *encoded;
+    size_t size;
+    k_mutex_lock(&custom_settings_lock, K_FOREVER);
+    int ret = value_to_storage(value, &encoded, &size);
+    if (ret == 0 && size > compact_state(setting->array_state)->element_capacity) {
+        ret = -EMSGSIZE;
+    }
+    k_mutex_unlock(&custom_settings_lock);
+    return ret;
+}
 
 const struct zmk_custom_setting_value *
 array_memory_value_locked(const struct zmk_custom_setting *setting) {
@@ -191,7 +210,8 @@ int array_store_value_locked(const struct zmk_custom_setting *setting,
         compact_state(setting->array_state);
     const void *encoded;
     size_t encoded_size;
-    if (value->type != setting->value_type || value_to_storage(value, &encoded, &encoded_size) < 0 ||
+    if (value->type != setting->value_type ||
+        value_to_storage(value, &encoded, &encoded_size) < 0 ||
         encoded_size > compact->element_capacity) {
         return -EMSGSIZE;
     }

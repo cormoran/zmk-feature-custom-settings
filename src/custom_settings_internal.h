@@ -88,11 +88,13 @@ bool array_dirty_get(const struct zmk_custom_setting *setting);
 void array_dirty_set(const struct zmk_custom_setting *setting, bool value);
 bool array_has_persistent_get(const struct zmk_custom_setting *setting);
 void array_has_persistent_set(const struct zmk_custom_setting *setting, bool value);
-const struct zmk_custom_setting_value *array_memory_value_locked(
-    const struct zmk_custom_setting *setting);
+const struct zmk_custom_setting_value *
+array_memory_value_locked(const struct zmk_custom_setting *setting);
 int array_store_value_locked(const struct zmk_custom_setting *setting,
                              const struct zmk_custom_setting_value *value);
 void array_initialize_storage_locked(const struct zmk_custom_setting *setting);
+int array_validate_storage(const struct zmk_custom_setting *setting,
+                           const struct zmk_custom_setting_value *value);
 
 /* Set an array's active (in-memory) / persisted length, clearing any
  * temporary override past the new size. Caller holds custom_settings_lock. */

@@ -199,6 +199,7 @@ int keyspace_validate_payload(const struct zmk_custom_setting_keyspace *keyspace
                               const struct zmk_custom_setting_value *value) {
     struct zmk_custom_setting payload_shape = {
         .value_type = keyspace->value_type,
+        .blob.max_size = keyspace->max_size,
         .constraints = keyspace->constraints,
         .constraints_count = keyspace->constraints_count,
     };

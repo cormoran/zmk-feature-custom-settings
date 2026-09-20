@@ -26,6 +26,40 @@ web UI.
   at runtime through a fixed-size keyspace slot pool, with no heap and no
   per-entry module code required to survive a reboot.
 
+## Memory-efficient registration
+
+Existing registrations continue to work. Modules can opt into
+`ZMK_CUSTOM_SETTING_ARRAY_DEFINE_COMPACT` (or its `_BYTES` variant) to store
+each array slot as its encoded payload, a length byte, and two bookkeeping
+bits. Choose an element capacity that fits every default and every accepted
+value, including the encoded size of numeric/behavior values. The defaults
+array must contain `max_count` entries, including inactive slots. Capacity
+must be positive, at most 255, and within the configured value carrier size.
+Oversized writes, pushes, and inserts return `-EMSGSIZE` before changing the
+array; temporary writes follow the same capacity limit.
+
+For a small scalar BYTES/STRING value,
+`ZMK_CUSTOM_SETTING_DEFINE_FIXED_SIZE(name, max_size, ...)` allocates only
+`max_size + 1` backing bytes. It takes the same namespace, key, type, default,
+permissions, and one constraint as the ordinary registration macro. Choose
+a default that fits. Writes exceeding that capacity fail rather than truncate.
+STRING `read_into` needs room for the trailing NUL; `out_size` excludes it.
+
+Neither registration changes settings keys or persisted encoding. Before
+migrating an existing setting, account for previously persisted values that
+may exceed the new capacity. These APIs do not migrate consuming modules
+automatically.
+
+`custom_settings_studio.h` provides shared notification and response helpers.
+Use the response allocator only from the serialized Studio request handler;
+fill the returned buffer before returning and do not retain it across requests.
+The generation guard detects stale encoders but does not synchronize concurrent
+allocations. Notification message storage must remain valid until the helper
+returns, relying on the current synchronous ZMK event/encoding implementation.
+
+See [the DYA2 validation report](docs/pr56-dya2-validation.md) for measured
+memory use, regression coverage, and hardware limitations.
+
 ## Module User Guide
 
 ### Add The Module

@@ -615,9 +615,17 @@ static int value_type_validate(const struct zmk_custom_setting *setting,
 
     switch (value->type) {
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES:
-        return value->size <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? 0 : -EMSGSIZE;
+        return value->size <=
+                       MIN(CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE, setting_capacity(setting))
+                   ? 0
+                   : -EMSGSIZE;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING:
-        return value->size <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ? 0 : -EMSGSIZE;
+        if (value->size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE ||
+            bounded_strlen(value->string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) >
+                setting_capacity(setting)) {
+            return -EMSGSIZE;
+        }
+        return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32:
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL:
         return 0;
@@ -730,6 +738,13 @@ int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
     int ret = value_type_validate(setting, value);
     if (ret < 0) {
         return ret;
+    }
+
+    if (zmk_custom_setting_is_array(setting)) {
+        ret = array_validate_storage(setting, value);
+        if (ret < 0) {
+            return ret;
+        }
     }
 
     for (size_t c = 0; c < setting->constraints_count; c++) {
@@ -1682,8 +1697,8 @@ int zmk_custom_setting_read_into(const struct zmk_custom_setting *setting, void 
     k_mutex_lock(&custom_settings_lock, K_FOREVER);
     if (setting_uses_blob_store(setting) && !setting_temporary_active(setting)) {
         size_t size = setting->state->blob.size;
-        size_t copy_size = size +
-                           (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ? 1 : 0);
+        size_t copy_size =
+            size + (setting->value_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING ? 1 : 0);
         int ret = 0;
         if (copy_size > capacity) {
             ret = -EMSGSIZE;

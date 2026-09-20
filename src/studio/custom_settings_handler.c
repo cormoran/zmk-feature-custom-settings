@@ -382,6 +382,42 @@ static struct bounded_decode_scratch relay_notification_default_decode_scratch =
     .capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,
 };
 
+/* Keep relayed constraints in their encoded form. Decoding them into the
+ * callback-based SettingMeta without a callback would silently discard them.
+ * The entire repeated field fits within the incoming relay packet bound. */
+#if defined(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN)
+#define RELAY_CONSTRAINTS_CAPACITY ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
+#else
+/* Native Studio tests also exercise the decode/re-encode path. */
+#define RELAY_CONSTRAINTS_CAPACITY (UINT8_MAX - ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD)
+#endif
+static uint8_t relay_constraints_buf[RELAY_CONSTRAINTS_CAPACITY];
+static struct bounded_decode_scratch relay_constraints = {
+    .buf = relay_constraints_buf, .capacity = sizeof(relay_constraints_buf)};
+
+static bool decode_relay_constraint(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    struct bounded_decode_scratch *scratch = *arg;
+    size_t size = stream->bytes_left;
+    pb_ostream_t out =
+        pb_ostream_from_buffer(scratch->buf + scratch->size, scratch->capacity - scratch->size);
+    if (!pb_encode_tag_for_field(&out, field) || !pb_encode_varint(&out, size) ||
+        size > scratch->capacity - scratch->size - out.bytes_written) {
+        return false;
+    }
+    if (!pb_read(stream, scratch->buf + scratch->size + out.bytes_written, size)) {
+        return false;
+    }
+    scratch->size += out.bytes_written + size;
+    return true;
+}
+
+static bool encode_relay_constraints(pb_ostream_t *stream, const pb_field_t *field,
+                                     void *const *arg) {
+    ARG_UNUSED(field);
+    const struct bounded_decode_scratch *scratch = *arg;
+    return pb_write(stream, scratch->buf, scratch->size);
+}
+
 /* Same for Notification.notification_type's setting arm (a relayed
  * peripheral notification decoded on the central, see
  * relayed_notification_to_public). */
@@ -398,6 +434,9 @@ static bool notification_arm_wire_precallback(pb_istream_t *stream, const pb_fie
          * referenced directly. */
         wire_setting_value_decode(&notification->setting.default_value,
                                   &relay_notification_default_decode_scratch);
+        relay_constraints.size = 0;
+        notification->setting.meta.constraints.funcs.decode = decode_relay_constraint;
+        notification->setting.meta.constraints.arg = &relay_constraints;
     }
     return true;
 }
@@ -1087,6 +1126,10 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
         return 0;
     }
 
+    notification->notification_type.setting.setting.meta.constraints.funcs.encode =
+        encode_relay_constraints;
+    notification->notification_type.setting.setting.meta.constraints.arg = &relay_constraints;
+
     /* notification->notification_type.setting.setting.value's
      * bytes_value/string_value (if that is the active oneof arm) is still
      * wired for DECODE at this point (it was just copied out of `relay`
@@ -1124,9 +1167,9 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
 
 static int
 raise_encoded_studio_notification(const cormoran_zmk_custom_settings_Notification *notification) {
-    return zmk_custom_studio_notify_message(
-        SUBSYSTEM_IDENTIFIER_STRING, cormoran_zmk_custom_settings_Notification_fields,
-        notification);
+    return zmk_custom_studio_notify_message(SUBSYSTEM_IDENTIFIER_STRING,
+                                            cormoran_zmk_custom_settings_Notification_fields,
+                                            notification);
 }
 #endif
 
@@ -1245,9 +1288,9 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     ret = raise_zmk_custom_settings_relay_notification(*relay_notification);
 #else
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-    ret = zmk_custom_studio_notify_message(
-        SUBSYSTEM_IDENTIFIER_STRING, cormoran_zmk_custom_settings_Notification_fields,
-        notification);
+    ret = zmk_custom_studio_notify_message(SUBSYSTEM_IDENTIFIER_STRING,
+                                           cormoran_zmk_custom_settings_Notification_fields,
+                                           notification);
 #else
     ret = 0;
 #endif
@@ -3850,6 +3893,13 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
         src.notification_type.setting.kind =
             cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
         src.notification_type.setting.has_setting = true;
+        const struct zmk_custom_setting *meta_setting =
+            zmk_custom_setting_find("test", "int_value");
+        if (!meta_setting || meta_setting->constraints_count == 0) {
+            return -EINVAL;
+        }
+        src.notification_type.setting.setting.has_meta = true;
+        setting_meta_to_proto(meta_setting, &src.notification_type.setting.setting.meta);
         copy_string(src.notification_type.setting.setting.key,
                     sizeof(src.notification_type.setting.setting.key), "int32_value");
         src.notification_type.setting.setting.has_value = true;
@@ -3873,6 +3923,8 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
             return -EIO;
         }
 
+        size_t original_size = out.bytes_written;
+
         /* 2. Decode it the way relayed_notification_to_public does. */
         cormoran_zmk_custom_settings_Notification decoded =
             cormoran_zmk_custom_settings_Notification_init_zero;
@@ -3890,6 +3942,9 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
          * value (the hardware bug). */
         cormoran_zmk_custom_settings_Notification republish = decoded;
         republish.cb_notification_type = (pb_callback_t){0};
+        republish.notification_type.setting.setting.meta.constraints.funcs.encode =
+            encode_relay_constraints;
+        republish.notification_type.setting.setting.meta.constraints.arg = &relay_constraints;
         if (republish.notification_type.setting.setting.has_value) {
             retarget_value_to_encode_scratch(&republish.notification_type.setting.setting.value,
                                              &value_scratch);
@@ -3898,6 +3953,12 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
         if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &republish)) {
             LOG_ERR("notification reencode regression: re-encode failed: %s", PB_GET_ERROR(&out));
             return -EIO;
+        }
+
+        if (out.bytes_written != original_size || memcmp(wire, wire2, original_size) != 0) {
+            LOG_ERR("FAIL: relayed metadata/value changed during re-encode (before=%u after=%u)",
+                    (unsigned)original_size, (unsigned)out.bytes_written);
+            return -EINVAL;
         }
 
         /* 4. Decode the re-encoded wire and check the value survived. */

@@ -2828,6 +2828,90 @@ static int test_initialized_event(void) {
     return 0;
 }
 
+static const struct zmk_custom_setting_value compact_defaults[] = {
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 1, .bytes_value = {11}},
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 1, .bytes_value = {22}},
+    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 1, .bytes_value = {33}},
+};
+
+ZMK_CUSTOM_SETTING_ARRAY_DEFINE_COMPACT_BYTES(test_compact, "compact_test", "items", 3, 2,
+                                              compact_defaults, 2,
+                                              ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE,
+                                              ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                              ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                              ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+ZMK_CUSTOM_SETTING_DEFINE_FIXED_SIZE(test_fixed_string, 4, "compact_test", "label",
+                                     ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                     ZMK_CUSTOM_SETTING_VALUE_STRING("hi"),
+                                     ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE,
+                                     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                     ZMK_CUSTOM_SETTING_PERMISSION_UNSECURE,
+                                     ZMK_CUSTOM_SETTING_NO_CONSTRAINT);
+
+static int test_compact_rejected_mutation(void) {
+    const struct zmk_custom_setting_value oversized = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 3, .bytes_value = {1, 2, 3}};
+    struct zmk_custom_setting_value got;
+    int ret = zmk_custom_setting_array_insert_at(&test_compact, 0, &oversized,
+                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -EMSGSIZE || zmk_custom_setting_array_size(&test_compact) != 2 ||
+        zmk_custom_setting_read_array_by_key("compact_test", "items", 1, &got) != 0 ||
+        got.size != 1 || got.bytes_value[0] != 22) {
+        LOG_ERR("FAIL: compact rejected insert changed existing elements (ret=%d)", ret);
+        return -EINVAL;
+    }
+    ret = zmk_custom_setting_array_push_back(&test_compact, &oversized,
+                                             ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -EMSGSIZE || zmk_custom_setting_array_size(&test_compact) != 2) {
+        LOG_ERR("FAIL: compact rejected push changed array size (ret=%d)", ret);
+        return -EINVAL;
+    }
+    const struct zmk_custom_setting *element =
+        zmk_custom_setting_find_array_element("compact_test", "items", 0);
+    if (zmk_custom_setting_write(element, &oversized, ZMK_CUSTOM_SETTING_WRITE_MODE_TEMPORARY) !=
+        -EMSGSIZE) {
+        LOG_ERR("FAIL: compact temporary write exceeded element capacity");
+        return -EINVAL;
+    }
+    const struct zmk_custom_setting_value valid = {
+        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, .size = 2, .bytes_value = {44, 55}};
+    if (zmk_custom_setting_array_insert_at(&test_compact, 1, &valid,
+                                           ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY) != 0 ||
+        zmk_custom_setting_save(&test_compact) != 0 ||
+        zmk_custom_setting_array_remove_at(&test_compact, 1, &got,
+                                           ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY) != 0 ||
+        got.size != 2 || memcmp(got.bytes_value, valid.bytes_value, 2) != 0 ||
+        zmk_custom_setting_discard(&test_compact) != 0 ||
+        zmk_custom_setting_array_size(&test_compact) != 3 ||
+        zmk_custom_setting_read_array_by_key("compact_test", "items", 1, &got) != 0 ||
+        got.size != 2 || memcmp(got.bytes_value, valid.bytes_value, 2) != 0) {
+        LOG_ERR("FAIL: compact insert/save/remove/discard round trip");
+        return -EINVAL;
+    }
+    char text[5] = {0};
+    size_t size = 0;
+    const struct zmk_custom_setting_value max_string = ZMK_CUSTOM_SETTING_VALUE_STRING("abcd");
+    const struct zmk_custom_setting_value large_string = ZMK_CUSTOM_SETTING_VALUE_STRING("abcde");
+    if (zmk_custom_setting_read_into(&test_fixed_string, text, 2, &size, NULL) != -EMSGSIZE ||
+        zmk_custom_setting_read_into(&test_fixed_string, text, 3, &size, NULL) != 0 || size != 2 ||
+        strcmp(text, "hi") != 0 ||
+        zmk_custom_setting_write(&test_fixed_string, &max_string,
+                                 ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST) != 0 ||
+        zmk_custom_setting_write(&test_fixed_string, &large_string,
+                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY) != -EMSGSIZE ||
+        zmk_custom_setting_read_into(&test_fixed_string, text, sizeof(text), &size, NULL) != 0 ||
+        size != 4 || strcmp(text, "abcd") != 0 ||
+        zmk_custom_setting_reset(&test_fixed_string) != 0 ||
+        zmk_custom_setting_read_into(&test_fixed_string, text, sizeof(text), &size, NULL) != 0 ||
+        size != 2 || strcmp(text, "hi") != 0) {
+        LOG_ERR("FAIL: fixed-size string capacity, termination or persistence");
+        return -EINVAL;
+    }
+    LOG_INF("PASS: custom_settings_compact_capacity_and_lifecycle");
+    return 0;
+}
+
 static int custom_settings_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -2930,6 +3014,11 @@ static int custom_settings_test_init(void) {
     }
 
     ret = test_keyspace_pool_overcommit();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_compact_rejected_mutation();
     if (ret < 0) {
         return ret;
     }
