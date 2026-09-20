@@ -15,7 +15,7 @@ standard tests passed. Hardware validation in progress (2026-09-20 UTC).
   custom-settings entry is overridden with the specified review checkout.
 - Existing working copies, including a modified DYA2 config, are not used as
   the release source. Builds use a separate checkout of upstream DYA2.
-- Single XIAO attached to J-Link: device work delegated to a Luna subagent.
+- Single XIAO attached to J-Link: device work delegated to Luna, then Terra.
   Two-device wired/BLE relay and physical trackball/key scanning cannot be
   established by single-board RPC checks alone.
 
@@ -191,3 +191,59 @@ are in progress; no runtime pass is claimed yet.
 
 Luna completed discovery/backup/baseline flashing. Terra took over the USB
 RPC diagnosis after the interrupted session, with an explicit lock handoff.
+
+### Test-rig boot layout
+
+Terra confirmed that reset selected the existing application at address zero
+(VTOR = 0), although the production baseline had been correctly written at
+`0x27000`. The original backup contains application vectors at both offsets,
+not the expected MBR at zero. Thus flash verification alone did not prove
+that the new firmware was running, and those initial USB timeouts are not
+evidence of a PR regression.
+
+Matching test-only unlocked baseline/original/fixed builds use
+[pr56-test-rig-flash0.overlay](../tools/validation/pr56-test-rig-flash0.overlay)
+to start the application at zero. This overlay is **not for a stock XIAO**:
+it overwrites the normally reserved MBR/SoftDevice region. The test rig was
+backed up first, and the overlay preserves the settings region at `0xec000`
+and UF2 region at `0xf4000`. It does not change the production builds or
+memory comparison above. Build it only for this diagnosed test-rig layout:
+
+```sh
+west zmk-build . --artifact-filter '^right_trackball_studio_unlocked$' \
+  -d build/hw-fixed -m /path/to/pr56-review \
+  --cmake-args ' -DEXTRA_DTC_OVERLAY_FILE=/path/to/pr56-review/tools/validation/pr56-test-rig-flash0.overlay' -q
+```
+
+Use separate output directories and matching flags for baseline and original
+PR versions. A full original-flash restore is required after testing.
+
+Test-only unlocked, flash-at-zero HEX SHA256 identities:
+
+```text
+baseline: 84bba9fdbfb83cb6abcdb97f5ee3d146c28353bed8df885d85dc47b08478be88
+PR #56:   a47d9f19e58085eb87a544c6c648bc4dad0cc00966f48d4ca4b3da296d9ab12b
+fixed:    eb039270d47a2b2b219f83def292fdea9e0abc870310ad8b3b7397ab4ff899c9
+```
+
+The flash-at-zero baseline answers `core.get_device_info` (`DYA2`),
+`core.get_lock_state` (unlocked), and `custom.list_custom_subsystems` (14
+subsystems) over USB. These checks establish that the test image's Studio
+transport works; settings comparison and final restoration are still pending.
+
+### Notification collection caveat
+
+The workspace `PyUSBCDCTransport.read_frame()` returns only `frames[0]`
+from each USB read, discarding any other complete frames in the same packet.
+This can lose asynchronous setting notifications, or a request response
+coalesced with a notification. The review includes a test-only
+[queued USB adapter](../tools/validation/queued_usb_transport.py), with two
+offline unit tests, so collection retains every decoded frame. It does not
+change the firmware or the existing workspace transport. Use the adapter in
+a persistent client and include `client.notifications` already received
+while waiting for the ListSettings status, then drain subsequent frames.
+
+```sh
+PYTHONPATH=/path/to/workspace/tools:/path/to/pr56-review/tools/validation \
+  python3 -m unittest -v test_queued_usb_transport
+```
