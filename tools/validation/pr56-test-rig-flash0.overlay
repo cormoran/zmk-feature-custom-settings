@@ -1,0 +1,15 @@
+/* ONLY for the backed-up PR #56 test rig whose reset vector is at zero.
+ * NOT a stock XIAO overlay: this overwrites the MBR/SoftDevice area.
+ * Keep settings at 0xec000 and UF2 at 0xf4000; restore the original full
+ * flash backup after the test. Never use a settings-reset firmware here.
+ */
+&flash0 {
+    partitions {
+        /delete-node/ partition@0;
+        /delete-node/ partition@27000;
+        code_partition: partition@0 {
+            label = "Application";
+            reg = <0x0 0xec000>;
+        };
+    };
+};

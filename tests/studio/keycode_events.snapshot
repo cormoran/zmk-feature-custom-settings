@@ -1,3 +1,4 @@
+PASS: custom_settings_studio_helpers
 cormoran_custom_settings, Security: Unsecured
 test, Security: Unsecured
 PASS: custom_settings_validate_hid_usage
@@ -53,6 +54,7 @@ PASS: custom_settings_pool_persist_discard size=100
 PASS: custom_settings_pool_string_member value=hello
 PASS: custom_settings_keyspace_large_value size=100
 PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
+PASS: custom_settings_compact_capacity_and_lifecycle
 PASS: custom_settings_initialized_event count=1
 PASS: custom_settings_behavior_value param1=0x70004
 PASS: custom_settings_behavior_value_rejects_invalid

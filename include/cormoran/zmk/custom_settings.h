@@ -189,6 +189,20 @@ struct zmk_custom_setting_array_state {
     const struct zmk_custom_setting_value *defaults;
 };
 
+/* Opt-in compact backing for fixed-capacity BYTES array elements.  `base` is
+ * deliberately the first member and retains the legacy public state layout;
+ * values/dirty/has_persistent are NULL sentinels so the implementation can
+ * recover this extended object without changing struct zmk_custom_setting or
+ * struct zmk_custom_setting_array_state. */
+struct zmk_custom_setting_compact_bytes_array_state {
+    struct zmk_custom_setting_array_state base;
+    uint8_t *data;
+    uint8_t *sizes;
+    uint8_t *dirty_bits;
+    uint8_t *has_persistent_bits;
+    uint16_t element_capacity;
+};
+
 /*
  * Per-setting mutable RAM state, split out of the const, flash-resident
  * struct zmk_custom_setting descriptor below. One instance per setting,
@@ -523,6 +537,44 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
         _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
         _read_permission, _write_permission, NULL, NULL, __VA_ARGS__)
 
+/* Fixed-store BYTES/STRING setting with a capacity below the global carrier
+ * maximum. Its API and persisted representation match ZMK_CUSTOM_SETTING_DEFINE;
+ * only the private backing buffer is right-sized. */
+#define ZMK_CUSTOM_SETTING_DEFINE_FIXED_SIZE(_name, _max_size, _custom_subsystem_id, _key,         \
+                                             _value_type, _default_value, _confidentiality,        \
+                                             _read_permission, _write_permission, _constraint)     \
+    BUILD_ASSERT((_max_size) <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,                         \
+                 "fixed setting exceeds the normal value carrier");                                \
+    BUILD_ASSERT(ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type),                                     \
+                 "fixed-size setting only supports BYTES/STRING");                                 \
+    BUILD_ASSERT(sizeof(_custom_subsystem_id) <=                                                   \
+                     CONFIG_ZMK_CUSTOM_SETTINGS_CUSTOM_SUBSYSTEM_ID_MAX_LEN,                       \
+                 "Custom subsystem id is too long");                                               \
+    BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
+                 "Custom setting key is too long");                                                \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {_constraint};       \
+    static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
+    static uint8_t _name##_store[(_max_size) + 1];                                                 \
+    static struct zmk_custom_setting_state _name##_state = {                                       \
+        .temp_slot = -1,                                                                           \
+        .blob.data = _name##_store,                                                                \
+    };                                                                                             \
+    const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
+        .custom_subsystem_id = _custom_subsystem_id,                                               \
+        .key = _key,                                                                               \
+        .array_key = NULL,                                                                         \
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        .value_type = _value_type,                                                                 \
+        .confidentiality = _confidentiality,                                                       \
+        .read_permission = _read_permission,                                                       \
+        .write_permission = _write_permission,                                                     \
+        .constraints = _name##_constraints,                                                        \
+        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
+        .default_value = &_name##_default,                                                         \
+        .blob = {.max_size = (_max_size), .pool = NULL},                                           \
+        .state = &_name##_state,                                                                   \
+    }
+
 /*
  * Innermost plain registration macro (every ZMK_CUSTOM_SETTING_DEFINE* variant
  * that does not take an explicit max_size funnels through here). Emits a
@@ -759,6 +811,62 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
         .rpc_deserializer = _rpc_deserializer,                                                     \
         .state = &_name##_state,                                                                   \
     }
+
+/* Register a BYTES array using one length byte plus exactly _element_capacity
+ * payload bytes per slot and bitsets for bookkeeping.  The wire protocol,
+ * settings keys/values, public descriptor and all array APIs remain identical
+ * to ZMK_CUSTOM_SETTING_ARRAY_DEFINE, and both forms may coexist. */
+#define ZMK_CUSTOM_SETTING_ARRAY_DEFINE_COMPACT(                                                   \
+    _name, _custom_subsystem_id, _key, _value_type, _max_count, _default_size, _defaults,          \
+    _element_capacity, _confidentiality, _read_permission, _write_permission, ...)                 \
+    BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY),                                     \
+                 "enable CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY to use compact arrays");                 \
+    BUILD_ASSERT((_default_size) <= (_max_count), "compact array default exceeds max count");      \
+    BUILD_ASSERT((_element_capacity) <= CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,                 \
+                 "compact element exceeds the public value carrier");                              \
+    BUILD_ASSERT((_element_capacity) > 0 && (_element_capacity) <= UINT8_MAX,                      \
+                 "compact element capacity must fit its length byte");                             \
+    static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
+    static uint8_t _name##_compact_data[(_max_count) * (_element_capacity)];                       \
+    static uint8_t _name##_compact_sizes[_max_count];                                              \
+    static uint8_t _name##_compact_dirty[DIV_ROUND_UP((_max_count), 8)];                           \
+    static uint8_t _name##_compact_persistent[DIV_ROUND_UP((_max_count), 8)];                      \
+    static struct zmk_custom_setting_compact_bytes_array_state _name##_compact_state = {           \
+        .base = {.values = NULL,                                                                   \
+                 .dirty = NULL,                                                                    \
+                 .has_persistent = NULL,                                                           \
+                 .max_size = (_max_count),                                                         \
+                 .default_size = (_default_size),                                                  \
+                 .defaults = (_defaults)},                                                         \
+        .data = _name##_compact_data,                                                              \
+        .sizes = _name##_compact_sizes,                                                            \
+        .dirty_bits = _name##_compact_dirty,                                                       \
+        .has_persistent_bits = _name##_compact_persistent,                                         \
+        .element_capacity = (_element_capacity),                                                   \
+    };                                                                                             \
+    static struct zmk_custom_setting_state _name##_state = {.temp_slot = -1};                      \
+    const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
+        .custom_subsystem_id = _custom_subsystem_id,                                               \
+        .key = _key,                                                                               \
+        .array_key = _key,                                                                         \
+        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        .array_state = &_name##_compact_state.base,                                                \
+        .value_type = _value_type,                                                                 \
+        .confidentiality = _confidentiality,                                                       \
+        .read_permission = _read_permission,                                                       \
+        .write_permission = _write_permission,                                                     \
+        .constraints = _name##_constraints,                                                        \
+        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
+        .state = &_name##_state,                                                                   \
+    }
+
+#define ZMK_CUSTOM_SETTING_ARRAY_DEFINE_COMPACT_BYTES(                                             \
+    _name, _custom_subsystem_id, _key, _max_count, _default_size, _defaults, _element_capacity,    \
+    _confidentiality, _read_permission, _write_permission, ...)                                    \
+    ZMK_CUSTOM_SETTING_ARRAY_DEFINE_COMPACT(                                                       \
+        _name, _custom_subsystem_id, _key, ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES, _max_count,        \
+        _default_size, _defaults, _element_capacity, _confidentiality, _read_permission,           \
+        _write_permission, __VA_ARGS__)
 
 /* Declares a `static const struct zmk_custom_setting_value[]` of INT32
  * defaults suitable for ZMK_CUSTOM_SETTING_ARRAY_DEFINE's _defaults
