@@ -2068,6 +2068,70 @@ static int test_record_settings(void) {
 }
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+static int test_persisted_behavior_load_before_local_ids(void) {
+    const struct zmk_custom_setting *behavior = zmk_custom_setting_find("test", "behavior_value");
+    const struct zmk_custom_setting *behavior_id = zmk_custom_setting_find("test", "behavior_id");
+    if (!behavior || !behavior_id) {
+        LOG_ERR("Test behavior settings not registered");
+        return -ENOENT;
+    }
+
+    /* This ID is in range but deliberately does not resolve in the running
+     * firmware. Runtime writes must still reject it. Persisted values must be
+     * accepted because settings-table IDs are not guaranteed to be populated
+     * until the behavior subtree's commit callback later in settings_load(). */
+    const zmk_behavior_local_id_t unresolved_id = UINT16_MAX - 1;
+    struct zmk_custom_setting_behavior_value unresolved_behavior = {
+        .behavior_id = unresolved_id,
+    };
+    int ret = zmk_custom_setting_set_behavior(behavior, unresolved_behavior,
+                                              ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected unresolved runtime behavior write to fail, got %d", ret);
+        return -EINVAL;
+    }
+
+    ret = zmk_custom_setting_write(behavior_id, &ZMK_CUSTOM_SETTING_VALUE_INT32(unresolved_id),
+                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    if (ret != -EINVAL) {
+        LOG_ERR("Expected unresolved runtime behavior ID write to fail, got %d", ret);
+        return -EINVAL;
+    }
+
+    ret = test_settings_save(NULL, "custom_settings/test/behavior_value",
+                             (const char *)&unresolved_id, sizeof(unresolved_id));
+    if (ret < 0) {
+        return ret;
+    }
+    int32_t persisted_id = unresolved_id;
+    ret = test_settings_save(NULL, "custom_settings/test/behavior_id", (const char *)&persisted_id,
+                             sizeof(persisted_id));
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = settings_load_subtree("custom_settings");
+    if (ret < 0) {
+        return ret;
+    }
+    ret = expect_behavior_value(behavior, unresolved_behavior);
+    if (ret < 0) {
+        LOG_ERR("Persisted unresolved behavior value was dropped");
+        return ret;
+    }
+
+    struct zmk_custom_setting_value loaded_id;
+    ret = zmk_custom_setting_read(behavior_id, &loaded_id);
+    if (ret < 0 || loaded_id.type != ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32 ||
+        loaded_id.int32_value != unresolved_id) {
+        LOG_ERR("Persisted unresolved behavior ID was dropped");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: custom_settings_persisted_behavior_load_before_local_ids");
+    return 0;
+}
+
 static int test_behavior_value_type(void) {
     const struct zmk_custom_setting *setting = zmk_custom_setting_find("test", "behavior_value");
     if (!setting) {
@@ -2940,6 +3004,11 @@ static int custom_settings_test_init(void) {
     }
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_LOCAL_IDS)
+    ret = test_persisted_behavior_load_before_local_ids();
+    if (ret < 0) {
+        return ret;
+    }
+
     return test_behavior_value_type();
 #else
     return 0;
