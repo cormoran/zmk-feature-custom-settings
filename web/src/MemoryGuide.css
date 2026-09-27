@@ -1,0 +1,242 @@
+.memory-guide {
+  max-width: 1080px;
+  margin: auto;
+  padding: 2rem;
+  color: #172b42;
+  font:
+    1rem/1.65 system-ui,
+    sans-serif;
+}
+.memory-guide * {
+  box-sizing: border-box;
+}
+.memory-guide a {
+  color: #175db1;
+  text-underline-offset: 0.2em;
+}
+.memory-guide h1 {
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  line-height: 1.15;
+  margin: 0.6rem 0;
+}
+.memory-guide h2 {
+  font-size: 1.65rem;
+  line-height: 1.3;
+}
+.memory-guide h3 {
+  margin-top: 0;
+  line-height: 1.4;
+}
+.memory-guide .eyebrow {
+  margin-top: 2rem;
+  color: #526579;
+}
+.memory-intro {
+  font-size: 1.25rem;
+  max-width: 48rem;
+}
+.memory-guide nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.3rem;
+  padding: 1rem 0;
+  border-block: 1px solid #ced8e2;
+}
+.memory-guide section {
+  padding: 1.5rem 0;
+  scroll-margin-top: 1rem;
+}
+.memory-guide section + section {
+  border-top: 1px solid #ced8e2;
+}
+.memory-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+}
+.memory-box {
+  padding: 1.2rem;
+  border: 1px solid #b9c8d7;
+  border-radius: 12px;
+  background: #f6f8fb;
+}
+.memory-guide .flash {
+  background: #f2ecff;
+  border-color: #bca7df;
+}
+.memory-guide .ram {
+  background: #eaf4ff;
+  border-color: #97bddf;
+}
+.memory-guide .saved {
+  background: #e8f5ef;
+  border-color: #92bba9;
+}
+.memory-cell {
+  border: 1px solid #9eafc0;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin: 0.4rem 0;
+}
+.memory-cell strong {
+  display: block;
+}
+.memory-guide figure {
+  margin: 1.25rem 0;
+}
+.memory-guide figcaption {
+  color: #526579;
+  margin-top: 0.6rem;
+  font-size: 0.9rem;
+}
+.memory-flow ol {
+  display: flex;
+  list-style: none;
+  gap: 1.7rem;
+  padding: 0;
+  margin: 0;
+}
+.memory-flow li {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  padding: 0.9rem;
+  background: #f1f5f9;
+  border: 1px solid #b9c8d7;
+  border-radius: 6px;
+}
+.memory-flow li + li::before {
+  content: "→";
+  position: absolute;
+  left: -1.45rem;
+  font-weight: bold;
+}
+.memory-guide aside {
+  border-left: 4px solid #997220;
+  padding: 1rem 1.25rem;
+  background: #fff5dc;
+  margin: 1rem 0;
+}
+.memory-guide code {
+  overflow-wrap: anywhere;
+  font-size: 0.9em;
+}
+.pool-example {
+  padding: 1.5rem;
+  border: 2px solid #497da8;
+  border-radius: 12px;
+}
+.pool-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.2rem;
+  margin-top: 1rem;
+}
+.pool-controls input {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+}
+.pool-type {
+  display: block;
+}
+.pool-bar {
+  display: flex;
+  height: 64px;
+  border: 2px solid #526579;
+  overflow: hidden;
+  border-radius: 6px;
+}
+.pool-bar span {
+  min-width: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  font-weight: bold;
+}
+.pool-member + .pool-member {
+  border-left: 2px solid white;
+}
+.member-0 {
+  background: #194b76;
+  color: white;
+}
+.member-1 {
+  background: #80612c;
+  color: white;
+}
+.member-2 {
+  background: #5e4186;
+  color: white;
+}
+.memory-guide .pool-free {
+  background: repeating-linear-gradient(
+    135deg,
+    #f4f7fa,
+    #f4f7fa 8px,
+    #e0e7ef 8px,
+    #e0e7ef 10px
+  );
+  color: #374c62;
+}
+.pool-result {
+  font-weight: 600;
+}
+.pool-error {
+  color: #a02b20;
+}
+.memory-guide button {
+  border: 1px solid #526579;
+  border-radius: 6px;
+  padding: 0.65rem 1rem;
+  font: inherit;
+  background: white;
+  color: #172b42;
+  cursor: pointer;
+}
+.memory-guide :focus-visible {
+  outline: 3px solid #175db1;
+  outline-offset: 4px;
+}
+.array-cells {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.array-cells span {
+  flex: 1;
+  padding: 0.75rem;
+  background: #d7e9fa;
+  border: 1px solid #97bddf;
+  text-align: center;
+}
+.memory-guide dt {
+  font-weight: bold;
+}
+.memory-guide dd {
+  margin: 0 0 0.7rem;
+}
+.memory-guide footer {
+  border-top: 1px solid #ced8e2;
+  padding-top: 1rem;
+}
+@media (max-width: 640px) {
+  .memory-guide {
+    padding: 1rem;
+  }
+  .memory-columns,
+  .pool-controls {
+    grid-template-columns: 1fr;
+  }
+  .memory-flow ol {
+    flex-direction: column;
+  }
+  .memory-flow li + li::before {
+    content: "↓";
+    left: 50%;
+    top: -1.8rem;
+  }
+  .pool-example {
+    padding: 1rem;
+  }
+}

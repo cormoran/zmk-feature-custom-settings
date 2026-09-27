@@ -842,6 +842,12 @@ saved, discarded, or reset (see `enum zmk_custom_setting_changed_kind`); its
 
 ### Memory Notes
 
+For diagrams and an interactive pool example, open the
+[visual memory guide](https://cormoran.github.io/zmk-feature-custom-settings/memory.html)
+from the Web UI. It explains reserved RAM versus occupied pool space, scalar
+values, arrays, keyspaces, temporary overrides, persistence, and RPC buffers.
+No keyboard connection is required.
+
 A setting's registration descriptor (identity, type, permissions,
 constraints, default pointer) is `const` and lives in flash; the only RAM a
 setting costs is a compact per-setting state block (~24 bytes on ARM32:

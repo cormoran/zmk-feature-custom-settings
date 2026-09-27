@@ -12,6 +12,14 @@ On split keyboards the list view requests all sources. Editing a selected row
 targets that row's source, while Save, Discard, Reset, and JSON import apply to
 all sources that match the selected scope.
 
+## Visual memory guide
+
+Open **Memory guide** from the console header, or visit `memory.html` directly.
+This standalone page works without Web Serial or a connected keyboard. It
+illustrates storage layouts and value lifetimes, with an interactive shared
+pool example. Both pages are built for root previews and GitHub Pages.
+The guide uses the same English language as the console.
+
 ## Commands
 
 ```bash
