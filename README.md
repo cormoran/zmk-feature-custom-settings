@@ -960,6 +960,13 @@ cd web && npm test
 pre-commit run --all-files
 ```
 
+### Memory redesign proposal
+
+See the [illustrated RAM / Flash design proposal (Japanese)](docs/design/memory-pool-redesign.html)
+for the current feature inventory, memory costs, and a broader shared-pool design.
+This is a proposal, not an implemented optimization. Download the HTML file and
+open it in a browser to view the diagrams and the small array-size calculator.
+
 ### Hardware-free split-relay test (Renode)
 
 `tests/renode/custom_settings_usb_wired_split_relay_renode_test.py` exercises the
