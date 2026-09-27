@@ -991,3 +991,210 @@ CI runs this automatically in the `Renode custom-settings wired-split relay test
 job, via `zmk-west-commands`' [`zmk-renode-test` composite
 action](https://github.com/cormoran/zmk-west-commands/tree/main/.github/actions/zmk-renode-test)
 (which installs Renode + the protobuf/protoc deps for you).
+
+## Memory redesign implementation
+
+Start with the illustrated [implementation review guide](docs/design/memory-redesign-implementation.html)
+(open the saved HTML in a browser). It maps the code, lifetime rules, memory
+measurements, tests, and the remaining compatibility work against the original
+[design proposal](docs/design/memory-pool-redesign.html).
+
+Plain STRING/BYTES settings and variable array elements now share
+`CONFIG_ZMK_CUSTOM_SETTINGS_POOL_SIZE` bytes (default 512). Unchanged defaults
+borrow ROM. A write that exceeds this total budget returns `-ENOSPC` and preserves
+the old value. Use `_POOLED` or `_SIZED` when a setting needs a separate reserved
+budget. Small pooled values work with `LARGE_VALUES=n`.
+
+Array defaults are typed arrays (`int32_t`, `bool`, behavior bindings, or
+`struct zmk_custom_setting_slice` for STRING/BYTES), with one entry per maximum
+index. `ARRAY_DEFAULT_INT32_DEFINE` keeps the same invocation syntax. Values and
+dirty/persistent bitsets are stored separately. Handwritten arrays of value
+carriers remain supported by a default-only adapter; migrate them to typed
+defaults to recover their ROM cost. Live arrays are typed in either case.
+
+For retained identities, include `<cormoran/zmk/custom_settings/ref.h>`, capture
+a `zmk_custom_setting_ref` immediately after lookup, and use `ref_visit()` for
+subsequent synchronous access. Array refs address an index; keyspace refs reject
+deleted/reused slots with `-ESTALE`. A visitor's descriptor must not escape the
+callback. The old `find_array_element()` pointer remains a borrowed cache view.
+
+Single-setting PERSIST writes now save the candidate before publishing RAM:
+backend failure preserves the old base, dirty state and temporary override.
+Array and scope saves still consist of multiple records and are not atomic as a
+whole. Flash I/O still holds the settings lock in this compatibility stage.
+
+Studio RPC also incorporates the memory optimizations and relay metadata fix
+from [PR #59](https://github.com/cormoran/zmk-feature-custom-settings/pull/59).
+Constraint metadata is encoded on demand rather than embedded at its worst-case
+size in every message. The central omits the peripheral request worker/buffers;
+relayed constraints are preserved in a bounded encoded buffer.
+
+Custom-settings responses use the shared helper in
+`<cormoran/zmk/custom_settings_studio.h>`. Other modules keep their own buffers
+unless they explicitly adopt it. Its lifetime is the serial Studio request /
+encode loop: encode before the next allocation; a generation check rejects stale
+encoders but does not provide synchronization for concurrent callers. The
+response size is checked at compile time against
+`CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RESPONSE_BUFFER_SIZE` (264 B on ARM32).
+
+Run `python3 -m unittest -v` in the workspace devShell for the host allocator,
+six native_sim suites and nine firmware builds. Outputs are worktree-local under
+`build/`. `python3 -m unittest test_pool -v` runs the allocator's deterministic
+20,000-operation invariant test with UndefinedBehaviorSanitizer without Zephyr.
+
+### Optional legacy adapters
+
+`CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT=y` is the default for existing modules.
+Set it to `n` after migrating consumers:
+
+```conf
+CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT=n
+```
+
+This removes the old array-view cache and `find_array_element()`, runtime
+`set_default()` overrides, carrier-form array defaults and support for
+hand-written fixed blob stores. Their implementations are isolated in
+`src/compat/`; their public API/layout is in
+`include/cormoran/zmk/custom_settings/compat/`. The build excludes these files
+entirely when compatibility is off. A legacy array-default registration fails
+at compile time instead of being silently reinterpreted.
+
+On ARM32, the descriptor shrinks from 52 to 40 bytes and array state from
+36 to 32. Mutable state is allocated by type (see below). Constraints and RPC converter pointers move to
+immutable metadata; core code uses accessors rather than compatibility fields.
+Core array, keyspace, persistence and Studio RPC functionality remains enabled.
+The core always uses an **8-byte ARM32 value view**: `uint8_t type`,
+`uint16_t size`, and a union containing INT32/BOOL or a pointer to
+BYTES/STRING/BEHAVIOR. The two shared read scratch headers total 16 bytes,
+down from 152. Behavior's 12-byte payload remains in typed storage; it is not
+replicated inside every value header.
+
+With compatibility ON, the public `zmk_custom_setting_value` remains the old
+76-byte owning carrier. `src/compat/value_api.c` contains the old entry points and
+`src/compat/value.c` translates their ownership;
+its layout and constructors live in `compat/value.h`. With compatibility OFF,
+the old type and function spellings alias the view API, with no wrappers: scalar defaults and constraints
+also use the single 8-byte definition.
+Static defaults/constraints save Flash, not per-setting RAM.
+
+Use typed array defaults and the standard pooled registration macros instead of
+hand-written descriptors. Use `zmk_custom_setting_constraints()` and the RPC
+converter accessors when reading descriptor metadata. Replace boot-time default
+overrides with immutable defaults (or explicitly initialize a memory value,
+understanding that reset then restores the immutable default).
+
+Resolve retained array identities directly, without a borrowed descriptor:
+
+```c
+#include <cormoran/zmk/custom_settings/ref.h>
+
+struct zmk_custom_setting_ref ref;
+int err = zmk_custom_setting_ref_find("my_module", "levels", 2, &ref);
+if (!err) {
+    int32_t next = 7;
+    err = zmk_custom_setting_ref_write(&ref, &next, sizeof(next),
+                                      ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+}
+```
+
+`ref_read_into()` copies into caller-owned storage; `ref_write()` borrows input
+only for the call. Scalars use native C representation, STRING length excludes
+the terminating NUL. For a scalar/keyspace key or array parent, pass
+`ZMK_CUSTOM_SETTING_ARRAY_NONE` as the lookup index. Use `ref_visit()` for other
+synchronous operations. Scoped descriptors in callbacks/events must not be kept;
+capture a ref when retaining identity. Flash record and protobuf wire formats
+are unchanged by the compatibility switch.
+
+DYA2's current consumers still use legacy defaults/APIs, so its validation build
+keeps compatibility enabled. Disabling it requires migrating those modules too.
+The test matrix exercises both layouts in native core/Studio/split-peripheral
+suites and provides identical ARM sample settings with compatibility on/off.
+
+### Compact value views and caller-owned buffers
+
+Prefer typed getters, `read_into()` and stable refs for ordinary consumers.
+Use `*_view` when inspecting a value's type or implementing an adapter. These
+APIs use the compact layout with compatibility either ON or OFF.
+
+```c
+char text[17];
+struct zmk_custom_setting_value_view value =
+    ZMK_CUSTOM_SETTING_VIEW_BUFFER(text, sizeof(text));
+int err = zmk_custom_setting_read_view(setting, &value);
+if (!err) {
+    /* text owns the copied STRING, including its terminating NUL. */
+}
+
+/* Runtime input is borrowed only until write_view returns. */
+err = zmk_custom_setting_view_blob(&value, ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,
+                                   text, 3);
+if (!err) {
+    err = zmk_custom_setting_write_view(setting, &value,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+}
+```
+
+For a copying read, `size` initially means **output capacity**; on success it
+becomes payload length. Reinitialize with `VIEW_BUFFER` before reusing an
+output, especially after reading a different type. INT32/BOOL-only outputs may
+start as `{0}`. STRING needs length + 1 bytes; its reported size excludes NUL.
+For BEHAVIOR, pass an actual `struct zmk_custom_setting_behavior_value` as the
+buffer (or storage aligned for that type). A short or unaligned behavior output
+is rejected; a failed output copy does not remove an array element.
+
+`zmk_custom_setting_with_view()` and `with_default_view()` borrow storage under
+the settings lock. The view and all its pointers expire when the callback
+returns; copy anything needed later and do not invoke settings APIs inside the
+callback. Behavior constructor literals live to the end of their enclosing
+block, or forever at file scope. Do not return or retain a pointer to a local
+constructor literal.
+
+The runtime blob constructor rejects lengths above `UINT16_MAX` before narrowing
+`size_t`; setting capacity and single-frame RPC bounds still apply. The output
+buffer initializer caps capacity to this representable maximum. `VALUE_MAX_SIZE`
+no longer determines the size of a compact value header.
+
+When porting old `read()` calls to compatibility OFF, explicitly provide storage:
+`ZMK_CUSTOM_SETTING_VALUE_LOCAL(name)` provides a transitional maximum-size
+buffer. New code should allocate only its needed payload size and use the view
+API or `read_into()`. Direct assignments into `.bytes_value[]` / `.string_value[]`
+and by-value `.behavior_value` initializers require migration to borrowed input
+pointers. RPC converters still get explicit writable output buffers; their
+callback execution remains outside the settings lock.
+
+These changes reduce real stack use on paths that no longer copy payloads, but
+do not change reserved thread stack sizes. Hardware stack high-water measurement
+is still needed before reducing those reservations.
+
+### Typed mutable state
+
+With compatibility OFF, `zmk_custom_setting_state` is a one-byte flags header.
+The descriptor's existing state pointer addresses a typed object containing
+that header followed by its payload. No second pointer or heap allocation is
+needed. Array parents have only the header; array elements already use dense
+storage and bitsets.
+
+| ARM32 allocation, including flags and padding | Previous OFF | Typed OFF |
+| --- | ---: | ---: |
+| INT32 scalar | 16 B | 8 B |
+| BOOL scalar | 16 B | 2 B |
+| BEHAVIOR scalar | 16 B | 16 B |
+| BYTES/STRING or keyspace slot state | 16 B | 16 B |
+| Array parent flags | 16 B | 1 B |
+
+The 12-byte behavior payload and 12-byte blob node still need storage. Moving
+those into separate pointer-referenced objects would add a pointer without
+saving their payload. Typed adjacent storage instead removes the unused union
+space from small scalar settings. `state.h` contains allocation and accessor
+contracts; `compat/state.h` retains the legacy 20-byte union layout when
+compatibility is ON. Access state through the matching
+`zmk_custom_setting_state_int32/bool/behavior/blob()` accessor while holding the
+settings lock; ordinary consumers should prefer the getter/setter APIs.
+
+### コード構造とメモリ構造のガイド
+
+`web` の Settings console 上部にある「コードとメモリの構造」から、接続不要の
+専用ページ `architecture.html` を開けます。ファイルの読み順、互換 ON/OFF、
+value と state の違い、ポインタの寿命、配列・pool・keyspace の配置、DYA2 の
+計測結果を図で説明しています。起動方法は [web/README.md](web/README.md)、
+可読性レビューの判断は [レビュー記録](docs/design/code-readability-review.md) を参照してください。

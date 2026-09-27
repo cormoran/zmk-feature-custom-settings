@@ -1,16 +1,30 @@
 zephyr_include_directories(include)
+
+if(CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_HELPERS)
+    target_sources(app PRIVATE src/studio/custom_settings_studio_helpers.c)
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_TEST AND CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC)
+        target_sources(app PRIVATE src/test/custom_settings_studio_helpers_test.c)
+    endif()
+endif()
+
 if(CONFIG_ZMK_CUSTOM_SETTINGS)
     # Simplification P4: const setting descriptors live in rodata
     # (ROM_SECTIONS); the keyspace registry stays a RAM data section.
     zephyr_linker_sources(ROM_SECTIONS include/linker/zmk-custom-settings-rom.ld)
     zephyr_linker_sources(DATA_SECTIONS include/linker/zmk-custom-settings.ld)
 
-    target_sources(app PRIVATE src/custom_settings.c)
-    if(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES)
-        target_sources(app PRIVATE src/custom_settings_pool.c)
+    target_sources(app PRIVATE src/custom_settings.c src/custom_settings_value.c)
+    target_sources(app PRIVATE src/custom_settings_allocator.c
+                               src/custom_settings_blob.c src/custom_settings_ref.c)
+    if(CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT)
+        target_sources(app PRIVATE src/compat/default_override.c src/compat/fixed_store.c
+                                   src/compat/value.c src/compat/value_api.c)
+        if(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)
+            target_sources(app PRIVATE src/compat/array_views.c src/compat/array_defaults.c)
+        endif()
     endif()
     if(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY)
-        target_sources(app PRIVATE src/custom_settings_array.c)
+        target_sources(app PRIVATE src/custom_settings_array.c src/custom_settings_array_storage.c)
     endif()
     if(CONFIG_ZMK_CUSTOM_SETTINGS_KEYSPACE)
         target_sources(app PRIVATE src/custom_settings_keyspace.c)
@@ -27,7 +41,11 @@ if(CONFIG_ZMK_CUSTOM_SETTINGS)
     endif()
 
     if(CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES)
-        target_sources(app PRIVATE src/test/zmk_config_sample_settings.c)
+        if(CONFIG_ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_TYPED_SAMPLES)
+            target_sources(app PRIVATE src/test/compact_config_sample_settings.c)
+        else()
+            target_sources(app PRIVATE src/test/zmk_config_sample_settings.c)
+        endif()
     endif()
 
     if(CONFIG_ZMK_CUSTOM_SETTINGS_PROTOBUF)

@@ -17,6 +17,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <cormoran/zmk/custom_settings.h>
+#include "../custom_settings_internal.h"
+#include <cormoran/zmk/custom_settings/ref.h>
+#include "../custom_settings_views.h"
+#include <cormoran/zmk/custom_settings_studio.h>
 #include <cormoran/zmk/custom_settings/custom_settings.pb.h>
 #include <cormoran/zmk/custom_settings/custom_settings_relay.pb.h>
 #include <zmk/workqueue.h>
@@ -52,8 +56,7 @@ static struct zmk_rpc_custom_subsystem_meta custom_settings_meta = {
 ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran_custom_settings, &custom_settings_meta,
                          custom_settings_rpc_handle_request);
 
-ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(cormoran_custom_settings,
-                                         cormoran_zmk_custom_settings_Response);
+ZMK_CUSTOM_STUDIO_RESPONSE_BUFFER(cormoran_zmk_custom_settings_Response);
 #endif
 
 static bool studio_is_unlocked(void) {
@@ -170,34 +173,34 @@ static const char *setting_ref_key(const struct zmk_custom_settings_setting_ref 
 }
 
 static const struct zmk_custom_setting *
-setting_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
+setting_for_ref(const struct zmk_custom_settings_setting_ref *ref,
+                struct zmk_custom_setting *view) {
     if (!ref->has_key) {
         return NULL;
     }
 
     /* IS_ENABLED-guarded (not a plain ref->has_array_index check) so the
-     * zmk_custom_setting_find_array_element call - only defined in
+     * array_view_find call - only defined in
      * src/custom_settings_array.c when CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY is
      * enabled - is provably dead code when the feature is off, matching the
      * zmk_custom_setting_is_array() fold pattern. */
     if (IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) && ref->has_array_index) {
-        return zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
-                                                     setting_ref_key(ref), ref->array_index);
+        return array_view_find(view, setting_ref_custom_subsystem_id(ref), setting_ref_key(ref),
+                               ref->array_index);
     }
     return zmk_custom_setting_find(setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
 }
 
 static const struct zmk_custom_setting *
-array_for_ref(const struct zmk_custom_settings_setting_ref *ref) {
+array_for_ref(const struct zmk_custom_settings_setting_ref *ref, struct zmk_custom_setting *view) {
     if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) || !ref->has_key) {
         return NULL;
     }
 
-    return ref->has_array_index
-               ? zmk_custom_setting_find_array_element(setting_ref_custom_subsystem_id(ref),
-                                                       setting_ref_key(ref), ref->array_index)
-               : zmk_custom_setting_find_array(setting_ref_custom_subsystem_id(ref),
-                                               setting_ref_key(ref));
+    return ref->has_array_index ? array_view_find(view, setting_ref_custom_subsystem_id(ref),
+                                                  setting_ref_key(ref), ref->array_index)
+                                : zmk_custom_setting_find_array(
+                                      setting_ref_custom_subsystem_id(ref), setting_ref_key(ref));
 }
 
 static const char *
@@ -211,15 +214,6 @@ static const char *setting_scope_key(const struct zmk_custom_settings_setting_sc
 
 static const char *setting_scope_key_prefix(const struct zmk_custom_settings_setting_scope *scope) {
     return scope->has_key_prefix ? scope->key_prefix : NULL;
-}
-
-static size_t bounded_strlen(const char *str, size_t max_len) {
-    size_t len = 0;
-    while (len < max_len && str[len] != '\0') {
-        len++;
-    }
-
-    return len;
 }
 
 static void copy_string(char *dest, size_t dest_size, const char *src) {
@@ -382,6 +376,42 @@ static struct bounded_decode_scratch relay_notification_default_decode_scratch =
     .capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE,
 };
 
+/* Keep relayed constraints in their encoded form. Decoding them into the
+ * callback-based SettingMeta without a callback would silently discard them.
+ * The entire repeated field fits within the incoming relay packet bound. */
+#if defined(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN)
+#define RELAY_CONSTRAINTS_CAPACITY ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE
+#else
+/* Native Studio tests also exercise the decode/re-encode path. */
+#define RELAY_CONSTRAINTS_CAPACITY (UINT8_MAX - ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_OVERHEAD)
+#endif
+static uint8_t relay_constraints_buf[RELAY_CONSTRAINTS_CAPACITY];
+static struct bounded_decode_scratch relay_constraints = {
+    .buf = relay_constraints_buf, .capacity = sizeof(relay_constraints_buf)};
+
+static bool decode_relay_constraint(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    struct bounded_decode_scratch *scratch = *arg;
+    size_t size = stream->bytes_left;
+    pb_ostream_t out =
+        pb_ostream_from_buffer(scratch->buf + scratch->size, scratch->capacity - scratch->size);
+    if (!pb_encode_tag_for_field(&out, field) || !pb_encode_varint(&out, size) ||
+        size > scratch->capacity - scratch->size - out.bytes_written) {
+        return false;
+    }
+    if (!pb_read(stream, scratch->buf + scratch->size + out.bytes_written, size)) {
+        return false;
+    }
+    scratch->size += out.bytes_written + size;
+    return true;
+}
+
+static bool encode_relay_constraints(pb_ostream_t *stream, const pb_field_t *field,
+                                     void *const *arg) {
+    ARG_UNUSED(field);
+    const struct bounded_decode_scratch *scratch = *arg;
+    return pb_write(stream, scratch->buf, scratch->size);
+}
+
 /* Same for Notification.notification_type's setting arm (a relayed
  * peripheral notification decoded on the central, see
  * relayed_notification_to_public). */
@@ -398,6 +428,9 @@ static bool notification_arm_wire_precallback(pb_istream_t *stream, const pb_fie
          * referenced directly. */
         wire_setting_value_decode(&notification->setting.default_value,
                                   &relay_notification_default_decode_scratch);
+        relay_constraints.size = 0;
+        notification->setting.meta.constraints.funcs.decode = decode_relay_constraint;
+        notification->setting.meta.constraints.arg = &relay_constraints;
     }
     return true;
 }
@@ -428,7 +461,7 @@ static void retarget_value_to_encode_scratch(cormoran_zmk_custom_settings_Settin
  * effective backing store at pb_encode time (small carrier or a large-store
  * pool region), so GetSetting is not capped at
  * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. Small and large values share this
- * one path. The RPC serializer converter (zmk_custom_setting_serialize_rpc_value)
+ * one path. The RPC serializer converter (zmk_custom_setting_serialize_rpc_value_view)
  * is applied only when the value still fits the fixed carrier - it is bounded
  * by that carrier and is not applied to the >carrier path. */
 struct encode_large_value_ctx {
@@ -446,18 +479,26 @@ static void encode_large_value_visitor(const uint8_t *data, size_t size, void *u
     ctx->ok = pb_encode_string(ctx->stream, data, size);
 }
 
-static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *field,
-                                        void *const *arg) {
+static bool encode_setting_scalar_value_copy(pb_ostream_t *stream, const pb_field_t *field,
+                                             void *const *arg) {
     const struct zmk_custom_setting *setting = *arg;
     if (!setting) {
         return true;
     }
 
-    struct zmk_custom_setting_value value;
-    struct zmk_custom_setting_value rpc_value;
-    int ret = zmk_custom_setting_read(setting, &value);
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(value_buffer, sizeof(value_buffer));
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t rpc_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view rpc_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(rpc_value_buffer, sizeof(rpc_value_buffer));
+    int ret = zmk_custom_setting_read_view(setting, &value);
+    if (!ret && value.size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE)
+        ret = -EMSGSIZE;
     if (ret == 0) {
-        ret = zmk_custom_setting_serialize_rpc_value(setting, &value, &rpc_value);
+        ret = zmk_custom_setting_serialize_rpc_value_view(setting, &value, &rpc_value);
         if (ret < 0) {
             return false;
         }
@@ -499,20 +540,26 @@ static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *
  * the fixed carrier (it is a registration-time value, never pool-backed), so no
  * large-store streaming path is needed here - unlike encode_setting_scalar_value
  * for the current value. */
-static bool encode_setting_default_value(pb_ostream_t *stream, const pb_field_t *field,
-                                         void *const *arg) {
+static bool encode_setting_default_value_copy(pb_ostream_t *stream, const pb_field_t *field,
+                                              void *const *arg) {
     const struct zmk_custom_setting *setting = *arg;
     if (!setting) {
         return true;
     }
 
-    struct zmk_custom_setting_value value;
-    struct zmk_custom_setting_value rpc_value;
-    int ret = zmk_custom_setting_read_default(setting, &value);
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(value_buffer, sizeof(value_buffer));
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t rpc_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view rpc_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(rpc_value_buffer, sizeof(rpc_value_buffer));
+    int ret = zmk_custom_setting_read_default_view(setting, &value);
     if (ret < 0) {
         return false;
     }
-    ret = zmk_custom_setting_serialize_rpc_value(setting, &value, &rpc_value);
+    ret = zmk_custom_setting_serialize_rpc_value_view(setting, &value, &rpc_value);
     if (ret < 0) {
         return false;
     }
@@ -525,9 +572,47 @@ static bool encode_setting_default_value(pb_ostream_t *stream, const pb_field_t 
     return pb_encode_string(stream, data, rpc_value.size);
 }
 
+/* No converter: encode the locked slice directly, with no maximum-size
+ * input/output carrier. Converter hooks keep their existing unlocked contract. */
+static void encode_value_view(const struct zmk_custom_setting_value_view *value, void *context) {
+    struct encode_large_value_ctx *ctx = context;
+    encode_large_value_visitor(value->bytes_value, value->size, ctx);
+}
+static bool setting_has_serializer(const struct zmk_custom_setting *setting) {
+    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
+    return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS) &&
+           (keyspace ? keyspace->rpc_serializer : zmk_custom_setting_rpc_serializer(setting));
+}
+static bool encode_setting_scalar_value(pb_ostream_t *stream, const pb_field_t *field,
+                                        void *const *arg) {
+    const struct zmk_custom_setting *setting = *arg;
+    if (!setting)
+        return true;
+    if (setting_has_serializer(setting))
+        return encode_setting_scalar_value_copy(stream, field, arg);
+    struct encode_large_value_ctx ctx = {.stream = stream, .field = field};
+    return zmk_custom_setting_with_view(setting, encode_value_view, &ctx) == 0 && ctx.ok;
+}
+static bool encode_setting_default_value(pb_ostream_t *stream, const pb_field_t *field,
+                                         void *const *arg) {
+    const struct zmk_custom_setting *setting = *arg;
+    if (!setting)
+        return true;
+    if (setting_has_serializer(setting))
+        return encode_setting_default_value_copy(stream, field, arg);
+    struct encode_large_value_ctx ctx = {.stream = stream, .field = field};
+    return zmk_custom_setting_with_default_view(setting, encode_value_view, &ctx) == 0 && ctx.ok;
+}
+static void default_exists_visitor(const struct zmk_custom_setting_value_view *value,
+                                   void *context) {
+    ARG_UNUSED(value);
+    ARG_UNUSED(context);
+}
+
 static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScalarValue *src,
-                                 struct zmk_custom_setting_value *dest) {
-    *dest = (struct zmk_custom_setting_value){0};
+                                 struct zmk_custom_setting_value_view *dest,
+                                 struct zmk_custom_setting_behavior_value *behavior) {
+    *dest = (struct zmk_custom_setting_value_view){0};
 
     switch (src->which_value_type) {
     case cormoran_zmk_custom_settings_SettingScalarValue_bytes_value_tag:
@@ -536,7 +621,7 @@ static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScala
         if (dest->size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
             return -EMSGSIZE;
         }
-        memcpy(dest->bytes_value, src->value_type.bytes_value.bytes, dest->size);
+        dest->bytes_value = src->value_type.bytes_value.bytes;
         return 0;
     case cormoran_zmk_custom_settings_SettingScalarValue_int32_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32;
@@ -550,13 +635,15 @@ static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScala
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
         dest->size =
             bounded_strlen(src->value_type.string_value, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
-        copy_string(dest->string_value, sizeof(dest->string_value), src->value_type.string_value);
+        dest->string_value = src->value_type.string_value;
         return 0;
     case cormoran_zmk_custom_settings_SettingScalarValue_behavior_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR;
-        dest->behavior_value.behavior_id = src->value_type.behavior_value.behavior_id;
-        dest->behavior_value.param1 = src->value_type.behavior_value.param1;
-        dest->behavior_value.param2 = src->value_type.behavior_value.param2;
+        *behavior = (struct zmk_custom_setting_behavior_value){
+            .behavior_id = src->value_type.behavior_value.behavior_id,
+            .param1 = src->value_type.behavior_value.param1,
+            .param2 = src->value_type.behavior_value.param2};
+        dest->behavior_value = behavior;
         return 0;
     default:
         return -EINVAL;
@@ -570,9 +657,10 @@ static int scalar_proto_to_value(const cormoran_zmk_custom_settings_SettingScala
  * bytes_value/string_value then fail with -EINVAL). */
 static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
                           const struct bounded_decode_scratch *value_scratch,
-                          struct zmk_custom_setting_value *dest, bool *is_array,
-                          uint32_t *array_index, uint32_t *array_size) {
-    *dest = (struct zmk_custom_setting_value){0};
+                          struct zmk_custom_setting_value_view *dest, bool *is_array,
+                          uint32_t *array_index, uint32_t *array_size,
+                          struct zmk_custom_setting_behavior_value *behavior) {
+    *dest = (struct zmk_custom_setting_value_view){0};
     *is_array = false;
 
     switch (src->which_value_type) {
@@ -588,11 +676,10 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
         dest->size = value_scratch->size;
         if (src->which_value_type == cormoran_zmk_custom_settings_SettingValue_bytes_value_tag) {
             dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES;
-            memcpy(dest->bytes_value, value_scratch->buf, dest->size);
+            dest->bytes_value = value_scratch->buf;
         } else {
             dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING;
-            copy_string(dest->string_value, sizeof(dest->string_value),
-                        (const char *)value_scratch->buf);
+            dest->string_value = (const char *)value_scratch->buf;
         }
         return 0;
     case cormoran_zmk_custom_settings_SettingValue_int32_value_tag:
@@ -605,9 +692,11 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
         return 0;
     case cormoran_zmk_custom_settings_SettingValue_behavior_value_tag:
         dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR;
-        dest->behavior_value.behavior_id = src->value_type.behavior_value.behavior_id;
-        dest->behavior_value.param1 = src->value_type.behavior_value.param1;
-        dest->behavior_value.param2 = src->value_type.behavior_value.param2;
+        *behavior = (struct zmk_custom_setting_behavior_value){
+            .behavior_id = src->value_type.behavior_value.behavior_id,
+            .param1 = src->value_type.behavior_value.param1,
+            .param2 = src->value_type.behavior_value.param2};
+        dest->behavior_value = behavior;
         return 0;
     case cormoran_zmk_custom_settings_SettingValue_array_value_tag:
         if (!IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) ||
@@ -617,13 +706,13 @@ static int proto_to_value(const cormoran_zmk_custom_settings_SettingValue *src,
         *is_array = true;
         *array_index = src->value_type.array_value.index;
         *array_size = src->value_type.array_value.size;
-        return scalar_proto_to_value(&src->value_type.array_value.value, dest);
+        return scalar_proto_to_value(&src->value_type.array_value.value, dest, behavior);
     default:
         return -EINVAL;
     }
 }
 
-static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
+static int value_to_scalar_proto(const struct zmk_custom_setting_value_view *src,
                                  cormoran_zmk_custom_settings_SettingScalarValue *dest) {
     *dest = (cormoran_zmk_custom_settings_SettingScalarValue)
         cormoran_zmk_custom_settings_SettingScalarValue_init_zero;
@@ -652,9 +741,9 @@ static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
         return 0;
     case ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR:
         dest->which_value_type = cormoran_zmk_custom_settings_SettingScalarValue_behavior_value_tag;
-        dest->value_type.behavior_value.behavior_id = src->behavior_value.behavior_id;
-        dest->value_type.behavior_value.param1 = src->behavior_value.param1;
-        dest->value_type.behavior_value.param2 = src->behavior_value.param2;
+        dest->value_type.behavior_value.behavior_id = src->behavior_value->behavior_id;
+        dest->value_type.behavior_value.param1 = src->behavior_value->param1;
+        dest->value_type.behavior_value.param2 = src->behavior_value->param2;
         return 0;
     default:
         return -EINVAL;
@@ -662,13 +751,16 @@ static int value_to_scalar_proto(const struct zmk_custom_setting_value *src,
 }
 
 static int value_to_proto(const struct zmk_custom_setting *setting,
-                          const struct zmk_custom_setting_value *src,
+                          const struct zmk_custom_setting_value_view *src,
                           cormoran_zmk_custom_settings_SettingValue *dest) {
     *dest = (cormoran_zmk_custom_settings_SettingValue)
         cormoran_zmk_custom_settings_SettingValue_init_zero;
 
-    struct zmk_custom_setting_value rpc_value;
-    int ret = zmk_custom_setting_serialize_rpc_value(setting, src, &rpc_value);
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t rpc_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view rpc_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(rpc_value_buffer, sizeof(rpc_value_buffer));
+    int ret = zmk_custom_setting_serialize_rpc_value_view(setting, src, &rpc_value);
     if (ret < 0) {
         return ret;
     }
@@ -713,6 +805,12 @@ static int value_to_proto(const struct zmk_custom_setting *setting,
     }
 }
 
+static int stored_value_to_scalar_proto(const struct zmk_custom_setting_value *value,
+                                        cormoran_zmk_custom_settings_SettingScalarValue *dest) {
+    struct zmk_custom_setting_value_view view = value_borrow(value);
+    return value_to_scalar_proto(&view, dest);
+}
+
 static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
                                cormoran_zmk_custom_settings_SettingConstraint *dest) {
     *dest = (cormoran_zmk_custom_settings_SettingConstraint)
@@ -725,11 +823,11 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
         dest->which_constraint_type = cormoran_zmk_custom_settings_SettingConstraint_range_tag;
         dest->constraint_type.range.has_min = true;
         dest->constraint_type.range.has_max = true;
-        int ret = value_to_scalar_proto(&src->range.min, &dest->constraint_type.range.min);
+        int ret = stored_value_to_scalar_proto(&src->range.min, &dest->constraint_type.range.min);
         if (ret < 0) {
             return ret;
         }
-        return value_to_scalar_proto(&src->range.max, &dest->constraint_type.range.max);
+        return stored_value_to_scalar_proto(&src->range.max, &dest->constraint_type.range.max);
     }
     case ZMK_CUSTOM_SETTING_CONSTRAINT_OPTIONS:
         dest->which_constraint_type = cormoran_zmk_custom_settings_SettingConstraint_options_tag;
@@ -738,8 +836,8 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
         dest->constraint_type.options.labels_count =
             MIN(src->options.count, ARRAY_SIZE(dest->constraint_type.options.labels));
         for (size_t i = 0; i < dest->constraint_type.options.values_count; i++) {
-            int ret = value_to_scalar_proto(&src->options.values[i],
-                                            &dest->constraint_type.options.values[i]);
+            int ret = stored_value_to_scalar_proto(&src->options.values[i],
+                                                   &dest->constraint_type.options.values[i]);
             if (ret < 0) {
                 return ret;
             }
@@ -768,6 +866,34 @@ static int constraint_to_proto(const struct zmk_custom_setting_constraint *src,
     }
 }
 
+static bool encode_setting_constraints(pb_ostream_t *stream, const pb_field_t *field,
+                                       void *const *arg) {
+    const struct zmk_custom_setting *setting = (const struct zmk_custom_setting *)*arg;
+    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
+    const struct zmk_custom_setting_constraint *constraints =
+        keyspace ? keyspace->constraints : zmk_custom_setting_constraints(setting);
+    size_t constraints_count = keyspace ? keyspace->constraints_count : setting->constraints_count;
+
+    for (size_t i = 0; i < constraints_count; i++) {
+        if (constraints[i].type == ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
+            continue;
+        }
+
+        cormoran_zmk_custom_settings_SettingConstraint encoded =
+            cormoran_zmk_custom_settings_SettingConstraint_init_zero;
+        if (constraint_to_proto(&constraints[i], &encoded) < 0) {
+            continue;
+        }
+        if (!pb_encode_tag_for_field(stream, field) ||
+            !pb_encode_submessage(stream, cormoran_zmk_custom_settings_SettingConstraint_fields,
+                                  &encoded)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
                                  cormoran_zmk_custom_settings_SettingMeta *dest) {
     *dest = (cormoran_zmk_custom_settings_SettingMeta)
@@ -777,26 +903,19 @@ static int setting_meta_to_proto(const struct zmk_custom_setting *setting,
     dest->read_permission = proto_permission(setting->read_permission);
     dest->write_permission = proto_permission(setting->write_permission);
 
-    /* A keyspace slot's own constraints are always empty (they describe its
-     * opaque blob, which has none of its own) - present the owning
-     * keyspace's PAYLOAD constraints instead, matching what
-     * zmk_custom_setting_write validates a write against. */
-    const struct zmk_custom_setting_keyspace *keyspace = zmk_custom_setting_keyspace_of(setting);
-    const struct zmk_custom_setting_constraint *constraints =
-        keyspace ? keyspace->constraints : setting->constraints;
-    size_t constraints_count = keyspace ? keyspace->constraints_count : setting->constraints_count;
-
-    for (size_t i = 0;
-         i < constraints_count && dest->constraints_count < ARRAY_SIZE(dest->constraints); i++) {
-        if (constraints[i].type == ZMK_CUSTOM_SETTING_CONSTRAINT_NONE) {
-            continue;
-        }
-
-        int ret = constraint_to_proto(&constraints[i], &dest->constraints[dest->constraints_count]);
-        if (ret < 0) {
-            continue;
-        }
-        dest->constraints_count++;
+    /* A keyspace slot presents its owner's payload constraints. The callback
+     * resolves that relationship at encode time and emits the repeated field
+     * without materialising its recursive worst-case nanopb array. */
+    dest->constraints.funcs.encode = encode_setting_constraints;
+    /* Encoding may happen after the caller-local array view has returned.
+     * Constraints belong to the immutable parent, not the selected index. */
+    struct zmk_custom_setting_ref ref;
+    if (zmk_custom_setting_is_array(setting) &&
+        zmk_custom_setting_ref_capture(setting, &ref) == 0 &&
+        ref.kind == ZMK_CUSTOM_SETTING_REF_ARRAY) {
+        dest->constraints.arg = (void *)ref.owner;
+    } else {
+        dest->constraints.arg = (void *)setting;
     }
 
     return 0;
@@ -824,7 +943,7 @@ static int setting_value_to_proto(const struct zmk_custom_setting *setting,
          presented_type == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING)) {
         /* Defer the actual read to pb_encode time rather than reading eagerly
          * here - see encode_setting_scalar_value, which is keyspace-aware
-         * (zmk_custom_setting_read/with_large_raw_bytes already strip a
+         * (zmk_custom_setting_read_view/with_large_raw_bytes already strip a
          * keyspace slot's key prefix), so this callback wiring needs no further
          * change for keyspace slots. The oneof arm (bytes_value vs
          * string_value) depends only on the PRESENTED value_type, which is
@@ -838,8 +957,11 @@ static int setting_value_to_proto(const struct zmk_custom_setting *setting,
         return 0;
     }
 
-    struct zmk_custom_setting_value value;
-    int ret = zmk_custom_setting_read(setting, &value);
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(value_buffer, sizeof(value_buffer));
+    int ret = zmk_custom_setting_read_view(setting, &value);
     if (ret < 0) {
         return ret;
     }
@@ -868,8 +990,10 @@ static int setting_default_to_proto(const struct zmk_custom_setting *setting,
         return 0;
     }
 
-    struct zmk_custom_setting_value value;
-    int ret = zmk_custom_setting_read_default(setting, &value);
+    struct zmk_custom_setting_behavior_value value_behavior;
+    struct zmk_custom_setting_value_view value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(&value_behavior, sizeof(value_behavior));
+    int ret = zmk_custom_setting_read_default_view(setting, &value);
     if (ret < 0) {
         return ret;
     }
@@ -917,7 +1041,7 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
         }
         LOG_DBG("Custom settings proto meta ready: subsystem=%s key=%s constraints=%u",
                 setting->custom_subsystem_id, zmk_custom_setting_public_key(setting),
-                (uint32_t)dest->meta.constraints_count);
+                (uint32_t)(include_meta ? setting->constraints_count : 0));
     }
 
     if (include_value &&
@@ -948,11 +1072,10 @@ static int setting_to_proto(const struct zmk_custom_setting *setting,
      * The read_default probe simply confirms a default exists (returns -ENOENT
      * otherwise); the actual bytes are read/streamed in setting_default_to_proto
      * / encode_setting_default_value. */
-    struct zmk_custom_setting_value default_probe;
     if (include_default && include_value &&
         setting->confidentiality != ZMK_CUSTOM_SETTING_CONFIDENTIALITY_DEVICE_PRIVATE &&
         !zmk_custom_setting_is_array(setting) && !zmk_custom_setting_keyspace_of(setting) &&
-        zmk_custom_setting_read_default(setting, &default_probe) == 0 &&
+        zmk_custom_setting_with_default_view(setting, default_exists_visitor, NULL) == 0 &&
         !zmk_custom_setting_matches_default(setting)) {
         dest->has_default_value = true;
         ret = setting_default_to_proto(setting, &dest->default_value);
@@ -985,42 +1108,14 @@ static const char *custom_subsystem_identifier_for_index(uint32_t index) {
 }
 
 static int custom_subsystem_index_for_identifier(const char *identifier, uint32_t *index) {
-    if (!identifier) {
-        return -ENOENT;
+    uint8_t compact_index;
+    int ret = zmk_custom_studio_subsystem_index(identifier, &compact_index);
+    if (ret == 0) {
+        *index = compact_index;
     }
-
-    size_t subsystem_count;
-    STRUCT_SECTION_COUNT(zmk_rpc_custom_subsystem, &subsystem_count);
-
-    for (size_t i = 0; i < subsystem_count; i++) {
-        struct zmk_rpc_custom_subsystem *custom_subsys;
-        STRUCT_SECTION_GET(zmk_rpc_custom_subsystem, i, &custom_subsys);
-        if (strcmp(custom_subsys->identifier, identifier) == 0) {
-            *index = i;
-            return 0;
-        }
-    }
-
-    return -ENOENT;
+    return ret;
 }
 
-static int custom_subsystem_index(void) {
-    uint32_t index;
-    int ret = custom_subsystem_index_for_identifier(SUBSYSTEM_IDENTIFIER_STRING, &index);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return (int)index;
-}
-
-static bool encode_notification_payload(pb_ostream_t *stream, const pb_field_t *field,
-                                        void *const *arg) {
-    const cormoran_zmk_custom_settings_Notification *notification =
-        (const cormoran_zmk_custom_settings_Notification *)*arg;
-    return zmk_rpc_custom_subsystem_encode_response_payload(
-        stream, field, cormoran_zmk_custom_settings_Notification_fields, notification);
-}
 #endif
 
 static K_MUTEX_DEFINE(notification_buffer_lock);
@@ -1029,6 +1124,14 @@ static cormoran_zmk_custom_settings_Notification notification_buffer;
     !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static struct zmk_custom_settings_relay_notification notification_relay_event_buffer;
 static cormoran_zmk_custom_settings_RelayNotification notification_relay_buffer;
+
+static bool encode_relay_notification_payload(pb_ostream_t *stream, const pb_field_t *field,
+                                              void *const *arg) {
+    const cormoran_zmk_custom_settings_Notification *notification = *arg;
+    return pb_encode_tag_for_field(stream, field) &&
+           pb_encode_submessage(stream, cormoran_zmk_custom_settings_Notification_fields,
+                                notification);
+}
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY) &&                                      \
@@ -1046,6 +1149,19 @@ static struct bounded_decode_scratch relay_notification_value_decode_scratch = {
     .capacity = ZMK_CUSTOM_SETTINGS_RELAY_PAYLOAD_MAX_SIZE,
 };
 
+static bool decode_relay_notification_payload(pb_istream_t *stream, const pb_field_t *field,
+                                              void **arg) {
+    ARG_UNUSED(field);
+    cormoran_zmk_custom_settings_Notification *notification = *arg;
+    *notification = (cormoran_zmk_custom_settings_Notification)
+        cormoran_zmk_custom_settings_Notification_init_zero;
+    relay_notification_value_decode_scratch.size = 0;
+    relay_notification_default_decode_scratch.size = 0;
+    notification->cb_notification_type.funcs.decode = notification_arm_wire_precallback;
+    notification->cb_notification_type.arg = &relay_notification_value_decode_scratch;
+    return pb_decode(stream, cormoran_zmk_custom_settings_Notification_fields, notification);
+}
+
 static int relayed_notification_to_public(const struct zmk_custom_settings_relay_notification *ev,
                                           cormoran_zmk_custom_settings_Notification *notification) {
     k_mutex_lock(&relay_notification_decode_lock, K_FOREVER);
@@ -1053,12 +1169,10 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
     cormoran_zmk_custom_settings_RelayNotification *relay = &relay_notification_decode_buffer;
     *relay = (cormoran_zmk_custom_settings_RelayNotification)
         cormoran_zmk_custom_settings_RelayNotification_init_zero;
-    /* Wired via Notification's message-level oneof precallback, not in
-     * advance - see request_arm_wire_precallback's comment (nanopb zeroes
-     * the selected notification_type arm during decode). */
-    relay_notification_value_decode_scratch.size = 0;
-    relay->notification.cb_notification_type.funcs.decode = notification_arm_wire_precallback;
-    relay->notification.cb_notification_type.arg = &relay_notification_value_decode_scratch;
+    *notification = (cormoran_zmk_custom_settings_Notification)
+        cormoran_zmk_custom_settings_Notification_init_zero;
+    relay->notification.funcs.decode = decode_relay_notification_payload;
+    relay->notification.arg = notification;
     pb_istream_t stream = pb_istream_from_buffer(ev->payload, ev->payload_size);
     if (!pb_decode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay)) {
         LOG_WRN("Failed to decode relayed custom settings notification: %s", PB_GET_ERROR(&stream));
@@ -1066,10 +1180,8 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
         return -EIO;
     }
 
-    *notification = relay->notification;
-    /* CRITICAL: the struct copy above brought along cb_notification_type,
-     * whose funcs union still holds the DECODE-role precallback wired before
-     * pb_decode(). nanopb's encoder invokes cb_<oneof>.funcs.encode for
+    /* The decoded notification still has the DECODE-role oneof precallback.
+     * nanopb's encoder invokes cb_<oneof>.funcs.encode for
      * PB_LTYPE_SUBMSG_W_CB arms too (pb_encode.c, "Message callback is
      * stored right before pSize"), so re-encoding this notification with the
      * stale callback in place makes the precallback run in encode context
@@ -1085,6 +1197,10 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
         k_mutex_unlock(&relay_notification_decode_lock);
         return 0;
     }
+
+    notification->notification_type.setting.setting.meta.constraints.funcs.encode =
+        encode_relay_constraints;
+    notification->notification_type.setting.setting.meta.constraints.arg = &relay_constraints;
 
     /* notification->notification_type.setting.setting.value's
      * bytes_value/string_value (if that is the active oneof arm) is still
@@ -1123,20 +1239,9 @@ static int relayed_notification_to_public(const struct zmk_custom_settings_relay
 
 static int
 raise_encoded_studio_notification(const cormoran_zmk_custom_settings_Notification *notification) {
-    int index = custom_subsystem_index();
-    if (index < 0) {
-        return index;
-    }
-
-    pb_callback_t payload = {
-        .funcs.encode = encode_notification_payload,
-        .arg = (void *)notification,
-    };
-
-    return raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
-        .subsystem_index = (uint8_t)index,
-        .encode_payload = payload,
-    });
+    return zmk_custom_studio_notify_message(SUBSYSTEM_IDENTIFIER_STRING,
+                                            cormoran_zmk_custom_settings_Notification_fields,
+                                            notification);
 }
 #endif
 
@@ -1227,21 +1332,21 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     relay->has_custom_subsystem_id = true;
     copy_string(relay->custom_subsystem_id, sizeof(relay->custom_subsystem_id),
                 setting->custom_subsystem_id);
-    relay->has_notification = true;
-    relay->notification = *notification;
+    relay->notification.funcs.encode = encode_relay_notification_payload;
+    relay->notification.arg = notification;
     pb_ostream_t stream =
         pb_ostream_from_buffer(relay_notification->payload, sizeof(relay_notification->payload));
     bool encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
-    if (!encoded && (relay->notification.notification_type.setting.setting.has_value ||
-                     relay->notification.notification_type.setting.setting.has_default_value)) {
+    if (!encoded && (notification->notification_type.setting.setting.has_value ||
+                     notification->notification_type.setting.setting.has_default_value)) {
         /* Large values are not relayed: unlike the direct GetSetting/list
          * path, which streams a value of any size, the relay envelope is a
          * fixed CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN buffer. Retry once with
          * the value (and the optional default value) omitted so the rest of the
          * notification (has_unsaved_value, kind, etc.) still reaches the central
          * instead of losing the whole notification. */
-        relay->notification.notification_type.setting.setting.has_value = false;
-        relay->notification.notification_type.setting.setting.has_default_value = false;
+        notification->notification_type.setting.setting.has_value = false;
+        notification->notification_type.setting.setting.has_default_value = false;
         stream = pb_ostream_from_buffer(relay_notification->payload,
                                         sizeof(relay_notification->payload));
         encoded = pb_encode(&stream, cormoran_zmk_custom_settings_RelayNotification_fields, relay);
@@ -1255,21 +1360,9 @@ static int raise_setting_notification(const struct zmk_custom_setting *setting,
     ret = raise_zmk_custom_settings_relay_notification(*relay_notification);
 #else
 #if ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
-    int index = custom_subsystem_index();
-    if (index < 0) {
-        k_mutex_unlock(&notification_buffer_lock);
-        return index;
-    }
-
-    pb_callback_t payload = {
-        .funcs.encode = encode_notification_payload,
-        .arg = notification,
-    };
-
-    ret = raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
-        .subsystem_index = (uint8_t)index,
-        .encode_payload = payload,
-    });
+    ret = zmk_custom_studio_notify_message(SUBSYSTEM_IDENTIFIER_STRING,
+                                           cormoran_zmk_custom_settings_Notification_fields,
+                                           notification);
 #else
     ret = 0;
 #endif
@@ -1319,8 +1412,10 @@ static bool for_each_list_item(const struct zmk_custom_settings_setting_scope *s
             setting->array_index == ZMK_CUSTOM_SETTING_ARRAY_NONE) {
             uint32_t active_size = zmk_custom_setting_array_size(setting);
             for (uint32_t i = 0; i < active_size; i++) {
-                const struct zmk_custom_setting *element = zmk_custom_setting_find_array_element(
-                    setting->custom_subsystem_id, setting->array_key, i);
+                struct zmk_custom_setting element_storage;
+                const struct zmk_custom_setting *element =
+                    array_view_find(&element_storage, setting->custom_subsystem_id,
+                                    zmk_custom_setting_public_key(setting), i);
                 if (!element || !setting_matches_scope(element, scope)) {
                     continue;
                 }
@@ -1595,7 +1690,8 @@ static int handle_private_get_setting(const struct zmk_custom_settings_setting_r
         return -ENOENT;
     }
 
-    const struct zmk_custom_setting *setting = setting_for_ref(ref);
+    struct zmk_custom_setting setting_view;
+    const struct zmk_custom_setting *setting = setting_for_ref(ref, &setting_view);
     if (!setting) {
         return -ENOENT;
     }
@@ -1635,7 +1731,7 @@ static int handle_get_setting(const cormoran_zmk_custom_settings_GetSettingReque
 }
 
 static int handle_private_write_setting(const struct zmk_custom_settings_setting_ref *ref,
-                                        const struct zmk_custom_setting_value *value,
+                                        const struct zmk_custom_setting_value_view *value,
                                         bool value_is_array, uint32_t array_index,
                                         uint32_t array_size,
                                         cormoran_zmk_custom_settings_SettingWriteMode write_mode,
@@ -1661,12 +1757,13 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
         resolved_ref.array_index = resolved_index;
     }
 
-    const struct zmk_custom_setting *setting = setting_for_ref(&resolved_ref);
+    struct zmk_custom_setting setting_view;
+    const struct zmk_custom_setting *setting = setting_for_ref(&resolved_ref, &setting_view);
     if (!setting) {
         return -ENOENT;
     }
     /* IS_ENABLED-guarded so the zmk_custom_setting_array_max_size /
-     * zmk_custom_setting_write_array_element calls below - only defined in
+     * zmk_custom_setting_write_array_element_view calls below - only defined in
      * src/custom_settings_array.c when CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY is
      * enabled - are provably dead code when the feature is off (value_is_array
      * is a runtime flag decoded off the wire, so it alone cannot make that
@@ -1689,18 +1786,22 @@ static int handle_private_write_setting(const struct zmk_custom_settings_setting
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    struct zmk_custom_setting_value internal_value;
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t internal_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view internal_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(internal_value_buffer, sizeof(internal_value_buffer));
     int ret = 0;
     if (value_uses_rpc_format) {
-        ret = zmk_custom_setting_deserialize_rpc_value(setting, value, &internal_value);
+        ret = zmk_custom_setting_deserialize_rpc_value_view(setting, value, &internal_value);
         if (ret < 0) {
             return ret;
         }
         value = &internal_value;
     }
 
-    ret = write_as_array ? zmk_custom_setting_write_array_element(setting, value, array_size, mode)
-                         : zmk_custom_setting_write(setting, value, mode);
+    ret = write_as_array
+              ? zmk_custom_setting_write_array_element_view(setting, value, array_size, mode)
+              : zmk_custom_setting_write_view(setting, value, mode);
     if (ret < 0) {
         return ret;
     }
@@ -1735,12 +1836,13 @@ static int handle_write_setting(const cormoran_zmk_custom_settings_WriteSettingR
         return ret;
     }
 
-    struct zmk_custom_setting_value value;
+    struct zmk_custom_setting_behavior_value value_behavior;
+    struct zmk_custom_setting_value_view value = {0};
     bool value_is_array = false;
     uint32_t array_index = 0;
     uint32_t array_size = 0;
     ret = proto_to_value(&req->value, &g_write_value_decode_scratch, &value, &value_is_array,
-                         &array_index, &array_size);
+                         &array_index, &array_size, &value_behavior);
     if (ret < 0) {
         return ret;
     }
@@ -1753,12 +1855,12 @@ static int handle_write_setting(const cormoran_zmk_custom_settings_WriteSettingR
 }
 
 static int handle_private_push_back_array(const struct zmk_custom_settings_setting_ref *ref,
-                                          const struct zmk_custom_setting_value *value,
+                                          const struct zmk_custom_setting_value_view *value,
                                           cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                           cormoran_zmk_custom_settings_Response *resp,
                                           bool value_uses_rpc_format) {
     /* Whole-function guard (rather than only guarding the
-     * zmk_custom_setting_array_push_back call below): array_for_ref already
+     * zmk_custom_setting_array_push_back_view call below): array_for_ref already
      * returns NULL when the feature is off, but the compiler cannot prove
      * that across the call, so without this the push_back call would still
      * need custom_settings_array.c's symbol at link time. */
@@ -1775,7 +1877,8 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
         return 0;
     }
 
-    const struct zmk_custom_setting *setting = array_for_ref(ref);
+    struct zmk_custom_setting setting_view;
+    const struct zmk_custom_setting *setting = array_for_ref(ref, &setting_view);
     if (!setting) {
         return -ENOENT;
     }
@@ -1790,17 +1893,20 @@ static int handle_private_push_back_array(const struct zmk_custom_settings_setti
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    struct zmk_custom_setting_value internal_value;
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t internal_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view internal_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(internal_value_buffer, sizeof(internal_value_buffer));
     int ret = 0;
     if (value_uses_rpc_format) {
-        ret = zmk_custom_setting_deserialize_rpc_value(setting, value, &internal_value);
+        ret = zmk_custom_setting_deserialize_rpc_value_view(setting, value, &internal_value);
         if (ret < 0) {
             return ret;
         }
         value = &internal_value;
     }
 
-    ret = zmk_custom_setting_array_push_back(setting, value, mode);
+    ret = zmk_custom_setting_array_push_back_view(setting, value, mode);
     if (ret < 0) {
         return ret;
     }
@@ -1821,8 +1927,9 @@ static int handle_push_back_array(const cormoran_zmk_custom_settings_PushBackArr
         return ret;
     }
 
-    struct zmk_custom_setting_value value;
-    ret = scalar_proto_to_value(&req->value, &value);
+    struct zmk_custom_setting_behavior_value value_behavior;
+    struct zmk_custom_setting_value_view value = {0};
+    ret = scalar_proto_to_value(&req->value, &value, &value_behavior);
     if (ret < 0) {
         return ret;
     }
@@ -1851,7 +1958,8 @@ static int handle_private_pop_back_array(const struct zmk_custom_settings_settin
         return 0;
     }
 
-    const struct zmk_custom_setting *setting = array_for_ref(ref);
+    struct zmk_custom_setting setting_view;
+    const struct zmk_custom_setting *setting = array_for_ref(ref, &setting_view);
     if (!setting) {
         return -ENOENT;
     }
@@ -1866,7 +1974,7 @@ static int handle_private_pop_back_array(const struct zmk_custom_settings_settin
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    int ret = zmk_custom_setting_array_pop_back(setting, NULL, mode);
+    int ret = zmk_custom_setting_array_pop_back_view(setting, NULL, mode);
     if (ret < 0) {
         return ret;
     }
@@ -1904,13 +2012,13 @@ static int handle_pop_back_array(const cormoran_zmk_custom_settings_PopBackArray
  */
 
 static int handle_private_create_setting(const struct zmk_custom_settings_setting_ref *ref,
-                                         const struct zmk_custom_setting_value *value,
+                                         const struct zmk_custom_setting_value_view *value,
                                          cormoran_zmk_custom_settings_SettingWriteMode write_mode,
                                          cormoran_zmk_custom_settings_Response *resp,
                                          bool value_uses_rpc_format) {
     /* Everything below resolves through a
      * struct zmk_custom_setting_keyspace * (zmk_custom_settings_keyspace_find_for_key/
-     * zmk_custom_setting_keyspace_create, defined in
+     * zmk_custom_setting_keyspace_create_view, defined in
      * custom_settings_keyspace.c) - unlike every other handler, there is no
      * live struct zmk_custom_setting to guard with zmk_custom_setting_keyspace_of(),
      * so this early return is what keeps a
@@ -1949,17 +2057,25 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
     /* Deserialize against the keyspace's shared value_type/converters -
      * there is no live struct zmk_custom_setting to deserialize against yet
      * (that is exactly what this call creates), so build a throwaway
-     * descriptor with just the fields zmk_custom_setting_deserialize_rpc_value
+     * descriptor with just the fields zmk_custom_setting_deserialize_rpc_value_view
      * reads (value_type, rpc_deserializer). */
-    struct zmk_custom_setting_value internal_value;
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t internal_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view internal_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(internal_value_buffer, sizeof(internal_value_buffer));
     int ret = 0;
     if (value_uses_rpc_format) {
         struct zmk_custom_setting keyspace_value_shape = {
             .value_type = keyspace->value_type,
+#ifdef CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
             .rpc_deserializer = keyspace->rpc_deserializer,
+#else
+            .metadata = &(const struct zmk_custom_setting_metadata){.rpc_deserializer =
+                                                                        keyspace->rpc_deserializer},
+#endif
         };
-        ret =
-            zmk_custom_setting_deserialize_rpc_value(&keyspace_value_shape, value, &internal_value);
+        ret = zmk_custom_setting_deserialize_rpc_value_view(&keyspace_value_shape, value,
+                                                            &internal_value);
         if (ret < 0) {
             return ret;
         }
@@ -1967,7 +2083,8 @@ static int handle_private_create_setting(const struct zmk_custom_settings_settin
     }
 
     const struct zmk_custom_setting *created = NULL;
-    ret = zmk_custom_setting_keyspace_create(keyspace, setting_ref_key(ref), value, mode, &created);
+    ret = zmk_custom_setting_keyspace_create_view(keyspace, setting_ref_key(ref), value, mode,
+                                                  &created);
     if (ret == -ENOSPC) {
         set_error(resp, "Keyspace is full");
         return 0;
@@ -2009,12 +2126,13 @@ static int handle_create_setting(const cormoran_zmk_custom_settings_CreateSettin
         return ret;
     }
 
-    struct zmk_custom_setting_value value;
+    struct zmk_custom_setting_behavior_value value_behavior;
+    struct zmk_custom_setting_value_view value = {0};
     bool value_is_array = false;
     uint32_t array_index = 0;
     uint32_t array_size = 0;
     ret = proto_to_value(&req->value, &g_write_value_decode_scratch, &value, &value_is_array,
-                         &array_index, &array_size);
+                         &array_index, &array_size, &value_behavior);
     if (ret < 0) {
         return ret;
     }
@@ -2103,7 +2221,7 @@ static int handle_delete_setting(const cormoran_zmk_custom_settings_DeleteSettin
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_CHUNKED_RPC) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 struct zmk_custom_settings_chunk_session {
     bool active;
-    const struct zmk_custom_setting *setting;
+    struct zmk_custom_setting_ref ref;
     uint32_t total_size;
     uint32_t received;
     cormoran_zmk_custom_settings_SettingWriteMode mode;
@@ -2123,6 +2241,31 @@ static void reset_chunk_session_locked(void) {
     chunk_session = (struct zmk_custom_settings_chunk_session){0};
 }
 
+struct chunk_commit_context {
+    const uint8_t *data;
+    size_t size;
+    enum zmk_custom_setting_write_mode mode;
+};
+
+static int commit_chunk_ref(const struct zmk_custom_setting *setting, void *context) {
+    struct chunk_commit_context *commit = context;
+    if (needs_unlock(setting->write_permission)) {
+        return -EACCES;
+    }
+    if (commit->size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
+        return zmk_custom_setting_write_bytes(setting, commit->data, commit->size, commit->mode);
+    }
+    struct zmk_custom_setting_value_view wire = {.type = presented_value_type(setting),
+                                                 .size = commit->size};
+    wire.bytes_value = commit->data;
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t decoded_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view decoded =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(decoded_buffer, sizeof(decoded_buffer));
+    int ret = zmk_custom_setting_deserialize_rpc_value_view(setting, &wire, &decoded);
+    return ret < 0 ? ret : zmk_custom_setting_write_view(setting, &decoded, commit->mode);
+}
+
 static int
 handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *ref,
                                  uint32_t total_size, uint32_t offset, const uint8_t *data,
@@ -2137,7 +2280,8 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
         return 0;
     }
 
-    const struct zmk_custom_setting *setting = setting_for_ref(ref);
+    struct zmk_custom_setting setting_view;
+    const struct zmk_custom_setting *setting = setting_for_ref(ref, &setting_view);
     if (!setting) {
         return -ENOENT;
     }
@@ -2149,6 +2293,11 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
         return 0;
     }
 
+    struct zmk_custom_setting_ref target;
+    int capture_ret = zmk_custom_setting_ref_capture(setting, &target);
+    if (capture_ret < 0) {
+        return capture_ret;
+    }
     k_mutex_lock(&chunk_session_lock, K_FOREVER);
 
     if (offset == 0) {
@@ -2158,10 +2307,11 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
         }
         reset_chunk_session_locked();
         chunk_session.active = true;
-        chunk_session.setting = setting;
+        chunk_session.ref = target;
         chunk_session.total_size = total_size;
         chunk_session.mode = write_mode;
-    } else if (!chunk_session.active || chunk_session.setting != setting ||
+    } else if (!chunk_session.active ||
+               !zmk_custom_setting_ref_equal(&chunk_session.ref, &target) ||
                offset != chunk_session.received) {
         /* Out-of-order chunk, or a chunk for a different setting than the
          * transfer that is currently in progress. */
@@ -2196,46 +2346,11 @@ handle_private_write_value_chunk(const struct zmk_custom_settings_setting_ref *r
             ? ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST
             : ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY;
 
-    int ret;
-    if (chunk_session.total_size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) {
-        /* Large value: write the assembled payload straight to the setting's
-         * large store. RPC deserializer converters are bounded by the fixed
-         * carrier and are not applied on this path. The write is done while
-         * still holding chunk_session_lock (consistent lock order:
-         * chunk_session_lock is always taken before custom_settings_lock), then
-         * the session is released. */
-        ret = zmk_custom_setting_write_bytes(setting, chunk_session.buffer,
-                                             chunk_session.total_size, mode);
-        reset_chunk_session_locked();
-        k_mutex_unlock(&chunk_session_lock);
-        if (ret < 0) {
-            return ret;
-        }
-
-        set_status(resp, 1, "Value written from chunks");
-        return 0;
-    }
-
-    struct zmk_custom_setting_value rpc_value = {.type = presented_value_type(setting)};
-    if (rpc_value.type == ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES) {
-        rpc_value.size = chunk_session.total_size;
-        memcpy(rpc_value.bytes_value, chunk_session.buffer, chunk_session.total_size);
-    } else {
-        size_t len = MIN(chunk_session.total_size, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
-        memcpy(rpc_value.string_value, chunk_session.buffer, len);
-        rpc_value.string_value[len] = '\0';
-        rpc_value.size = len;
-    }
-
-    struct zmk_custom_setting_value internal_value;
-    ret = zmk_custom_setting_deserialize_rpc_value(setting, &rpc_value, &internal_value);
+    struct chunk_commit_context context = {
+        .data = chunk_session.buffer, .size = chunk_session.total_size, .mode = mode};
+    int ret = zmk_custom_setting_ref_visit(&chunk_session.ref, commit_chunk_ref, &context);
     reset_chunk_session_locked();
     k_mutex_unlock(&chunk_session_lock);
-    if (ret < 0) {
-        return ret;
-    }
-
-    ret = zmk_custom_setting_write(setting, &internal_value, mode);
     if (ret < 0) {
         return ret;
     }
@@ -2367,12 +2482,14 @@ static bool relay_request_unlock_required(const cormoran_zmk_custom_settings_Req
             return false;
         }
 
-        struct zmk_custom_setting_value value;
+        struct zmk_custom_setting_behavior_value value_behavior;
+        struct zmk_custom_setting_value_view value = {0};
         bool value_is_array = false;
         uint32_t array_index = 0;
         uint32_t array_size = 0;
         if (proto_to_value(&req->request_type.write_setting.value, &g_write_value_decode_scratch,
-                           &value, &value_is_array, &array_index, &array_size) < 0) {
+                           &value, &value_is_array, &array_index, &array_size,
+                           &value_behavior) < 0) {
             return false;
         }
         if (value_is_array) {
@@ -2380,7 +2497,8 @@ static bool relay_request_unlock_required(const cormoran_zmk_custom_settings_Req
             ref.array_index = array_index;
         }
 
-        const struct zmk_custom_setting *setting = setting_for_ref(&ref);
+        struct zmk_custom_setting setting_view;
+        const struct zmk_custom_setting *setting = setting_for_ref(&ref, &setting_view);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
     case cormoran_zmk_custom_settings_Request_push_back_array_tag: {
@@ -2389,7 +2507,8 @@ static bool relay_request_unlock_required(const cormoran_zmk_custom_settings_Req
             return false;
         }
 
-        const struct zmk_custom_setting *setting = array_for_ref(&ref);
+        struct zmk_custom_setting setting_view;
+        const struct zmk_custom_setting *setting = array_for_ref(&ref, &setting_view);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
     case cormoran_zmk_custom_settings_Request_pop_back_array_tag: {
@@ -2398,7 +2517,8 @@ static bool relay_request_unlock_required(const cormoran_zmk_custom_settings_Req
             return false;
         }
 
-        const struct zmk_custom_setting *setting = array_for_ref(&ref);
+        struct zmk_custom_setting setting_view;
+        const struct zmk_custom_setting *setting = array_for_ref(&ref, &setting_view);
         return setting && setting->write_permission == ZMK_CUSTOM_SETTING_PERMISSION_SECURE;
     }
     case cormoran_zmk_custom_settings_Request_save_settings_tag: {
@@ -2703,6 +2823,7 @@ static int process_request(const cormoran_zmk_custom_settings_Request *req,
 }
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static void relay_ref_to_private(const cormoran_zmk_custom_settings_RelaySettingRef *src,
                                  struct zmk_custom_settings_setting_ref *dest) {
     *dest = (struct zmk_custom_settings_setting_ref){0};
@@ -2809,13 +2930,14 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         struct zmk_custom_settings_setting_ref ref;
         relay_ref_to_private(&decoded_req->request_type.write_setting.setting, &ref);
 
-        struct zmk_custom_setting_value value;
+        struct zmk_custom_setting_behavior_value value_behavior;
+        struct zmk_custom_setting_value_view value = {0};
         bool value_is_array = false;
         uint32_t array_index = 0;
         uint32_t array_size = 0;
         ret = proto_to_value(&decoded_req->request_type.write_setting.value,
                              &relay_request_write_value_decode_scratch, &value, &value_is_array,
-                             &array_index, &array_size);
+                             &array_index, &array_size, &value_behavior);
         if (ret < 0) {
             break;
         }
@@ -2828,8 +2950,10 @@ static int process_relay_request(const struct zmk_custom_settings_relay_request 
         struct zmk_custom_settings_setting_ref ref;
         relay_ref_to_private(&decoded_req->request_type.push_back_array.setting, &ref);
 
-        struct zmk_custom_setting_value value;
-        ret = scalar_proto_to_value(&decoded_req->request_type.push_back_array.value, &value);
+        struct zmk_custom_setting_behavior_value value_behavior;
+        struct zmk_custom_setting_value_view value = {0};
+        ret = scalar_proto_to_value(&decoded_req->request_type.push_back_array.value, &value,
+                                    &value_behavior);
         if (ret < 0) {
             break;
         }
@@ -2893,10 +3017,11 @@ static void relay_request_work_handler(struct k_work *work) {
         }
     }
 }
+#endif /* !CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 #endif
 
 struct zmk_custom_settings_notification_request {
-    const struct zmk_custom_setting *setting;
+    struct zmk_custom_setting_ref ref;
     cormoran_zmk_custom_settings_SettingNotificationKind kind;
     uint32_t source;
 };
@@ -2907,14 +3032,25 @@ K_MSGQ_DEFINE(notification_msgq, sizeof(struct zmk_custom_settings_notification_
               CONFIG_ZMK_CUSTOM_SETTINGS_NOTIFICATION_QUEUE_SIZE, 4);
 K_WORK_DEFINE(notification_work, notification_work_handler);
 
+static int notify_ref(const struct zmk_custom_setting *setting, void *context) {
+    struct zmk_custom_settings_notification_request *request = context;
+    return raise_setting_notification(setting, request->kind, can_include_value(setting), false,
+                                      false, request->source);
+}
+
 static void notification_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
     struct zmk_custom_settings_notification_request request;
     while (k_msgq_get(&notification_msgq, &request, K_NO_WAIT) == 0) {
-        int ret = raise_setting_notification(request.setting, request.kind,
-                                             can_include_value(request.setting), false, false,
-                                             request.source);
+        /* Match raise_setting_notification's lock order. The ref's identity
+         * remains reserved until the synchronous encoder has consumed it. */
+        k_mutex_lock(&notification_buffer_lock, K_FOREVER);
+        int ret = zmk_custom_setting_ref_visit(&request.ref, notify_ref, &request);
+        k_mutex_unlock(&notification_buffer_lock);
+        if (ret == -ESTALE || ret == -ENOENT) {
+            continue; /* A queued update must never describe a replacement entry. */
+        }
         if (ret < 0) {
             LOG_WRN("Failed to raise custom settings notification: %d", ret);
         }
@@ -2945,11 +3081,14 @@ static int setting_changed_listener(const zmk_event_t *eh) {
 #endif
 
     struct zmk_custom_settings_notification_request request = {
-        .setting = ev->setting,
         .kind = proto_notification_kind(ev->kind),
         .source = ev->source,
     };
-    int ret = k_msgq_put(&notification_msgq, &request, K_NO_WAIT);
+    int ret = zmk_custom_setting_ref_capture(ev->setting, &request.ref);
+    if (ret < 0) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    ret = k_msgq_put(&notification_msgq, &request, K_NO_WAIT);
     if (ret < 0) {
         LOG_WRN("Failed to queue custom settings notification: %d", ret);
         return ZMK_EV_EVENT_BUBBLE;
@@ -2989,8 +3128,8 @@ static bool decode_custom_settings_request(const uint8_t *buf, size_t size,
 
 static bool custom_settings_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
                                                pb_callback_t *encode_response) {
-    cormoran_zmk_custom_settings_Response *resp = ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER_ALLOCATE(
-        cormoran_custom_settings, encode_response);
+    cormoran_zmk_custom_settings_Response *resp = ZMK_CUSTOM_STUDIO_RESPONSE_BUFFER_ALLOCATE(
+        cormoran_zmk_custom_settings_Response, encode_response);
 
     cormoran_zmk_custom_settings_Request req;
     if (!decode_custom_settings_request(raw_request->payload.bytes, raw_request->payload.size,
@@ -3186,7 +3325,7 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
     copy_string(ref.custom_subsystem_id, sizeof(ref.custom_subsystem_id), "test");
     copy_string(ref.key, sizeof(ref.key), "bytes_value");
 
-    struct zmk_custom_setting_value rpc_value = ZMK_CUSTOM_SETTING_VALUE_BYTES(9, 8, 7);
+    struct zmk_custom_setting_value_view rpc_value = ZMK_CUSTOM_SETTING_VIEW_BYTES(9, 8, 7);
     cormoran_zmk_custom_settings_Response resp = cormoran_zmk_custom_settings_Response_init_zero;
     ret = handle_private_write_setting(
         &ref, &rpc_value, false, 0, 0,
@@ -3195,8 +3334,11 @@ static int custom_settings_rpc_bytes_converter_test_init(void) {
         return ret;
     }
 
-    struct zmk_custom_setting_value internal_value;
-    ret = zmk_custom_setting_read(setting, &internal_value);
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t internal_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view internal_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(internal_value_buffer, sizeof(internal_value_buffer));
+    ret = zmk_custom_setting_read_view(setting, &internal_value);
     if (ret < 0) {
         return ret;
     }
@@ -3251,8 +3393,9 @@ static int custom_settings_default_value_test_init(void) {
     }
 
     /* After changing it, the default_value carries the compile-time default. */
-    struct zmk_custom_setting_value changed_int = ZMK_CUSTOM_SETTING_VALUE_INT32(55);
-    ret = zmk_custom_setting_write(int_setting, &changed_int, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    struct zmk_custom_setting_value_view changed_int = ZMK_CUSTOM_SETTING_VIEW_INT32(55);
+    ret = zmk_custom_setting_write_view(int_setting, &changed_int,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -3298,9 +3441,9 @@ static int custom_settings_default_value_test_init(void) {
     if (ret < 0) {
         return ret;
     }
-    struct zmk_custom_setting_value changed_string = ZMK_CUSTOM_SETTING_VALUE_STRING("changed");
-    ret = zmk_custom_setting_write(string_setting, &changed_string,
-                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    struct zmk_custom_setting_value_view changed_string = ZMK_CUSTOM_SETTING_VIEW_STRING("changed");
+    ret = zmk_custom_setting_write_view(string_setting, &changed_string,
+                                        ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -3439,12 +3582,12 @@ static int custom_settings_list_keyspace_test_init(void) {
     }
 
     const struct zmk_custom_setting *created = NULL;
-    struct zmk_custom_setting_value value = {
+    struct zmk_custom_setting_value_view value = {
         .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,
         .int32_value = 42,
     };
-    int ret = zmk_custom_setting_keyspace_create(keyspace, "macro/list-test", &value,
-                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
+    int ret = zmk_custom_setting_keyspace_create_view(
+        keyspace, "macro/list-test", &value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY, &created);
     if (ret < 0 || !created) {
         LOG_ERR("List keyspace test: create failed: %d", ret);
         return ret < 0 ? ret : -EINVAL;
@@ -3561,8 +3704,11 @@ static int custom_settings_chunked_rpc_test_init(void) {
         return ret;
     }
 
-    struct zmk_custom_setting_value internal_value;
-    ret = zmk_custom_setting_read(setting, &internal_value);
+    _Alignas(struct zmk_custom_setting_behavior_value)
+        uint8_t internal_value_buffer[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
+    struct zmk_custom_setting_value_view internal_value =
+        ZMK_CUSTOM_SETTING_VIEW_BUFFER(internal_value_buffer, sizeof(internal_value_buffer));
+    ret = zmk_custom_setting_read_view(setting, &internal_value);
     if (ret < 0) {
         return ret;
     }
@@ -3870,6 +4016,20 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
         src.notification_type.setting.kind =
             cormoran_zmk_custom_settings_SettingNotificationKind_SETTING_NOTIFICATION_KIND_VALUE_UPDATED;
         src.notification_type.setting.has_setting = true;
+        const struct zmk_custom_setting *meta_setting =
+            zmk_custom_setting_find("test", "int_value");
+        if (!meta_setting || meta_setting->constraints_count == 0) {
+            return -EINVAL;
+        }
+        src.notification_type.setting.setting.has_meta = true;
+        struct zmk_custom_setting meta_view;
+        if (use_string) {
+            meta_setting = array_view_find(&meta_view, "test", "array_value", 0);
+            if (!meta_setting) {
+                return -ENOENT;
+            }
+        }
+        setting_meta_to_proto(meta_setting, &src.notification_type.setting.setting.meta);
         copy_string(src.notification_type.setting.setting.key,
                     sizeof(src.notification_type.setting.setting.key), "int32_value");
         src.notification_type.setting.setting.has_value = true;
@@ -3887,11 +4047,27 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
                 cormoran_zmk_custom_settings_SettingValue_int32_value_tag;
             src.notification_type.setting.setting.value.value_type.int32_value = 63;
         }
+        /* Compare the wire before/after a scoped view expires. A decoder
+         * round-trip alone would not catch metadata lost before first encode. */
+        pb_ostream_t expected = pb_ostream_from_buffer(wire2, sizeof(wire2));
+        if (!pb_encode(&expected, cormoran_zmk_custom_settings_Notification_fields, &src)) {
+            return -EIO;
+        }
+        if (use_string) {
+            memset(&meta_view, 0, sizeof(meta_view));
+        }
         pb_ostream_t out = pb_ostream_from_buffer(wire, sizeof(wire));
         if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &src)) {
             LOG_ERR("notification reencode regression: encode failed: %s", PB_GET_ERROR(&out));
             return -EIO;
         }
+
+        if (out.bytes_written != expected.bytes_written ||
+            memcmp(wire, wire2, out.bytes_written) != 0) {
+            LOG_ERR("FAIL: scoped array metadata expired before encoding");
+            return -EINVAL;
+        }
+        size_t original_size = out.bytes_written;
 
         /* 2. Decode it the way relayed_notification_to_public does. */
         cormoran_zmk_custom_settings_Notification decoded =
@@ -3910,6 +4086,9 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
          * value (the hardware bug). */
         cormoran_zmk_custom_settings_Notification republish = decoded;
         republish.cb_notification_type = (pb_callback_t){0};
+        republish.notification_type.setting.setting.meta.constraints.funcs.encode =
+            encode_relay_constraints;
+        republish.notification_type.setting.setting.meta.constraints.arg = &relay_constraints;
         if (republish.notification_type.setting.setting.has_value) {
             retarget_value_to_encode_scratch(&republish.notification_type.setting.setting.value,
                                              &value_scratch);
@@ -3918,6 +4097,12 @@ static int custom_settings_notification_reencode_regression_test_init(void) {
         if (!pb_encode(&out, cormoran_zmk_custom_settings_Notification_fields, &republish)) {
             LOG_ERR("notification reencode regression: re-encode failed: %s", PB_GET_ERROR(&out));
             return -EIO;
+        }
+
+        if (out.bytes_written != original_size || memcmp(wire, wire2, original_size) != 0) {
+            LOG_ERR("FAIL: relayed metadata/value changed during re-encode (before=%u after=%u)",
+                    (unsigned)original_size, (unsigned)out.bytes_written);
+            return -EINVAL;
         }
 
         /* 4. Decode the re-encoded wire and check the value survived. */
@@ -3986,9 +4171,9 @@ static int custom_settings_rpc_suppresses_notification_test_init(void) {
 
     /* Step A: a direct (non-RPC) mutation must still submit a notification. */
     notify_submit_count_for_test = 0;
-    struct zmk_custom_setting_value a_value = ZMK_CUSTOM_SETTING_VALUE_INT32(11);
-    int ret = zmk_custom_setting_write_by_key(subsys, key, &a_value,
-                                              ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    struct zmk_custom_setting_value_view a_value = ZMK_CUSTOM_SETTING_VIEW_INT32(11);
+    int ret = zmk_custom_setting_write_by_key_view(subsys, key, &a_value,
+                                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         LOG_ERR("rpc suppression regression: non-RPC write failed: %d", ret);
         return ret;
@@ -4065,12 +4250,12 @@ SYS_INIT(custom_settings_rpc_suppresses_notification_test_init, APPLICATION, 99)
 static int custom_settings_public_suppress_test_init(void) {
     const char *subsys = "test";
     const char *key = "int_value";
-    struct zmk_custom_setting_value value = ZMK_CUSTOM_SETTING_VALUE_INT32(33);
+    struct zmk_custom_setting_value_view value = ZMK_CUSTOM_SETTING_VIEW_INT32(33);
 
     notify_submit_count_for_test = 0;
     zmk_custom_settings_notify_suppress_begin();
-    int ret =
-        zmk_custom_setting_write_by_key(subsys, key, &value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    int ret = zmk_custom_setting_write_by_key_view(subsys, key, &value,
+                                                   ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     zmk_custom_settings_notify_suppress_end();
     if (ret < 0) {
         LOG_ERR("public suppress regression: bracketed write failed: %d", ret);
@@ -4085,9 +4270,9 @@ static int custom_settings_public_suppress_test_init(void) {
 
     /* After end(), the depth is back to 0, so a plain write notifies again. */
     notify_submit_count_for_test = 0;
-    value = ZMK_CUSTOM_SETTING_VALUE_INT32(44);
-    ret =
-        zmk_custom_setting_write_by_key(subsys, key, &value, ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
+    value = ZMK_CUSTOM_SETTING_VIEW_INT32(44);
+    ret = zmk_custom_setting_write_by_key_view(subsys, key, &value,
+                                               ZMK_CUSTOM_SETTING_WRITE_MODE_MEMORY);
     if (ret < 0) {
         return ret;
     }
@@ -4121,9 +4306,9 @@ static int custom_settings_reset_all_test_init(void) {
         return -ENOENT;
     }
 
-    struct zmk_custom_setting_value value = ZMK_CUSTOM_SETTING_VALUE_INT32(66);
-    int ret =
-        zmk_custom_setting_write_by_key(subsys, key, &value, ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
+    struct zmk_custom_setting_value_view value = ZMK_CUSTOM_SETTING_VIEW_INT32(66);
+    int ret = zmk_custom_setting_write_by_key_view(subsys, key, &value,
+                                                   ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST);
     if (ret < 0) {
         LOG_ERR("reset_all regression: persist failed: %d", ret);
         return ret;
@@ -4185,9 +4370,9 @@ static int custom_settings_reset_keyspace_test_init(void) {
     }
 
     const struct zmk_custom_setting *created = NULL;
-    struct zmk_custom_setting_value value = ZMK_CUSTOM_SETTING_VALUE_INT32(7);
-    int ret = zmk_custom_setting_keyspace_create(keyspace, "macro/reset", &value,
-                                                 ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
+    struct zmk_custom_setting_value_view value = ZMK_CUSTOM_SETTING_VIEW_INT32(7);
+    int ret = zmk_custom_setting_keyspace_create_view(
+        keyspace, "macro/reset", &value, ZMK_CUSTOM_SETTING_WRITE_MODE_PERSIST, &created);
     if (ret < 0 || !created) {
         LOG_ERR("reset_keyspace regression: create failed: %d", ret);
         return ret < 0 ? ret : -EINVAL;
@@ -4220,6 +4405,7 @@ SYS_INIT(custom_settings_reset_keyspace_test_init, APPLICATION, 99);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_SPLIT_RPC_RELAY)
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 static int relay_request_listener(const zmk_event_t *eh) {
     const struct zmk_custom_settings_relay_request *ev = as_zmk_custom_settings_relay_request(eh);
     if (!ev) {
@@ -4242,6 +4428,7 @@ static int relay_request_listener(const zmk_event_t *eh) {
 
     return ZMK_EV_EVENT_BUBBLE;
 }
+#endif /* !CONFIG_ZMK_SPLIT_ROLE_CENTRAL */
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 static void relay_notification_work_handler(struct k_work *work);
@@ -4298,8 +4485,10 @@ static int relay_notification_listener(const zmk_event_t *eh) {
 }
 #endif
 
+#if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 ZMK_LISTENER(custom_settings_relay_request, relay_request_listener);
 ZMK_SUBSCRIPTION(custom_settings_relay_request, zmk_custom_settings_relay_request);
+#endif
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL) && ZMK_CUSTOM_SETTINGS_LOCAL_STUDIO_RPC
 ZMK_LISTENER(custom_settings_relay_notification, relay_notification_listener);
 ZMK_SUBSCRIPTION(custom_settings_relay_notification, zmk_custom_settings_relay_notification);
@@ -4342,8 +4531,9 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
     }
     const struct zmk_custom_setting *array_setting =
         zmk_custom_setting_find_array("test", "array_value");
+    struct zmk_custom_setting array_tail_storage;
     const struct zmk_custom_setting *array_tail =
-        zmk_custom_setting_find_array_element("test", "array_value", 2);
+        array_view_find(&array_tail_storage, "test", "array_value", 2);
     if (!array_setting || !array_tail) {
         LOG_ERR("Split peripheral relay array setting not registered");
         return -ENOENT;
@@ -4371,8 +4561,9 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
         return ret;
     }
 
-    struct zmk_custom_setting_value value;
-    ret = zmk_custom_setting_read(setting, &value);
+    struct zmk_custom_setting_behavior_value value_behavior;
+    struct zmk_custom_setting_value_view value = {0};
+    ret = zmk_custom_setting_read_view(setting, &value);
     if (ret < 0) {
         return ret;
     }
@@ -4410,7 +4601,7 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
         LOG_ERR("Split peripheral relay pop_back did not shrink array");
         return -EINVAL;
     }
-    ret = zmk_custom_setting_read(array_tail, &value);
+    ret = zmk_custom_setting_read_view(array_tail, &value);
     if (ret != -ENOENT) {
         LOG_ERR("Expected split peripheral relay popped element read to fail, got %d", ret);
         return -EINVAL;
@@ -4438,7 +4629,7 @@ static int custom_settings_split_peripheral_relay_test_init(void) {
         LOG_ERR("Split peripheral relay push_back failed: %d", ret);
         return ret;
     }
-    ret = zmk_custom_setting_read(array_tail, &value);
+    ret = zmk_custom_setting_read_view(array_tail, &value);
     if (ret < 0) {
         return ret;
     }

@@ -7,7 +7,7 @@
 /*
  * Per-setting RPC bytes converter hooks (CONFIG_ZMK_CUSTOM_SETTINGS_RPC_CONVERTERS).
  *
- * zmk_custom_setting_serialize_rpc_value / _deserialize_rpc_value (the public
+ * zmk_custom_setting_serialize_rpc_value_view / _deserialize_rpc_value (the public
  * entry points a converter is reached through) stay in core so the API is
  * always available; when this feature is off they fall back to a plain
  * identity copy without referencing anything here. This file only holds the
@@ -21,8 +21,8 @@
 #include "custom_settings_internal.h"
 
 int convert_rpc_bytes_value(const struct zmk_custom_setting *setting,
-                            const struct zmk_custom_setting_value *src,
-                            struct zmk_custom_setting_value *dest,
+                            const struct zmk_custom_setting_value_view *src,
+                            struct zmk_custom_setting_value_view *dest,
                             zmk_custom_setting_rpc_bytes_converter_t converter) {
     if (!setting || !src || !dest) {
         return -EINVAL;
@@ -38,20 +38,24 @@ int convert_rpc_bytes_value(const struct zmk_custom_setting *setting,
 
     if (presented_type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES ||
         src->type != ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES || converter == NULL) {
-        copy_value(dest, src);
-        return 0;
+        return copy_value(dest, src);
     }
 
-    *dest = (struct zmk_custom_setting_value){
-        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,
-    };
+    /* Preserve the single-frame converter bound independently of the
+     * caller buffer's extra STRING terminator byte. */
+    if (src->size > CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE)
+        return -EMSGSIZE;
+    size_t capacity = MIN(dest->size, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE);
+    if (!dest->bytes_value && capacity)
+        return -EINVAL;
+    dest->type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES;
     size_t dest_size = 0;
-    int ret = converter(setting, src->bytes_value, src->size, dest->bytes_value, &dest_size,
-                        sizeof(dest->bytes_value));
+    int ret = converter(setting, src->bytes_value, src->size, (uint8_t *)dest->bytes_value,
+                        &dest_size, capacity);
     if (ret < 0) {
         return ret;
     }
-    if (dest_size > sizeof(dest->bytes_value)) {
+    if (dest_size > capacity) {
         return -EMSGSIZE;
     }
 

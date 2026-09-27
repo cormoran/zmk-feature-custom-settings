@@ -29,7 +29,7 @@ PASS: custom_settings_temporary_rollback scalar=10
 PASS: custom_settings_temporary_oversized size=33
 PASS: custom_settings_temporary_pool_exhausted
 PASS: custom_settings_temporary_pool_reclaimed
-PASS: custom_settings_view_pool_temp_slot_leak pool=16
+PASS: custom_settings_view_pool_temp_preserved pool=16
 PASS: custom_settings_boot_default_override
 PASS: custom_settings_keyspace_create_and_scope_discovery count=3
 PASS: custom_settings_keyspace_delete_frees_slot
@@ -45,12 +45,18 @@ PASS: custom_settings_pool_write_and_read size=100
 PASS: custom_settings_pool_enospc
 PASS: custom_settings_pool_compaction size_a=20 size_b=100
 PASS: custom_settings_pool_grow size_a=70 size_b=100
-PASS: custom_settings_pool_release used_before=171 used_after=101
+PASS: custom_settings_pool_release used_before=170 used_after=100
 PASS: custom_settings_pool_persist_discard size=100
 PASS: custom_settings_pool_string_member value=hello
 PASS: custom_settings_keyspace_large_value size=100
 PASS: custom_settings_keyspace_pool_overcommit created=4 max_entries=8
 PASS: custom_settings_initialized_event count=1
+PASS: custom_settings_ref_32_indices
+PASS: custom_settings_ref_rejects_reused_slot
+PASS: custom_settings_typed_string_array
+PASS: custom_settings_pool_alias_input
+PASS: custom_settings_persist_failure_preserves_ram
+PASS: custom_settings_compact_value_views
 PASS: split_peripheral_relay
 PASS: split_peripheral_relay_pop_back size=2
 PASS: split_peripheral_relay_push_back array[2]=44 size=3

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Custom Settings — RAM / Flash 再設計案</title>
+<style>
+:root{color-scheme:light;--ink:#162c3f;--muted:#4b6073;--paper:#f2f5f8;--blue:#215caa;--teal:#087966;--amber:#9b5e09;--line:#d6dfe7}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.8 system-ui,-apple-system,"Noto Sans",sans-serif}main{max-width:1120px;margin:auto;padding:30px 24px 70px}header{background:#142d46;color:white;padding:42px;border-radius:18px}header p{color:#d9e7f4}h1{font-size:clamp(28px,4vw,44px);line-height:1.35;margin:12px 0 20px}h2{font-size:27px;line-height:1.4;margin-top:0}h3{font-size:19px;margin:22px 0 8px}p{margin:10px 0 16px}a{color:var(--blue);text-underline-offset:3px}header a{color:#b6dcff}code,pre{font-family:ui-monospace,monospace;font-size:.88em}code{overflow-wrap:anywhere}pre{padding:18px;background:#edf2f7;overflow:auto;line-height:1.65;border-radius:8px}section{background:white;border:1px solid var(--line);border-radius:14px;margin-top:24px;padding:30px;scroll-margin-top:20px}nav{display:flex;gap:10px 20px;flex-wrap:wrap;margin:22px 0}.tag{font-size:13px;border:1px solid #7295b6;border-radius:99px;padding:4px 12px;display:inline-block}.lead{font-size:20px}.muted,figcaption{color:var(--muted);font-size:14px}.note{border-left:4px solid var(--blue);padding:12px 18px;background:#edf5fd}.caution{border-left-color:var(--amber);background:#fff6e7}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.card{border:1px solid var(--line);border-radius:10px;padding:20px}.card>strong{display:block;font-size:18px}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}th{background:#edf2f7}td:first-child{font-weight:600}figure{margin:20px 0}.flow{display:flex;align-items:stretch;gap:12px}.box{flex:1;min-width:0;padding:18px;border-radius:10px;background:#edf4fc;border:1px solid #b6cee9}.box.teal{background:#e8f6f1;border-color:#a8d5c8}.box.gold{background:#fff5e5;border-color:#e9cea3}.arrow{align-self:center;font-size:25px;color:var(--muted)}.box b{display:block}.box span{font-size:14px}.arena{display:flex;gap:4px;background:#e9edf2;padding:8px;border-radius:8px;margin:8px 0 14px}.block{padding:14px 8px;text-align:center;border-radius:4px;background:#cedef5;flex:1;font-size:14px}.block.green{background:#bce2d5}.block.free{background:repeating-linear-gradient(135deg,#fff,#fff 6px,#e9edf2 6px,#e9edf2 12px);border:1px dashed #8797a5}.barrow{display:grid;grid-template-columns:145px 1fr 90px;align-items:center;gap:12px;margin:12px 0;font-size:14px}.track{background:#edf2f7;height:28px;border-radius:4px}.bar{height:100%;background:#376ab0;border-radius:4px}.bar.new{background:var(--teal)}.steps{padding-left:25px}.steps li{padding:5px 0 12px}.kpi{font-size:32px;color:var(--teal);font-weight:750}.sources li{margin-bottom:12px;overflow-wrap:anywhere}footer{font-size:14px;color:var(--muted);padding:24px 0}label{display:block;margin:10px 0}input{font:inherit;padding:5px 9px;width:100px;border:1px solid #7e92a5;border-radius:5px}output{font-weight:700}summary{cursor:pointer;color:var(--blue);font-weight:650}svg{width:100%;height:auto}svg text{font-family:system-ui,sans-serif}
+@media(max-width:700px){main{padding:16px 12px}header,section{padding:22px 18px}.grid{grid-template-columns:1fr}.flow{flex-direction:column}.arrow{transform:rotate(90deg)}.barrow{grid-template-columns:95px 1fr 70px;font-size:12px}h2{font-size:23px}.arena{flex-wrap:wrap}.block{min-width:65px}}
+@media print{body{background:white;font-size:10pt}main{max-width:none;padding:0}header{background:white;color:var(--ink);border:1px solid var(--line);padding:20px}header p{color:var(--ink)}section{break-inside:auto;padding:18px;margin-top:16px}figure,.card,tr{break-inside:avoid}nav,.calculator{display:none}a{color:inherit}*{print-color-adjust:exact;-webkit-print-color-adjust:exact}}
+</style>
+</head>
+<body><main>
+<header>
+<span class="tag">設計提案 / 実装変更なし</span>
+<h1>設定値のための RAM を、<br>実際に必要な場所へ。</h1>
+<p class="lead">型に合った小さな管理情報と、広く共有する byte pool。<br>可変長更新のコストは起動・設定操作時に集める。</p>
+<p>対象: zmk-feature-custom-settings · 調査基準 <code>c6a7fef</code> · 2026-09-27</p>
+<p>ここでの「shared pool」は既存の共有 value pool を指します。ご指定の “shard pool” はこの意味として設計しました。独立した shard ごとの allocator を増設する案ではありません。</p>
+</header>
+<nav aria-label="目次"><a href="#decision">推奨案</a><a href="#features">現在の機能</a><a href="#cost">メモリの内訳</a><a href="#design">構造</a><a href="#update">更新手順</a><a href="#budget">削減見込み</a><a href="#migration">移行・検証</a><a href="#sources">根拠</a></nav>
+
+<section id="decision"><h2>01 · 推奨する方向</h2>
+<p class="lead">共有する対象を、大きな値から<strong>すべての可変長値・keyspace のキー・可変長配列要素</strong>へ広げる。同時に、配列と keyspace が持つ大きな汎用構造体をなくす。</p>
+<div class="grid"><div class="card"><strong>常時使うものを小さく</strong><p>INT32 / BOOL / BEHAVIOR は型のサイズで保持。配列は型付き連続領域。メタデータ・既定値・制約は小さな ROM 表現にする。</p></div><div class="card"><strong>たまに行う処理に仕事を寄せる</strong><p>可変長データを詰め直す処理は起動と設定操作に限定。編集用 workspace は同時に一つを貸し出し、通常のキー処理では確保・移動しない。</p></div></div>
+<p class="note">前提の具体化: サイズ変更は起動、Web UI の write/import/create/delete に加え、その操作に伴う discard/reset・既定値更新・Flash 再読み込みを「設定操作」として処理する。既存の firmware API も同じ経路を通す。入力処理からの固定サイズ更新は維持し、可変長更新を必要とする呼び出しは worker に委譲する。</p>
+<p>「空の pool 領域は未使用」でも、静的配列の予約 RAM は減りません。<strong>リンク時 RAM を減らすには、複数の最大サイズ予約を一つの総予算へまとめ、その総予算を小さくする必要があります。</strong>全設定の最大値を同時に保持する保証を残す場合、payload の最悪時予算は減らせません。</p>
+</section>
+
+<section id="features"><h2>02 · 現在の機能と維持する契約</h2>
+<p>README だけでなく、公開ヘッダー・実装・proto を基準に整理しました。以前の <code>simplification-redesign.md</code> は過去の提案で、現在の実装や consumer の利用状況とは異なる箇所があります。<a href="#s1">[1–6]</a></p>
+<div class="table-wrap"><table><thead><tr><th>機能</th><th>現在の動作</th><th>再設計での扱い</th></tr></thead><tbody>
+<tr><td>登録・検索</td><td>subsystem + key。静的 descriptor は ROM。実行時生成は keyspace の枠で管理。</td><td>静的登録を維持。keyspace は親 descriptor と小さな slot、公開 API は handle にする。</td></tr>
+<tr><td>値・読み出し</td><td>INT32、BOOL、BYTES、STRING、BEHAVIOR。型付き getter、固定 carrier、read_into、lock 中の visitor。</td><td>型付き値 / byte slice を基本 API に。既存 carrier は移行用 adapter に限定。</td></tr>
+<tr><td>配列</td><td>最大要素数は固定、active length は可変。index read/write、push/pop、C API の insert/remove。要素と _size を保存。</td><td>型付き dense array、可変長要素は pool 参照。要素の dirty / persistent と既定値を維持。</td></tr>
+<tr><td>書き込み・保存</td><td>MEMORY、PERSIST、TEMPORARY。save/discard/reset と scope 操作。dirty は保存値との比較ではなく「書き込み後」の印。</td><td>三つの mode と dirty の意味を維持。TEMPORARY は別 overlay、save は overlay を解除して元の値を保存。</td></tr>
+<tr><td>既定値・起動</td><td>ROM の既定値、set_default による参照差し替え。discard は Flash を再読。初回 load 完了で initialized event。</td><td>ROM を直接読む方式と更新時コピー。runtime default は任意の拡張表で保持し、呼び出し元の寿命契約を明記。</td></tr>
+<tr><td>keyspace</td><td>RPC/C API で作成・削除。固定 slot + byte pool。保存名は prefix#slot、値は [key NUL][payload]。起動で slot を復元。</td><td>ordinal を維持し、保存形式も最初は維持。ROM の親に type/permissions 等を一度だけ置く。</td></tr>
+<tr><td>制約・公開範囲</td><td>range/options/HID/layer/behavior と behavior 引数検証。device-private / personal / public。read/write の unlock 条件。</td><td>全経路で維持。型別の小さな制約を同じ検証関数へ渡す。commit 時にも権限を再確認。</td></tr>
+<tr><td>record / converter</td><td>BYTES 上の versioned TLV record。RPC converter は carrier 容量に制限され、大きい chunk の経路では適用されない。</td><td>TLV は維持し slice から decode。converter の拡張は別判断。入力・出力が同時に必要な一時容量を隠さない。</td></tr>
+<tr><td>Studio RPC</td><td>get/list、metadata/default の要求、scope/source、通知。大きい read は stream、write は単一 chunk session。</td><td>wire schema は初期移行で維持。内部を共通 view/transaction に集約。ReadValueChunk は現在存在しない。</td></tr>
+<tr><td>split / reset</td><td>split request/notification relay、bounded queue、local/remote source、公式 factory reset との連動。</td><td>relay 上限と backpressure を維持。通知は安定 handle と世代を保存。reset は peripheral も検証。</td></tr>
+<tr><td>Web UI</td><td>subsystem ごとの表示、制約対応入力、配列操作、JSON export/import、keyspace 作成/削除。</td><td>既存操作を維持。将来 pool の不足量を表示し、失敗時は入力を保持する。</td></tr>
+<tr><td>機能選択</td><td>ARRAY / KEYSPACE / RECORD / CONVERTERS / LARGE_VALUES 等は Kconfig/CMake で分割済み。</td><td>分割は再利用。小さい blob の pooling と large RPC の有効化を分離する。</td></tr>
+</tbody></table></div>
+</section>
+
+<section id="cost"><h2>03 · 今、どこにメモリを払っているか</h2>
+<p><strong>以下の構造体サイズは ARM32 のレイアウト確認値です。</strong>基準 commit の定義を抜き出し、Zephyr SDK 0.16.8 の ARM GCC、Cortex-M4 / AAPCS、32-bit enum / pointer / size_t で <code>sizeof</code> をコンパイルしました。<code>VALUE_MAX_SIZE=64</code>、<code>KEY_MAX_LEN=48</code>。ファームウェア全体の RAM/Flash 実測ではありません。<a href="#s2">[2]</a></p>
+<div class="table-wrap"><table><thead><tr><th>確保対象</th><th>現在のコスト</th><th>意味</th></tr></thead><tbody>
+<tr><td>value carrier</td><td>76 B</td><td>型 4 + size 4 + 最大 union 68。BOOL でも同じ carrier サイズ。</td></tr>
+<tr><td>setting state / descriptor</td><td>RAM 24 B / 通常 ROM 52 B</td><td>scalar も pool link や runtime default pointer を含む。keyspace / array view の descriptor は RAM。</td></tr>
+<tr><td>通常の BYTES / STRING</td><td>state 24 B + buffer 65 B</td><td>plain DEFINE の場合。_SIZED は max_size + 1 の私有 pool と pool header 12 B。</td></tr>
+<tr><td>配列</td><td>78N + 56 B の RAM</td><td>76N の values + 2N の bool flags + array state 32 + descriptor 用 state 24。別途 ROM descriptor/defaults。</td></tr>
+<tr><td>配列 index view</td><td>80 B × 16 = 1,280 B RAM</td><td>全配列で共有。枠切れ時は slot 0 を再利用し、以前の pointer の意味が変わる。</td></tr>
+<tr><td>keyspace slot</td><td>144 B × max_entries</td><td>in_use + ordinal_name[64] + state 24 + descriptor 52。未使用 slot も予約。</td></tr>
+<tr><td>keyspace 本体</td><td>52 B RAM + pool header 12 B + pool bytes</td><td>本体は初期化済み RAM section。基本 macro の byte budget は max_entries × (max_key_len + max_size)。明示 pool_size 版は既存。</td></tr>
+<tr><td>既定値 / 制約</td><td>carrier 76 B / constraint 156 B</td><td>ROM。constraint union の range が carrier 二つを含むため、他の種別も型としては大きい。実際の残存量は optimizer/linker に依存。</td></tr>
+<tr><td>一時領域</td><td>複数の静的 buffer + stack</td><td>chunk staging は S、keyspace blob scratch は K+L、load は stack 上に K+L、record get/set は stack 上に L。</td></tr>
+<tr><td>小さな共有領域 / queue</td><td>temp 48 B × 2、carrier scratch 76 B × 2 等</td><td>通常通知 payload は 12 B × 8。relay は設定長 × queue 件数。kernel queue/work/lock の管理領域は別。</td></tr>
+</tbody></table></div>
+<p class="muted">N = 配列の最大要素数、K = KEY_MAX_LEN、L = LARGE_VALUE_MAX_SIZE、S = CHUNK_STAGING_SIZE。上記はそれぞれの領域の内訳で、stack の局所配列を静的 RAM に単純加算しません。スレッドの予約 stack サイズと call-chain の最大使用量は別々に測ります。</p>
+<figure><div class="grid"><div class="card"><strong>現状: 大きな「共通の箱」</strong><div class="arena"><div class="block">INT32<br>4 B</div><div class="block free" style="flex:4">carrier の余白と型・長さ<br>72 B</div></div><p class="muted">配列の各要素・ROM の既定値にもこの箱が使われる。</p></div><div class="card"><strong>提案: 型がわかるなら値だけ</strong><div class="arena"><div class="block green">INT32<br>4 B</div><div class="block free" style="flex:4">予約しない</div></div><p class="muted">型は親 descriptor に一度だけ置く。可変長は offset + length で参照。</p></div></div><figcaption>図1 · 小さい値の carrier を常設しない。RPC 境界で必要な表現に変換する。</figcaption></figure>
+<p>現在の pool は移動可能な連続領域を持ち、増大時に他の member を詰め直します。address 順の member 選択は繰り返し走査なので O(M² + 移動 byte 数)。縮小・同サイズ更新では移動しません。既存の pool を使うだけでは、配列・slot・ROM carrier のコストは残ります。<a href="#s3">[3]</a></p>
+</section>
+
+<section id="design"><h2>04 · 新しい内部構造</h2>
+<figure><div class="flow"><div class="box"><b>ROM: schema</b><span>identity / type / permissions<br>型別 defaults / constraints<br>array・keyspace の親情報</span></div><div class="arrow" aria-hidden="true">→</div><div class="box teal"><b>RAM: state と handle</b><span>小さな scalar / typed array<br>slot index + generation<br>offset / length / flags</span></div><div class="arrow" aria-hidden="true">→</div><div class="box gold"><b>RAM: 共通 byte pool</b><span>blob、string、user key<br>可変長配列の payload<br>編集 workspace は別予算</span></div></div><figcaption>図2 · 永続する小さな管理情報と、移動できる値を分ける。生 pointer の安定性に依存しない。</figcaption></figure>
+<h3>A. descriptor を値から分離する</h3>
+<p>INT32 / BOOL / BEHAVIOR の live state は型ごとに必要な値 + flags。runtime default を変更しない設定には default_override pointer を置かず、利用する設定だけの拡張表にする。BOOL だけなら byte 単位で十分で、bit packing の Flash コストを払うかは計測後に決める。</p>
+<p>既定値は <code>const int32_t</code>、<code>const bool</code>、<code>const binding</code>、blob の pointer + length。range は型別 min/max、options は型別配列と label 参照、制約なしは count=0。ROM に carrier を展開しない。keyspace の不変情報も ROM へ移す。</p>
+<h3>B. 配列は型付き、動的 entry は小さな slot</h3>
+<p>INT32 配列は <code>int32_t values[N]</code>、BOOL は byte 配列、BEHAVIOR は 12 B の要素配列。dirty / persistent はそれぞれ bitset。最初は最大 N の領域を固定確保し、pool 上での配列再配置や alignment を増やさずに大きな削減を得る。STRING / BYTES 配列だけ offset/length 表 + shared pool とする。</p>
+<p>keyspace は親から type / constraints / permissions を引く。ordinal_name は保存時に生成し、常設しない。各 slot は下記の 16 B 案に縮小できる。pool 内の payload は引き続き [key NUL][payload] とし、保存 adapter を単純にする。</p>
+<pre><code>// 設計スケッチ。pool と entry 数は 16-bit 範囲内に制限する。
+struct blob_slot {                 // 16 B を目標 (ARM32)
+    uint16_t offset, length;        // pool 内の位置 / 格納 byte 数
+    uint16_t next, key_len;         // address 順 list / key prefix の長さ
+    uint32_t generation;           // delete / reuse で更新
+    uint8_t flags, temp_slot;
+    uint16_t reserved;
+};
+struct setting_ref {               // 12 B (owner pointer は ARM32)
+    const struct schema *owner;    // static setting / array / keyspace の親
+    uint32_t index;                // scalar=0、array index、keyspace ordinal
+    uint32_t generation;
+};</code></pre>
+<p>offset の sentinel、容量、length の加算を検査し、pool 容量は 65,535 B 未満に制限する。大きい構成が必要なら 32-bit layout を選ぶ。世代 wrap 時は slot を退役させる等、古い handle と一致させない。array handle は「その index」の意味とし、insert/remove 後も index は維持、範囲外はエラー。keyspace の delete/reuse は世代不一致で拒否する。</p>
+<p>これにより 16 個の array view cache が不要になる。通知や chunk session にも pointer ではなく handle を保存する。queue が設定削除後に処理されても、別の設定へ誤配送しない。削除通知は消えた値への参照ではなく、必要な key/source の小さな snapshot を別途所有する。</p>
+<h3>C. shared pool の範囲を広げる</h3>
+<p>plain BYTES/STRING、keyspace、可変長配列要素を同じ allocator へ通す。既定値と同じ未変更 blob は ROM を参照し、最初の変更で pool にコピーする。MEMORY write の dirty は値が default と等しくても保持できるので、値の保存場所と dirty を分離する。</p>
+<p>まず一つの byte pool を標準にする。モジュールごとの予約保証が必要なら、少数の pool または quota を宣言できるようにする。全域共有では、一つの keyspace の肥大化が他の設定を圧迫するため、保証が必要な容量まで過剰共有しない。</p>
+<p>payload を address 順に保つ slot-index list で管理し、増大時の走査を O(M + B) にする。削除は穴を残し、次の増大で compact。slot table は移動しない。pool を横断して保持する生 pointer は禁止し、read_into または短い locked visitor を使う。allocator に任意長 heap・block header・free-list を追加する必要はない。</p>
+<h3>D. workspace は値の pool と役割を分けて共有する</h3>
+<p>chunk 受信、起動 load、keyspace 組み立て、record encode の scratch を、明示的に貸し出す共通 edit workspace に集約する。通常の record read は pool/ROM slice から decode し、編集 session に占有された workspace を必要としない。全 read を編集待ちにしない。</p>
+<p class="note caution"><strong>単に C の union に重ねるだけでは不十分。</strong>chunk input を保持したまま converter output を作る処理などは同時に二つの領域を要する。必要量は「最大値」ではなく、各 phase で同時に生きる領域の合計の最大値。worker を直列化し、nested 呼び出しには同じ transaction context の subspan を渡す。</p>
+<p>workspace を live pool の未使用部分から借りる方式は、満杯時の値変更ができなくなる。推奨の初期実装は <strong>live budget P と workspace budget W の独立した静的予約</strong>。RAM は P+W として数え、W を「操作中だけ使うのでゼロ」と数えない。TEMPORARY は寿命が長く編集と重なるので、最初は既存の小さな別 pool を維持する。</p>
+</section>
+
+<section id="update"><h2>05 · 変更が少ない前提を、安全な更新手順に落とす</h2>
+<figure><div class="flow"><div class="box"><b>通常動作</b><span>型付き値の read/write<br>可変長領域の確保なし<br>短い locked read</span></div><div class="arrow" aria-hidden="true">↔</div><div class="box gold"><b>編集 session</b><span>起動 load / Web UI / reload<br>workspace を占有<br>値の検証と容量確認</span></div><div class="arrow" aria-hidden="true">→</div><div class="box teal"><b>commit</b><span>compact → copy → publish<br>flags / generation を更新<br>unlock 後に通知</span></div></div><figcaption>図3 · session が数フレーム続いても、settings lock をフレーム間で保持しない。</figcaption></figure>
+<ol class="steps">
+<li><strong>Begin:</strong> writer を一つに限定。所有者（local RPC / relay / boot）・target handle・version・mode・wire length を記録。別 writer は queue または -EBUSY。切断、timeout、reset、delete で中断し、確保した workspace を解放する。</li>
+<li><strong>Receive / decode:</strong> offset の連続性と累積上限を確認。入力は workspace へ。生 pool pointer を source にした更新も、compact 前にここへ snapshot する。converter が必要なら input と output の重ならない span を予約する。</li>
+<li><strong>Validate / preflight:</strong> 型、制約、文字列終端、key、権限、handle 世代、開始後の対象 value version を再確認。<code>live_used − old_extent + new_extent ≤ P</code> と workspace 上限を検査。失敗したら値・dirty・TEMPORARY・Flash を変更しない。</li>
+<li><strong>Persist（PERSIST 時）:</strong> 推奨契約は staged value を保存して成功してから publish。保存失敗時は RAM の旧値を維持。現在の一部経路は RAM 更新後に保存するため、この変更は API 契約の変更として明示する。preflight から publish まで対象を予約し、同じ対象への固定サイズ write・delete・reset も待機または拒否する。Flash driver / settings callback が settings lock を再取得しない専用経路を用意する。</li>
+<li><strong>Publish:</strong> settings lock 下で旧領域を除いて compact、staged value を copy、offset/length/flags を更新。preflight 後は追加確保や失敗し得る converter を呼ばない。MEMORY は dirty、PERSIST 成功は clean、TEMPORARY は base を変えない。</li>
+<li><strong>Finish:</strong> lock 解放後に通知。中断を含め workspace を返す。別設定への固定サイズ更新は可能でも、同じ対象への更新は version 検査で検出し再試行する。</li>
+</ol>
+<p>writer admission → 短い settings lock の順序に統一し、settings lock を持ったまま admission を待たない。Flash I/O 中は read が旧値を読める設計とし、他 writer を admission で止める。通知や visitor の中から可変長編集を再入させない。</p>
+<p class="note caution">Flash 保存の失敗・電源断の耐性は backend の保証に従う。一設定の publish と、配列 _size + 複数要素 / scope / JSON import の全体 atomicity は別問題。初期案は一設定ずつ処理し、成功件数と失敗を返す。全体 rollback や二重の全設定イメージは設けない。</p>
+<h3>pool が満杯でも置換を可能にする</h3>
+<figure><div class="arena"><div class="block">A 旧値<br>512 B</div><div class="block green" style="flex:3">他の値<br>3,584 B</div></div><div class="arena"><div class="block gold">workspace<br>新 A 512 B</div><div class="block free" style="flex:3">live pool はこの間も旧値を保持</div></div><figcaption>図4 · P=4,096 B が満杯でも、新値を別の W に保持すれば同サイズ置換できる。publish 後は旧 A の領域を再利用する。新 A が 600 B なら最終 live 容量が超過し、変更前に拒否する。</figcaption></figure>
+<p>起動時も同じ検証を通し、部分読み込み・不正データ・容量不足は entry 単位で扱う。pool を更新で縮小した場合、過去の全値が収まる保証はなくなる。既存方針に合わせ警告して読み飛ばし、起動は継続、元の Flash record は勝手に削除しない。ロード順に依存する回復を避けたい製品では、ordinal 順の二段階 load と予算検査を追加する。</p>
+</section>
+
+<section id="budget"><h2>06 · どの程度減らせるか</h2>
+<p><strong>実装前の局所試算です。ファームウェアの削減実績ではありません。</strong>比較対象と除外項目をそろえ、pool の空きと予約 RAM を区別します。</p>
+<div class="grid"><div class="card"><strong>INT32 配列 32 要素: 値 + flags</strong><div class="barrow"><span>現在</span><div class="track"><div class="bar" style="width:100%"></div></div><span>2,496 B</span></div><div class="barrow"><span>提案</span><div class="track"><div class="bar new" style="width:5.45%"></div></div><span>136 B</span></div><p>現在: 32×(76+2)。提案: 32×4 + 2×ceil(32/8)。<strong>2,360 B 減</strong>。親 descriptor/state と pool、temp は含めない。</p></div><div class="card"><strong>keyspace 8 枠: slot table のみ</strong><div class="barrow"><span>現在</span><div class="track"><div class="bar" style="width:100%"></div></div><span>1,152 B</span></div><div class="barrow"><span>提案</span><div class="track"><div class="bar new" style="width:11.11%"></div></div><span>128 B</span></div><p>現在: 8×144。提案: 8×16。<strong>1,024 B 減</strong>。payload pool は同容量とし、親情報、writer version 管理等は別勘定。</p></div></div>
+<div class="calculator card" style="margin-top:18px"><strong>配列の局所 RAM 試算</strong><label>INT32 最大要素数 <input id="count" type="number" min="1" max="4096" value="32"></label><p id="estimate" aria-live="polite">現在 2,496 B → 提案 136 B。削減 2,360 B。</p><p class="muted">values と dirty/persistent flags のみ。総 RAM の予測ではありません。JavaScript 無効時は上の 32 要素例を参照。</p></div>
+<div class="table-wrap"><table><thead><tr><th>ほかの候補</th><th>局所的な差分</th><th>注意点</th></tr></thead><tbody>
+<tr><td>array view pool の廃止</td><td>現在の常設 1,280 B を除去</td><td>handle が caller stack / queue に移る。通知 8 件なら pointer 4 → ref 12 で +64 B の例。全額が純減ではない。</td></tr>
+<tr><td>32 個の INT32 既定値</td><td>ROM 2,432 B → 128 B（−2,304 B）</td><td>payload 表現のみ。descriptor、relocation、linker 最適化は別。</td></tr>
+<tr><td>INT32 range 一つ</td><td>ROM 156 B → 12 B 案</td><td>tag + min + max の例。別 pointer table が必要なら加算。型ごとの実サイズを compiler で確認する。</td></tr>
+<tr><td>plain blob 20 個、max=64</td><td>buffer 1,300 B → 共有 budget P</td><td>P=512 B なら payload 予約は −788 B。ただし総容量保証を縮小している。node/header/workspace の差は別。</td></tr>
+<tr><td>scalar state</td><td>INT32 は 24 B → 8 B を目標</td><td>value 4 + flags 等 4 の例。runtime default は利用数ぶんの別表。全型一律 8 B ではない。</td></tr>
+</tbody></table></div>
+<h3>総予算は、この式でレビューする</h3>
+<pre><code>RAM_new = scalar_states + typed_arrays + flag_bitsets
+        + blob_slots + optional_default_table + registry_state
+        + P_live + W_edit + temporary_overlay
+        + queues_and_handles + kernel_objects + reserved_thread_stacks
+
+W_edit >= max(各 phase の「同時に生きる buffer」の合計)
+  例: identity write → key + payload
+      converter      → wire_input + converted_output + key
+      record encode  → encoded_output + 必要な補助領域
+
+Flash_image = .text + .rodata + RAM .data の初期化 image 等
+Flash_storage = settings partition 内の record / 履歴 / GC 用空き</code></pre>
+<p>ROM carrier を削ると image の Flash が減り、初期化済み RAM を BSS 化できれば初期化 image も減る可能性があります。ただし decoder・handle 解決・移行 adapter の追加は .text を増やし得ます。<strong>allocator 共通化だけで Flash が減るとは断定しません。</strong>storage partition の予約量は別で、pool を減らしても自動で小さくなりません。</p>
+<p>保存値と default が等しい場合に record を削除する現行方針を維持する（keyspace は除外）。不要な同値保存を抑える案は Flash 消耗対策として別途評価し、永続値の RAM 二重保持は復活させない。</p>
+</section>
+
+<section id="migration"><h2>07 · 実装する順序と合格条件</h2>
+<div class="table-wrap"><table><thead><tr><th>段階</th><th>実装範囲</th><th>確認すべきこと</th></tr></thead><tbody>
+<tr><td>0 · 基準測定</td><td>同じ board、compiler、依存 commit と .config を固定。disabled/minimal/RPC/split と典型 workload を保存。</td><td>ELF/map から .text/.rodata/.data/.bss、symbol 別差分。main / low-priority / RPC stack の high-water と worst call chain。</td></tr>
+<tr><td>1 · 型別表現</td><td>配列 values、ROM default/constraints、optional state を分離。wire / Flash record は維持。</td><td>scalar/array の全 mode、constraints、runtime default、per-index defaults、save/discard/reset。同じ入力で旧 firmware と結果比較。</td></tr>
+<tr><td>2 · handle 化</td><td>keyspace slot と array view、queue/session、consumer を移行。旧 pointer adapter は過渡期だけ残す。</td><td>delete/recreate、遅延通知、16 個超の array index、temp owner、世代不一致、index 移動、全外部利用箇所。</td></tr>
+<tr><td>3 · pool 拡大</td><td>blob を共通 allocator、ROM default fallback、address 順 compact。</td><td>空/満杯/縮小/増大/alias input/NUL、複数 keyspace と array 混在、失敗で旧値維持。使用量計算の overflow、最大 offset。</td></tr>
+<tr><td>4 · workspace と worker</td><td>chunk/load/record の一時領域共用。writer admission と commit を統一。</td><td>中断/timeout/切断、重複・順不同 chunk、nested conversion、起動 load と discard、同時 relay/read、権限失効、Flash 失敗注入。</td></tr>
+<tr><td>5 · 旧経路撤去</td><td>互換 adapter と重複 codec を削除。不要機能の link 残存を確認。</td><td>同じ機能を有効にした最終 ELF で RAM/Flash 比較。Web UI import/export、split、公式 reset、実機応答と stack headroom。</td></tr>
+</tbody></table></div>
+<p><strong>互換性の線引き:</strong>初期版は RPC proto と settings の key/encoding を維持する。内部 API と登録 macro は変更を許容し、段階的に consumer を移行する。storage の変更は別 PR と migration test が必要。Flash に現れる ordinal は handle generation から独立させる。</p>
+<p>今回確認した consumer <code>zmk-feature-runtime-macro</code>（ローカル snapshot <code>4be46f3</code>）は、keyspace の <code>slots[slot].setting</code> や pool に直接アクセスしています。旧設計文書の「DEFINE / POOLED しか利用しない」という前提は使えません。slot 取得・列挙・使用量・公開 key を扱う accessor へ移す必要があります。runtime macro の再生用 copy buffer は consumer の別予算であり、本提案の削減に含めません。<a href="#s7">[7]</a></p>
+<p class="note">採否の基準: 機能を無効化して見かけの削減を作らない。まず RAM の確実な削減を確認し、Flash 増加があればサイズと理由を提示する。main stack の既定値 2,048 B は過去の boot overflow 対策なので、scratch を移しただけで減らさず、実機・最大保存値・split 負荷で余裕を確認する。</p>
+<h3>比較した代替案</h3>
+<p>固定長 slab は移動不要ですが、小さな文字列と大きな macro の混在では内部の余りが増えます。汎用 heap は allocator metadata と断片化の管理が必要です。live 全体の二重 buffer は publish を簡単にする代わりに RAM を二倍近く使います。本件では更新頻度が低いため、<strong>小さな不動 slot + compact できる共有 byte pool + 一設定分の workspace</strong>が最も直接的です。</p>
+</section>
+
+<section id="sources"><h2>08 · 調査範囲と根拠</h2>
+<p>この PR は設計資料だけを追加します。ソース分析、ARM 構造体レイアウトの確認、HTML の desktop/mobile 表示とリンク・試算の検証を対象とし、提案実装の firmware build、RAM/Flash 差分測定、ハードウェア検証はまだ行っていません。</p>
+<ol class="sources">
+<li id="s1"><a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/README.md">README</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/Kconfig">Kconfig</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/CMakeLists.txt">CMakeLists</a> — 機能、制約、分割済み translation unit、stack 既定値。</li>
+<li id="s2"><a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/include/cormoran/zmk/custom_settings.h">公開ヘッダー</a> — value/state/descriptor、registration macro、array と keyspace layout、ROM defaults / constraints。</li>
+<li id="s3"><a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/custom_settings_pool.c">pool</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/custom_settings_array.c">array</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/custom_settings_keyspace.c">keyspace</a> — compact、view eviction、ordinal と scratch。</li>
+<li id="s4"><a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/custom_settings.c">core lifecycle</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/custom_settings_record.c">record</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/custom_settings_rpc_convert.c">converter</a> — temp/default/save/load/discard、局所 buffer。</li>
+<li id="s5"><a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/src/studio/custom_settings_handler.c">RPC handler</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/proto/cormoran/zmk/custom_settings/custom_settings.proto">proto</a> — streamed reads、chunk session、notification / relay queue、scope。</li>
+<li id="s6"><a href="https://github.com/cormoran/zmk-feature-custom-settings/tree/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/web/src">Web UI</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/docs/design/simplification-redesign.md">以前の simplification 提案</a>、<a href="https://github.com/cormoran/zmk-feature-custom-settings/blob/c6a7fef3a3be3d3ace5de9a4b0628c6418cd1f3f/docs/design/feature-gating-and-modularization.md">feature gating 提案</a> — 現状と過去の意図の区別。</li>
+<li id="s7"><a href="https://github.com/cormoran/zmk-feature-runtime-macro/blob/4be46f3481bf67c322e9eef00d9c1cff02654d21/src/runtime_macro.c">runtime_macro.c（調査した consumer snapshot）</a> — keyspace、slot 直接参照、再生 buffer。</li>
+</ol>
+<details><summary>ARM layout 確認の再現手順</summary><p>基準 commit のヘッダーから value/state/descriptor/constraint/array_state/large_pool/keyspace/slot の型定義と、それらが参照する enum/型を抽出する。array_view_slot は array.c の定義を使う。外部 event 宣言や Zephyr registration macro の展開は不要。標準の stdint/stddef/stdbool は ARM toolchain のものを使う。構造体の field は変更しない。</p>
+<pre><code># VALUE_MAX_SIZE=64、KEY_MAX_LEN=48 を定義した layout.c に
+# char size_value[sizeof(struct zmk_custom_setting_value)]; 等を置く。
+arm-zephyr-eabi-gcc -mcpu=cortex-m4 -mthumb -mabi=aapcs \
+  -std=c11 -c layout.c -o layout.o
+arm-zephyr-eabi-nm -S --radix=d layout.o
+# value=76 state=24 descriptor=52 constraint=156 array_state=32
+# array_view_slot=80 keyspace_slot=144 keyspace=52 large_pool=12</code></pre>
+<p>この方法は型レイアウトだけを検査する。実際の macro 展開後に linker が残す object の数や section alignment、最適化による dedup、Zephyr kernel の管理領域、stack 予約量は firmware ELF で別途確認する。</p></details>
+</section>
+<footer>外部フォント・画像・JavaScript ライブラリ不要。ファイルをブラウザで開いて閲覧、印刷メニューから PDF 化できます。GitHub のファイル画面では HTML source が表示されるため、Raw ファイルを保存して開いてください。</footer>
+</main>
+<script>
+const count=document.getElementById('count');
+count.addEventListener('input',()=>{const n=Number(count.value);const out=document.getElementById('estimate');if(!Number.isInteger(n)||n<1||n>4096){out.textContent='1〜4,096 の整数を入力してください。';return;}const before=78*n;const after=4*n+2*Math.ceil(n/8);const f=x=>x.toLocaleString('ja-JP');out.textContent=`現在 ${f(before)} B → 提案 ${f(after)} B。削減 ${f(before-after)} B。`;});
+</script>
+</body></html>

@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <cormoran/zmk/custom_settings/pool.h>
 
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/sys/util.h>
@@ -73,46 +74,17 @@ enum zmk_custom_setting_changed_kind {
     ZMK_CUSTOM_SETTING_CHANGED_RESET,
 };
 
-struct zmk_custom_setting_value {
-    enum zmk_custom_setting_value_type type;
-    size_t size;
-    union {
-        uint8_t bytes_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE];
-        int32_t int32_value;
-        bool bool_value;
-        char string_value[CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE + 1];
-        struct zmk_custom_setting_behavior_value behavior_value;
-    };
-};
+#include <cormoran/zmk/custom_settings/value_types.h>
 
 struct zmk_custom_setting;
 
-/*
- * A statically-allocated shared budget that multiple BYTES/STRING large-value
- * settings (see ZMK_CUSTOM_SETTING_DEFINE_POOLED) draw regions from, instead
- * of each paying for its own worst-case max_size buffer.
- * ZMK_CUSTOM_SETTING_DEFINE_SIZED is sugar for a private, single-member pool,
- * so this is the module's only large-value backing store. A setting's region
- * can be moved within `data` by any write that needs more room than it
- * currently has (see pool_ensure_region in custom_settings.c); that is safe
- * because every access site re-reads state->blob.data under
- * custom_settings_lock instead of caching it across the lock.
- *
- * `members` is the head of an intrusive singly-linked list of every setting
- * currently holding a region of this pool (blob.pool == this and
- * state->blob.data != NULL). The list links DESCRIPTOR pointers, while the
- * link field itself (`_pool_next`) lives on each setting's RAM state block,
- * because the const flash-resident descriptor cannot hold a runtime-mutable
- * field. Pool code needs the descriptor anyway (for value_type and
- * blob.max_size), so it stores `const struct zmk_custom_setting *` and reaches
- * the link via `member->state->_pool_next`. Walking this list rather than the
- * global registry lets a pool member (e.g. a keyspace slot) live outside
- * ZMK_CUSTOM_SETTING_FOREACH. Internal to custom_settings.c.
- */
-struct zmk_custom_setting_large_pool {
-    uint8_t *data;
-    size_t size;
-    const struct zmk_custom_setting *members;
+/* The default budget is shared by plain blobs and variable array elements.
+ * Explicit pools remain available when a consumer needs reserved capacity. */
+extern struct zmk_custom_setting_large_pool zmk_custom_settings_shared_pool;
+
+struct zmk_custom_setting_slice {
+    const void *data;
+    uint16_t size;
 };
 
 /* Statically define a shared pool of _pool_size bytes. Heap-free: declares
@@ -123,6 +95,7 @@ struct zmk_custom_setting_large_pool {
     BUILD_ASSERT(IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES),                              \
                  "enable CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUES to use "                          \
                  "ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE");                                          \
+    BUILD_ASSERT((_pool_size) > 0 && (_pool_size) < UINT16_MAX, "Invalid pool capacity");          \
     static uint8_t _name##_pool_data[_pool_size];                                                  \
     static struct zmk_custom_setting_large_pool _name = {                                          \
         .data = _name##_pool_data,                                                                 \
@@ -165,89 +138,24 @@ struct zmk_custom_setting_constraint {
     };
 };
 
-/*
- * Mutable, per-array state for one array setting: a single contiguous backing
- * buffer plus per-slot bookkeeping, sized once by max_count. Allocated
- * statically by ZMK_CUSTOM_SETTING_ARRAY_DEFINE (one instance per array) and
- * referenced by `array_state` from both the array's single registered
- * descriptor and any short-lived "index view" struct zmk_custom_setting
- * instances that zmk_custom_setting_find_array_element hands out (see
- * array_view_pool in custom_settings.c). All access happens under
- * custom_settings_lock.
- */
+/* The parent defines the type once. values holds dense scalars or stable blob
+ * nodes; defaults holds typed ROM values or slices. Flags are bitsets indexed
+ * by ordinal, independently of value storage and temporary overlays. */
 struct zmk_custom_setting_array_state {
-    struct zmk_custom_setting_value *values;
-    /* True if `values[i]`/`dirty[i]`/`has_persistent[i]` has ever been
-     * written to (memory or persisted) since the last reset - lets save/
-     * discard/reset operate in O(active count) without walking a registry. */
-    bool *dirty;
-    bool *has_persistent;
+    void *values;
+    uint8_t *dirty;
+    uint8_t *has_persistent;
     uint32_t max_size;
     uint32_t default_size;
     uint32_t size;
     uint32_t persistent_size;
-    const struct zmk_custom_setting_value *defaults;
+    const void *defaults;
+#ifdef CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
+    bool defaults_are_carriers;
+#endif
 };
 
-/*
- * Per-setting mutable RAM state, split out of the const, flash-resident
- * struct zmk_custom_setting descriptor below. One instance per setting,
- * emitted by the same registration macro that emits the descriptor (or
- * embedded in the keyspace slot / array-view pool entry for runtime-built
- * descriptor instances). ~16-24 bytes on ARM32.
- *
- * All fields are internal to custom_settings.c and are only accessed under
- * custom_settings_lock; callers never touch a state block directly.
- */
-struct zmk_custom_setting_state {
-    /* ZMK_CUSTOM_SETTING_STATE_* bits below. Meaningful only for non-array
-     * settings; array settings keep the equivalent per-element state in
-     * array_state (has_persistent[i]/dirty[i]/values[i]) since a single
-     * struct zmk_custom_setting does not represent one element. An array
-     * index view still uses the TEMPORARY_ACTIVE bit (temp overrides live
-     * on the view, keyed by (array_state, array_index) - see
-     * array_view_pool in custom_settings.c). */
-    uint8_t flags;
-    /* Index into the shared temporary-override pool (see custom_settings.c),
-     * or -1 when the TEMPORARY_ACTIVE flag is clear. Avoids a full-size
-     * struct zmk_custom_setting_value slot per setting for a mode that is
-     * rarely used and never persisted. */
-    int8_t temp_slot;
-    /* The effective in-memory value, right-sized per value_type:
-     * - INT32/BOOL/BEHAVIOR: stored inline (<= 12 bytes);
-     * - BYTES/STRING: always behind `blob.data` - a region of the
-     *   descriptor's blob.pool (NULL until the first non-empty write, can
-     *   move on any pool compaction; never cached across custom_settings_lock),
-     *   or the exact-size static store buffer the plain
-     *   ZMK_CUSTOM_SETTING_DEFINE macro emits (`<name>_store[capacity + 1]`,
-     *   pointed at permanently). `blob.size` is the current payload length
-     *   (excluding the STRING NUL stored in the buffer right behind it).
-     * - Array settings do not use this union at all (element values live in
-     *   array_state->values[]). */
-    union {
-        int32_t int32_value;
-        bool bool_value;
-        struct zmk_custom_setting_behavior_value behavior;
-        struct {
-            uint8_t *data;
-            uint16_t size;
-        } blob;
-    };
-    /* Runtime-installed default from zmk_custom_setting_set_default() (which
-     * cannot write the const descriptor's default_value pointer). Checked
-     * before the descriptor's default_value everywhere a default is read.
-     * NULL unless set_default was called. */
-    const struct zmk_custom_setting_value *default_override;
-    /* Intrusive singly-linked list pointer for the descriptor's blob.pool
-     * member list (see the `members` doc on struct
-     * zmk_custom_setting_large_pool for why the list nodes are descriptor
-     * pointers while the link lives here in state). Pool-internal: NULL
-     * whenever blob.data is NULL, and only touched by pool_ensure_region /
-     * zmk_custom_setting_large_pool_used and by
-     * zmk_custom_setting_keyspace_delete (which must unlink a setting before
-     * its storage is reused by a future slot). */
-    const struct zmk_custom_setting *_pool_next;
-};
+#include <cormoran/zmk/custom_settings/state.h>
 
 /* struct zmk_custom_setting_state.flags bits. */
 #define ZMK_CUSTOM_SETTING_STATE_INITIALIZED BIT(0)
@@ -256,117 +164,9 @@ struct zmk_custom_setting_state {
  * zmk_custom_setting_has_unsaved_value stays a cheap flag check even though
  * it runs on the Studio RPC list hot path. */
 #define ZMK_CUSTOM_SETTING_STATE_DIRTY BIT(2)
-#define ZMK_CUSTOM_SETTING_STATE_TEMPORARY_ACTIVE BIT(3)
 
-/*
- * The setting descriptor, and the public handle type - every API takes
- * `const struct zmk_custom_setting *`. Compile-time registrations (every
- * ZMK_CUSTOM_SETTING_*DEFINE macro) emit this as a `const` object placed in
- * flash/rodata (ITERABLE_SECTION_ROM in the module's linker include), with
- * all runtime-mutable state behind the `state` pointer.
- *
- * Two descriptor populations are NOT flash-resident and share this struct
- * type as plain mutable RAM instances (their identity fields are only known
- * at runtime): keyspace slot descriptors (struct
- * zmk_custom_setting_keyspace_slot.setting) and array index views
- * (array_view_pool in custom_settings.c). Both embed their state block next
- * to the descriptor instead of pointing at a macro-emitted one.
- */
-struct zmk_custom_setting {
-    const char *custom_subsystem_id;
-    const char *key;
-    const char *array_key;
-    /* ZMK_CUSTOM_SETTING_ARRAY_NONE for scalars. For the one registered
-     * array descriptor, also ZMK_CUSTOM_SETTING_ARRAY_NONE (the descriptor
-     * itself does not represent one element). For an index view handed out
-     * by zmk_custom_setting_find_array_element, the requested element
-     * index. */
-    uint32_t array_index;
-    /* Enums packed to uint8_t - all their values fit comfortably. */
-    uint8_t value_type;                                /* enum zmk_custom_setting_value_type */
-    uint8_t confidentiality;                           /* enum zmk_custom_setting_confidentiality */
-    uint8_t read_permission : 4, write_permission : 4; /* enum zmk_custom_setting_permission */
-    uint8_t constraints_count;
-    const struct zmk_custom_setting_constraint *constraints;
-    /* Points at a static const object generated by the registration macros,
-     * so the default lives in flash. Unused (NULL) for the array descriptor
-     * and its views; array element defaults live in array_state->defaults
-     * instead, since each element has its own default. Because the descriptor
-     * is const, zmk_custom_setting_set_default() installs a runtime override
-     * in state->default_override, which is consulted first wherever a default
-     * is read. */
-    const struct zmk_custom_setting_value *default_value;
-    zmk_custom_setting_rpc_bytes_converter_t rpc_serializer;
-    zmk_custom_setting_rpc_bytes_converter_t rpc_deserializer;
-
-    /* Kind-specific, mutually exclusive descriptor data. Which arm is
-     * meaningful follows from fields outside the union: `array_state` for an
-     * array setting (array_key != NULL, i.e. zmk_custom_setting_is_array()),
-     * `blob` for a non-array BYTES/STRING setting. Scalar INT32/BOOL/BEHAVIOR
-     * settings use neither (zero-initialized). */
-    union {
-        /* BYTES/STRING: every such value lives behind state->blob.data.
-         *
-         * `max_size` is the value's byte capacity: the fixed
-         * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE for a plain
-         * ZMK_CUSTOM_SETTING_DEFINE (backed by the macro-emitted exact-size
-         * store buffer), or the explicit per-setting max_size of
-         * ZMK_CUSTOM_SETTING_DEFINE_SIZED/_POOLED (up to
-         * CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE).
-         *
-         * `pool` is NULL for a fixed-store setting (state->blob.data points
-         * permanently at the macro-emitted buffer, which never moves), or
-         * the shared budget the value's region is carved from on demand
-         * (ZMK_CUSTOM_SETTING_DEFINE_POOLED against a caller-shared
-         * ZMK_CUSTOM_SETTING_LARGE_POOL_DEFINE, ZMK_CUSTOM_SETTING_DEFINE_SIZED
-         * against its private single-member pool, or a keyspace's slot
-         * pool). This `pool == NULL` test is the single fork between the
-         * two backing stores; everything else in the read/write path is
-         * shared. See struct zmk_custom_setting_large_pool for the
-         * compaction/locking rules (nothing caches state->blob.data across
-         * custom_settings_lock). A value larger than
-         * CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE is reachable via
-         * zmk_custom_setting_read_into / zmk_custom_setting_write_bytes,
-         * the WriteValueChunk RPC (writes only - reads stream through the
-         * ordinary GetSetting/ListSettings RPC response), and
-         * zmk_custom_setting_with_large_raw_bytes; the fixed-carrier
-         * zmk_custom_setting_read/write report -EMSGSIZE once the value
-         * exceeds the carrier. */
-        struct {
-            uint32_t max_size;
-            struct zmk_custom_setting_large_pool *pool;
-        } blob;
-        /* Non-NULL for both the array's descriptor and any index view of it.
-         * Points straight at the shared mutable array_state (rather than at
-         * the owning struct zmk_custom_setting, which would add an
-         * indirection), since that is all effective_value() /
-         * write_value_locked() / etc. need to read or write element
-         * `array_index`. */
-        struct zmk_custom_setting_array_state *array_state;
-    };
-
-    /*
-     * Non-NULL only for a live keyspace slot (see
-     * ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE further down) - points at the owning
-     * keyspace. NULL for every compile-time (STRUCT_SECTION_ITERABLE) setting
-     * and array element view.
-     *
-     * A keyspace slot's OWN value_type/constraints/blob.pool always describe
-     * the opaque `[user_key\0][payload]` BLOB it stores (value_type is always
-     * ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES internally, regardless of the
-     * keyspace's declared value_type). Use zmk_custom_setting_keyspace_of() to
-     * get the owning keyspace and read *its* value_type/constraints/max_size
-     * to interpret the slot's PAYLOAD; the generic read/write/save/pool code
-     * never needs to know the difference and treats a slot as a plain pooled
-     * BYTES setting.
-     */
-    const struct zmk_custom_setting_keyspace *_keyspace;
-
-    /* The setting's RAM state block (macro-emitted for compile-time
-     * registrations, embedded for keyspace slots / array views). Never NULL
-     * on a registered/bound descriptor. */
-    struct zmk_custom_setting_state *state;
-};
+/* The descriptor layout and its accessors are independent of value storage. */
+#include <cormoran/zmk/custom_settings/descriptor.h>
 
 struct zmk_custom_setting_changed {
     const struct zmk_custom_setting *setting;
@@ -399,34 +199,6 @@ struct zmk_custom_settings_initialized {
 };
 
 ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
-
-#define ZMK_CUSTOM_SETTING_VALUE_INT32(_value)                                                     \
-    ((struct zmk_custom_setting_value){.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32,                \
-                                       .int32_value = (_value)})
-
-#define ZMK_CUSTOM_SETTING_VALUE_BOOL(_value)                                                      \
-    ((struct zmk_custom_setting_value){.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL,                 \
-                                       .bool_value = (_value)})
-
-#define ZMK_CUSTOM_SETTING_VALUE_STRING(_value)                                                    \
-    ((struct zmk_custom_setting_value){.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,               \
-                                       .size = sizeof(_value) - 1,                                 \
-                                       .string_value = (_value)})
-
-#define ZMK_CUSTOM_SETTING_VALUE_BYTES(...)                                                        \
-    ((struct zmk_custom_setting_value){                                                            \
-        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BYTES,                                               \
-        .size = sizeof((uint8_t[]){__VA_ARGS__}),                                                  \
-        .bytes_value = {__VA_ARGS__},                                                              \
-    })
-
-#define ZMK_CUSTOM_SETTING_VALUE_BEHAVIOR(_behavior_id, _param1, _param2)                          \
-    ((struct zmk_custom_setting_value){                                                            \
-        .type = ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR,                                            \
-        .behavior_value = {.behavior_id = (_behavior_id),                                          \
-                           .param1 = (_param1),                                                    \
-                           .param2 = (_param2)},                                                   \
-    })
 
 #define ZMK_CUSTOM_SETTINGS_STRINGIFY(x) ZMK_CUSTOM_SETTINGS_STRINGIFY_INNER(x)
 #define ZMK_CUSTOM_SETTINGS_STRINGIFY_INNER(x) #x
@@ -523,18 +295,8 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
         _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,          \
         _read_permission, _write_permission, NULL, NULL, __VA_ARGS__)
 
-/*
- * Innermost plain registration macro (every ZMK_CUSTOM_SETTING_DEFINE* variant
- * that does not take an explicit max_size funnels through here). Emits a
- * const, flash-resident descriptor plus its RAM state block. For a BYTES/STRING
- * setting, an exact-size static store buffer (`_name##_store[capacity + 1]`,
- * capacity = CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE) is emitted and pointed
- * at permanently by the state block; scalar settings emit no value buffer at
- * all (their value lives inline in the state union). Compare
- * ZMK_CUSTOM_SETTING_DEFINE_POOLED_WITH_RPC_CONVERTERS_AND_CONSTRAINTS below,
- * the equivalent innermost macro for a setting whose value is carved from a
- * shared pool instead.
- */
+/* Plain blobs borrow defaults from ROM and copy edits into the shared budget.
+ * Scalars remain inline; explicit POOLED/SIZED macros reserve separate budgets. */
 #define ZMK_CUSTOM_SETTING_DEFINE_WITH_RPC_CONVERTERS_AND_CONSTRAINTS(                             \
     _name, _custom_subsystem_id, _key, _value_type, _default_value, _confidentiality,              \
     _read_permission, _write_permission, _rpc_serializer, _rpc_deserializer, ...)                  \
@@ -544,32 +306,27 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
     BUILD_ASSERT(sizeof(_key) <= CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN,                           \
                  "Custom setting key is too long");                                                \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
+    ZMK_CUSTOM_SETTING_METADATA_DEFINE(_name, _rpc_serializer, _rpc_deserializer);                 \
     static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
-    static uint8_t _name##_store[ZMK_CUSTOM_SETTING_VALUE_STORE_SIZE(                              \
-        _value_type, CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE)] __unused;                         \
-    static struct zmk_custom_setting_state _name##_state = {                                       \
-        .temp_slot = -1,                                                                           \
-        .blob.data = ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type) ? _name##_store : NULL,          \
-    };                                                                                             \
+    ZMK_CUSTOM_SETTING_STATE_DEFINE(_name##_state, _value_type);                                   \
     const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
-        .array_key = NULL,                                                                         \
-        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        ZMK_CUSTOM_SETTING_ARRAY_KEY_INIT(NULL).array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,       \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
         .write_permission = _write_permission,                                                     \
-        .constraints = _name##_constraints,                                                        \
-        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
+        ZMK_CUSTOM_SETTING_METADATA_INIT(_name, _rpc_serializer, _rpc_deserializer)                \
+            .constraints_count = ARRAY_SIZE(_name##_constraints),                                  \
         .default_value = &_name##_default,                                                         \
-        .rpc_serializer = _rpc_serializer,                                                         \
-        .rpc_deserializer = _rpc_deserializer,                                                     \
         .blob = {.max_size = ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type)                          \
                                  ? CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE                       \
                                  : 0,                                                              \
-                 .pool = NULL},                                                                    \
-        .state = &_name##_state,                                                                   \
+                 .pool = ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type)                              \
+                             ? &zmk_custom_settings_shared_pool                                    \
+                             : NULL},                                                              \
+        .state = ZMK_CUSTOM_SETTING_STATE_HEADER(_name##_state),                                   \
     }
 
 /*
@@ -650,26 +407,22 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
                      (_value_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_STRING,                        \
                  "ZMK_CUSTOM_SETTING_DEFINE_POOLED only supports BYTES/STRING value types");       \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
+    ZMK_CUSTOM_SETTING_METADATA_DEFINE(_name, _rpc_serializer, _rpc_deserializer);                 \
     static const struct zmk_custom_setting_value _name##_default = _default_value;                 \
-    static struct zmk_custom_setting_state _name##_state = {                                       \
-        .temp_slot = -1,                                                                           \
-    };                                                                                             \
+    ZMK_CUSTOM_SETTING_STATE_DEFINE(_name##_state, _value_type);                                   \
     const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
-        .array_key = NULL,                                                                         \
-        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        ZMK_CUSTOM_SETTING_ARRAY_KEY_INIT(NULL).array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,       \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
         .write_permission = _write_permission,                                                     \
-        .constraints = _name##_constraints,                                                        \
-        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
+        ZMK_CUSTOM_SETTING_METADATA_INIT(_name, _rpc_serializer, _rpc_deserializer)                \
+            .constraints_count = ARRAY_SIZE(_name##_constraints),                                  \
         .default_value = &_name##_default,                                                         \
-        .rpc_serializer = _rpc_serializer,                                                         \
-        .rpc_deserializer = _rpc_deserializer,                                                     \
         .blob = {.max_size = (_max_size), .pool = &(_pool)},                                       \
-        .state = &_name##_state,                                                                   \
+        .state = ZMK_CUSTOM_SETTING_STATE_HEADER(_name##_state),                                   \
     }
 
 /*
@@ -679,13 +432,9 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
  * single contiguous backing buffer for all elements.
  */
 
-/* Register an array setting: one descriptor owning a single contiguous
- * backing buffer for up to _max_count elements. _defaults must be a pointer
- * to a separately-declared `static const struct zmk_custom_setting_value[]`
- * of length _max_count (see ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE) -
- * a pointer, not a compound literal, because nesting a compound literal here
- * breaks strict -std=c11 constant-initializer rules. _default_size is the
- * active length new/reset arrays start with (<= _max_count). */
+/* Register one typed array. _defaults has _max_count entries of int32_t,
+ * bool, zmk_custom_setting_behavior_value, or zmk_custom_setting_slice, matching
+ * _value_type. STRING/BYTES slice sizes must fit VALUE_MAX_SIZE. */
 #define ZMK_CUSTOM_SETTING_ARRAY_DEFINE(_name, _custom_subsystem_id, _key, _value_type,            \
                                         _max_count, _default_size, _defaults, _confidentiality,    \
                                         _read_permission, _write_permission, _constraint)          \
@@ -727,54 +476,57 @@ ZMK_EVENT_DECLARE(zmk_custom_settings_initialized);
                  "Custom setting array key is too long");                                          \
     BUILD_ASSERT((_default_size) <= (_max_count),                                                  \
                  "Custom setting array default size must not exceed max count");                   \
+    BUILD_ASSERT((IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT) &&                          \
+                  sizeof((_defaults)[0]) == sizeof(struct zmk_custom_setting_value)) ||            \
+                     sizeof((_defaults)[0]) ==                                                     \
+                         (ZMK_CUSTOM_SETTING_TYPE_IS_BLOB(_value_type)                             \
+                              ? sizeof(struct zmk_custom_setting_slice)                            \
+                              : ZMK_CUSTOM_SETTING_ARRAY_STRIDE(_value_type)),                     \
+                 "Array defaults must match the parent type (or use legacy carriers)");            \
     static const struct zmk_custom_setting_constraint _name##_constraints[] = {__VA_ARGS__};       \
-    static struct zmk_custom_setting_value _name##_values[_max_count];                             \
-    static bool _name##_dirty[_max_count];                                                         \
-    static bool _name##_has_persistent[_max_count];                                                \
+    ZMK_CUSTOM_SETTING_METADATA_DEFINE(_name, _rpc_serializer, _rpc_deserializer);                 \
+    static uint8_t                                                                                 \
+        _name##_values[(_max_count) * ZMK_CUSTOM_SETTING_ARRAY_STRIDE(_value_type)] __aligned(     \
+            __alignof__(struct zmk_custom_setting_blob));                                          \
+    static uint8_t _name##_dirty[DIV_ROUND_UP(_max_count, 8)];                                     \
+    static uint8_t _name##_has_persistent[DIV_ROUND_UP(_max_count, 8)];                            \
     static struct zmk_custom_setting_array_state _name##_array_state = {                           \
         .values = _name##_values,                                                                  \
         .dirty = _name##_dirty,                                                                    \
         .has_persistent = _name##_has_persistent,                                                  \
         .max_size = (_max_count),                                                                  \
         .default_size = (_default_size),                                                           \
-        .defaults = (_defaults),                                                                   \
+        ZMK_CUSTOM_SETTING_LEGACY_DEFAULTS_INIT(_defaults).defaults = (_defaults),                 \
     };                                                                                             \
     static struct zmk_custom_setting_state _name##_state = {                                       \
-        .temp_slot = -1,                                                                           \
+        .flags = 0,                                                                                \
     };                                                                                             \
     const STRUCT_SECTION_ITERABLE(zmk_custom_setting, _name) = {                                   \
         .custom_subsystem_id = _custom_subsystem_id,                                               \
         .key = _key,                                                                               \
-        .array_key = _key,                                                                         \
-        .array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,                                              \
+        ZMK_CUSTOM_SETTING_ARRAY_KEY_INIT(_key).array_index = ZMK_CUSTOM_SETTING_ARRAY_NONE,       \
         .array_state = &_name##_array_state,                                                       \
         .value_type = _value_type,                                                                 \
         .confidentiality = _confidentiality,                                                       \
         .read_permission = _read_permission,                                                       \
         .write_permission = _write_permission,                                                     \
-        .constraints = _name##_constraints,                                                        \
-        .constraints_count = ARRAY_SIZE(_name##_constraints),                                      \
+        ZMK_CUSTOM_SETTING_METADATA_INIT(_name, _rpc_serializer, _rpc_deserializer)                \
+            .constraints_count = ARRAY_SIZE(_name##_constraints),                                  \
         .default_value = NULL,                                                                     \
-        .rpc_serializer = _rpc_serializer,                                                         \
-        .rpc_deserializer = _rpc_deserializer,                                                     \
         .state = &_name##_state,                                                                   \
     }
 
-/* Declares a `static const struct zmk_custom_setting_value[]` of INT32
- * defaults suitable for ZMK_CUSTOM_SETTING_ARRAY_DEFINE's _defaults
- * argument. Field-initializer syntax (not the ZMK_CUSTOM_SETTING_VALUE_INT32
- * compound literal) is used for the same reason as
- * ZMK_CUSTOM_SETTING_RANGE_INT32: nesting a compound literal inside this
- * array's own initializer breaks strict -std=c11 constant-initializer
- * rules. */
+/* Array defaults use the parent type: int32_t, bool, behavior binding, or
+ * zmk_custom_setting_slice for BYTES/STRING. Supply max_count elements. */
 #define ZMK_CUSTOM_SETTING_ARRAY_DEFAULT_INT32_DEFINE(_name, ...)                                  \
-    static const struct zmk_custom_setting_value _name[] = {                                       \
-        ZMK_CUSTOM_SETTINGS_INT32_LIST(__VA_ARGS__)}
+    static const int32_t _name[] = {__VA_ARGS__}
 
-#define ZMK_CUSTOM_SETTINGS_INT32_LIST(...)                                                        \
-    FOR_EACH(ZMK_CUSTOM_SETTINGS_INT32_LIST_ITEM, (, ), __VA_ARGS__)
-#define ZMK_CUSTOM_SETTINGS_INT32_LIST_ITEM(_value)                                                \
-    {.type = ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32, .int32_value = (_value)}
+#define ZMK_CUSTOM_SETTING_ARRAY_STRIDE(_type)                                                     \
+    ((_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_INT32  ? sizeof(int32_t)                             \
+     : (_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_BOOL ? sizeof(bool)                                \
+     : (_type) == ZMK_CUSTOM_SETTING_VALUE_TYPE_BEHAVIOR                                           \
+         ? sizeof(struct zmk_custom_setting_behavior_value)                                        \
+         : sizeof(struct zmk_custom_setting_blob))
 
 /*
  * Iterate every compile-time registered setting (STRUCT_SECTION_ITERABLE, via
@@ -795,10 +547,6 @@ const struct zmk_custom_setting *zmk_custom_setting_find(const char *custom_subs
 /* Find any element of an array setting by its public base key. */
 const struct zmk_custom_setting *zmk_custom_setting_find_array(const char *custom_subsystem_id,
                                                                const char *key);
-/* Find one element of an array setting by its public base key and element index. */
-const struct zmk_custom_setting *
-zmk_custom_setting_find_array_element(const char *custom_subsystem_id, const char *key,
-                                      uint32_t index);
 /* Return the public key exposed by RPC. Array elements return their base key. */
 const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setting);
 /* static inline (not out-of-line) so it folds to a compile-time constant
@@ -808,7 +556,11 @@ const char *zmk_custom_setting_public_key(const struct zmk_custom_setting *setti
  * (defined in src/custom_settings_array.c, not compiled when the feature is
  * off) are dropped by the linker without an #ifdef at each call site. */
 static inline bool zmk_custom_setting_is_array(const struct zmk_custom_setting *setting) {
+#ifdef CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
     return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) && setting && setting->array_key != NULL;
+#else
+    return IS_ENABLED(CONFIG_ZMK_CUSTOM_SETTINGS_ARRAY) && setting && setting->is_array;
+#endif
 }
 /* Return the active array length for an array element. */
 uint32_t zmk_custom_setting_array_size(const struct zmk_custom_setting *setting);
@@ -911,24 +663,6 @@ bool zmk_custom_setting_has_unsaved_value(const struct zmk_custom_setting *setti
 /* Validate value type and all constraints for a setting without writing it. */
 int zmk_custom_setting_validate(const struct zmk_custom_setting *setting,
                                 const struct zmk_custom_setting_value *value);
-
-/*
- * Replace a setting's default value with one resolved at boot time (e.g. from
- * devicetree data that needs behavior local IDs or other runtime-only state
- * to encode). `value` must point to storage that outlives the setting -
- * typically a caller-owned static/BSS-resident struct - since only the
- * pointer is stored, not a copy.
- *
- * Also refreshes the effective (memory) value to match, but only if no
- * persistent value has been loaded and no write has happened yet - so this
- * is safe to call from any SYS_INIT regardless of ordering relative to this
- * module's own registry init, as long as it runs before settings_load()
- * (which always happens later, from main()). Once a persisted or written
- * value exists, this only changes what a later save/discard/reset falls
- * back to.
- */
-int zmk_custom_setting_set_default(const struct zmk_custom_setting *setting,
-                                   const struct zmk_custom_setting_value *value);
 
 /*
  * View-based read/write API.
@@ -1160,27 +894,17 @@ int zmk_custom_setting_record_get(const struct zmk_custom_setting *setting,
 
 struct zmk_custom_setting_keyspace;
 
-/* Bound for a slot's ordinal storage-name buffer ("<key_prefix>#<index>" +
- * NUL); generous relative to the key_prefix lengths any keyspace is likely
- * to use plus room for CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN worth of
- * digits/prefix and then some - see ZMK_CUSTOM_SETTING_KEYSPACE_DEFINE's
- * BUILD_ASSERT that ties a keyspace's own max_key_len to this same config. */
-#define ZMK_CUSTOM_SETTINGS_KEYSPACE_ORDINAL_NAME_SIZE (CONFIG_ZMK_CUSTOM_SETTINGS_KEY_MAX_LEN + 16)
-
 struct zmk_custom_setting_keyspace_slot {
     bool in_use;
-    /* This slot's stable storage identity, "<key_prefix>#<index>" - see the
-     * keyspace design comment above. Generated once when the slot is
-     * (re)bound (zmk_custom_setting_keyspace_create or the settings-load
-     * bind path) and pointed to by `setting.key` for the descriptor's
-     * lifetime; the *content* is only ever this slot's own fixed ordinal
-     * index formatted with this keyspace's key_prefix, so it never actually
-     * changes after the first bind in practice. */
-    char ordinal_name[ZMK_CUSTOM_SETTINGS_KEYSPACE_ORDINAL_NAME_SIZE];
+    uint32_t generation; /* Reuse invalidates saved handles; never wraps. */
     /* A slot descriptor is a runtime-built RAM instance of the (normally
      * const/flash) struct zmk_custom_setting, so it embeds its own state
      * block right here; keyspace_bind_slot_locked points setting.state at it. */
+#ifdef CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
     struct zmk_custom_setting_state state;
+#else
+    struct zmk_custom_setting_blob_state state;
+#endif
     struct zmk_custom_setting setting;
 };
 
@@ -1433,3 +1157,13 @@ zmk_custom_setting_keyspace_of(const struct zmk_custom_setting *setting) {
         .slots = _name##_slots,                                                                    \
         .large_pool = &_name##_pool,                                                               \
     }
+
+#ifdef CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
+#include <cormoran/zmk/custom_settings/compat/api.h>
+#endif
+
+#ifndef CONFIG_ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
+#define ZMK_CUSTOM_SETTING_LEGACY_DEFAULTS_INIT(defaults_)
+#endif
+
+#include <cormoran/zmk/custom_settings/value_view.h>

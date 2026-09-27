@@ -11,6 +11,7 @@
 #include <zephyr/sys/util.h>
 
 #include <cormoran/zmk/custom_settings.h>
+#include "custom_settings_internal.h"
 
 static size_t bounded_len(const char *str, size_t max_len) {
     size_t len = 0;
@@ -151,15 +152,33 @@ int zmk_custom_setting_record_set(const struct zmk_custom_setting *setting,
         }
     }
 
-    uint8_t encoded[CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE];
+    k_mutex_lock(&custom_settings_lock, K_FOREVER);
     size_t encoded_size;
-    int ret =
-        zmk_custom_setting_record_encode(schema, record, encoded, sizeof(encoded), &encoded_size);
-    if (ret < 0) {
-        return ret;
+    int ret = zmk_custom_setting_record_encode(schema, record, custom_settings_edit_bytes,
+                                               CUSTOM_SETTINGS_EDIT_SIZE, &encoded_size);
+    if (ret == 0) {
+        ret =
+            zmk_custom_setting_write_bytes(setting, custom_settings_edit_bytes, encoded_size, mode);
     }
+    k_mutex_unlock(&custom_settings_lock);
+    return ret;
+}
 
-    return zmk_custom_setting_write_bytes(setting, encoded, encoded_size, mode);
+struct record_read_context {
+    const struct zmk_custom_setting_record_schema *schema;
+    void *record;
+    int result;
+};
+
+static void record_read_raw(const uint8_t *data, size_t size, void *user_data) {
+    struct record_read_context *context = user_data;
+    context->result =
+        zmk_custom_setting_record_decode(context->schema, data, size, context->record);
+}
+
+static void record_read_carrier(const struct zmk_custom_setting_value_view *value,
+                                void *user_data) {
+    record_read_raw(value->bytes_value, value->size, user_data);
 }
 
 int zmk_custom_setting_record_get(const struct zmk_custom_setting *setting,
@@ -169,12 +188,10 @@ int zmk_custom_setting_record_get(const struct zmk_custom_setting *setting,
         return -EINVAL;
     }
 
-    uint8_t encoded[CONFIG_ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE];
-    size_t encoded_size;
-    int ret = zmk_custom_setting_read_into(setting, encoded, sizeof(encoded), &encoded_size, NULL);
-    if (ret < 0) {
-        return ret;
+    struct record_read_context context = {.schema = schema, .record = record};
+    int ret = zmk_custom_setting_with_large_raw_bytes(setting, record_read_raw, &context);
+    if (ret == -ENOTSUP) {
+        ret = zmk_custom_setting_with_view(setting, record_read_carrier, &context);
     }
-
-    return zmk_custom_setting_record_decode(schema, encoded, encoded_size, record);
+    return ret < 0 ? ret : context.result;
 }

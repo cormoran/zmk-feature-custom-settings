@@ -70,6 +70,7 @@ function App() {
       <header className="app-header">
         <h1>ZMK Custom Settings</h1>
         <p>Device settings console</p>
+        <a href="./architecture.html">コードとメモリの構造</a>
       </header>
 
       <ZMKConnection

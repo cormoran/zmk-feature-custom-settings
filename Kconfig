@@ -1,9 +1,42 @@
+config ZMK_CUSTOM_SETTINGS_STUDIO_HELPERS
+    bool
+    default y if ZMK_STUDIO
+    depends on ZMK_STUDIO
+    help
+      Builds small shared helpers used by custom Studio RPC modules. This is
+      independent of the custom-settings registry and does not pull in its
+      RPC, array, keyspace, or persistence implementation.
+
+config ZMK_CUSTOM_SETTINGS_STUDIO_RESPONSE_BUFFER_SIZE
+    int "Shared custom Studio response buffer size"
+    default 312 if 64BIT
+    default 264
+    range 1 2048
+    depends on ZMK_CUSTOM_SETTINGS_STUDIO_HELPERS
+    help
+      Size of the single response buffer shared by migrated custom Studio
+      subsystems. Studio dispatches one custom request at a time; a generation
+      check rejects encoding if a later request reused the buffer first.
+
 config ZMK_CUSTOM_SETTINGS
     bool "Enable custom settings"
     select SETTINGS
     select ZMK_LOW_PRIORITY_WORK_QUEUE
 
 if ZMK_CUSTOM_SETTINGS
+
+config ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
+    bool "Keep legacy descriptor adapters"
+    default y
+    help
+      Enable borrowed array-view pointers, runtime default overrides,
+      carrier-form array defaults and hand-written fixed blob stores.
+      Disable after migrating callers to stable refs and typed defaults.
+      This removes their fields and translation units; it does not disable
+      arrays, persistence or Studio RPC. The core always uses compact views;
+      OFF also replaces owning public value carriers and static metadata
+      values with compact pointer-based values. Migrate copied reads to
+      caller-owned buffers before disabling compatibility.
 
 # settings_load() runs on the main thread at boot, and this module's load
 # path (pool-backed large values, keyspace slot binding + blob decode) needs
@@ -20,10 +53,10 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     int "Maximum single-frame custom setting value size"
     default 64
     range 1 64 if ZMK_CUSTOM_SETTINGS_PROTOBUF
+    range 1 65000
     help
-      Size of the struct zmk_custom_setting_value API exchange carrier
-      (stack-allocated by zmk_custom_setting_read/write callers and used by
-      the array feature's element storage) and the single-frame RPC value
+      Size of the legacy owning value carrier (when compatibility is enabled)
+      and the single-frame RPC value
       bound: the largest value an incoming single-frame write can carry.
       Since simplification P4 this does NOT size any per-setting storage -
       a BYTES/STRING setting's value lives in an exact-size buffer or pool
@@ -34,18 +67,29 @@ config ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
       is written over the chunked WriteValueChunk RPC and read via the
       ordinary (streamed) GetSetting.
 
+config ZMK_CUSTOM_SETTINGS_POOL_SIZE
+    int "Shared budget for plain blobs and variable array elements"
+    default 512
+    range 1 65534
+    help
+      Live bytes only. Unmodified defaults refer directly to ROM. Explicit
+      POOLED/SIZED registrations retain their own budgets. Exhaustion returns
+      ENOSPC without changing the value. Strings include their trailing NUL.
+
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUES
-    bool "Enable large (>single-frame) setting values and the shared value pool"
+    bool "Enable large (>single-frame) setting values"
     default y
     help
-      Compiles in per-setting large values and the shared large-value pool
+      Enables explicit large values
       (ZMK_CUSTOM_SETTING_DEFINE_SIZED / _POOLED / LARGE_POOL_DEFINE, the
       chunked write RPC, and the >carrier read/write firmware API). Disable to
-      shrink firmware when every setting fits
+      omit large-value transport when every setting fits
       CONFIG_ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE. Keyspaces require this.
+      Small blobs and variable array elements still use the shared allocator.
 
 config ZMK_CUSTOM_SETTINGS_LARGE_VALUE_MAX_SIZE
     int "Maximum per-setting large value size"
+    range 1 65000
     default ZMK_CUSTOM_SETTINGS_VALUE_MAX_SIZE
     help
       Absolute ceiling for a single setting's per-setting max_size
@@ -197,6 +241,7 @@ config ZMK_CUSTOM_SETTINGS_ARRAY
       Disable to shrink firmware when no setting is an array.
 
 config ZMK_CUSTOM_SETTINGS_ARRAY_VIEW_POOL_SIZE
+    depends on ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
     int "Array element index view pool size"
     default 16
     range 1 64
@@ -246,5 +291,13 @@ config ZMK_CUSTOM_SETTINGS_TEST
 
 config ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES
     bool "Enable custom settings samples for tests/zmk-config"
+
+config ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_TYPED_SAMPLES
+    bool "Use typed registration samples"
+    depends on ZMK_CUSTOM_SETTINGS_ZMK_CONFIG_SAMPLES
+    default y if !ZMK_CUSTOM_SETTINGS_LEGACY_COMPAT
+    help
+      Build identical sample settings with either descriptor layout, for
+      comparing compatibility costs. This only affects the test fixtures.
 
 endif
